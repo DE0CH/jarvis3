@@ -288,6 +288,16 @@ export function defineRoutes(ctx: Ctx): Routes {
   return routes;
 }
 
+/**
+ * Cross-site request / WebSocket hijacking guard: a browser attaches the Access cookie to requests
+ * any site starts, so a state-changing request or a WebSocket upgrade that carries an Origin must
+ * come from the instance's own origin. Native apps and sessions send no Origin.
+ */
+function checkOrigin(ctx: Ctx, req: IncomingMessage): void {
+  const origin = req.headers.origin;
+  if (origin && origin !== ctx.config.publicUrl) throw httpError("forbidden", "cross-origin request refused");
+}
+
 // ---- plumbing ------------------------------------------------------------------------------------------
 
 const MAX_BODY = 1024 * 1024;
@@ -340,6 +350,7 @@ export function makeHandler(ctx: Ctx, resolveDeps: ResolveDeps, routes: Routes) 
       const m = rt.re.exec(url.pathname)!;
       const params: Record<string, string> = {};
       rt.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1]!)));
+      if (req.method !== "GET" && req.method !== "HEAD") checkOrigin(ctx, req);
       const principal = rt.auth ? await resolvePrincipal(req, resolveDeps) : null;
       const out = await rt.handler({ req, url, params, principal, body: () => readBody(req) });
       if (out.redirect) {
@@ -377,6 +388,7 @@ export function makeUpgradeHandler(ctx: Ctx, resolveDeps: ResolveDeps) {
     socket.on("error", () => socket.destroy());
     try {
       const url = new URL(req.url || "/", "http://local");
+      checkOrigin(ctx, req);
       const principal = await resolvePrincipal(req, resolveDeps);
       if (url.pathname === "/api/session/channel") {
         authorize(principal, { kind: "session" });

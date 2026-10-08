@@ -99,3 +99,28 @@ test("unknown paths are refused at upgrade", () =>
   withTask(async (h, alice) => {
     await assert.rejects(openWs(h, await asEmail(h, alice), "/api/nope"), (e: { status?: number }) => e.status === 404);
   }));
+
+test("cross-origin: a foreign Origin can't open the daemon or change state; the instance's own origin can", () =>
+  withTask(async (h, alice, task) => {
+    const s = await fakeSession(h, task);
+    const jwt = (await asEmail(h, alice)).jwt!;
+    const { WebSocket } = await import("ws");
+    const refused = await new Promise<number>((resolve) => {
+      const ws = new WebSocket(`${h.wsBase}/api/tasks/${task}/daemon`, { headers: { "cf-access-jwt-assertion": jwt, origin: "https://evil.example.net" } });
+      ws.once("unexpected-response", (_q, res) => resolve(res.statusCode!));
+      ws.once("open", () => resolve(101));
+    });
+    assert.equal(refused, 403);
+    const ok = new WebSocket(`${h.wsBase}/api/tasks/${task}/daemon`, { headers: { "cf-access-jwt-assertion": jwt, origin: "https://jarvis.example.org" } });
+    await new Promise((r) => ok.once("open", r));
+    ok.close();
+    const post = await fetch(`${h.base}/api/tasks`, {
+      method: "POST",
+      headers: { "cf-access-jwt-assertion": jwt, origin: "https://evil.example.net", "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "csrf" }),
+    });
+    assert.equal(post.status, 403);
+    const get = await fetch(`${h.base}/api/tasks`, { headers: { "cf-access-jwt-assertion": jwt, origin: "https://evil.example.net" } });
+    assert.equal(get.status, 200, "reads are harmless (CORS keeps the answer from the foreign page)");
+    s.ws.close();
+  }));
