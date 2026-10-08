@@ -72,14 +72,12 @@ web page until that is in place. Not available: the Enterprise Program (Apple re
 
 ## Employee view (for the admin to develop and debug)
 
-- **View as a role.** An admin switches the app into a role's view (e.g. `staff`): the same screens,
-  buttons and limits a member of that role gets, and new sessions started in this view get exactly that
-  role's layers and capabilities, running on the admin's own account and spend. The app shows a persistent
-  banner while in this view, with one tap back to the admin view. This is how the admin develops the staff
-  experience and tests a role change before staff see it.
-- **Look at a user's session (read-only).** For debugging a specific person's problem, an admin can open
-  that user's sessions, transcripts and personal layer read-only. Each such look is logged.
-  Admins never act as another user (no sending or approving in their name).
+The admin tests the staff experience with a **separate test identity**: an ordinary user in the
+organisation's identity provider, in the staff group, with the same kind of licence a real employee has
+(KAMYEE: `test-staff@kamyeegroup.com`, a paid Workspace Business Starter seat, so its own Gmail, Drive and
+Calendar work too). The admin signs in as it in a second browser profile or on a second device and runs the
+whole chain as staff do: identity login, Access, device pairing, the staff role and capabilities, and
+approvals that arrive at the admin's own account. Jarvis 3 has no impersonation or "view as" mode.
 
 ## Environment layers (what a session loads)
 
