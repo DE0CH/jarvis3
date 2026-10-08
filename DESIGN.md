@@ -143,3 +143,12 @@ archives and destroys their sessions, and keeps their personal layer and archive
 - Role definitions and the first Tier 2 actions KAMYEE needs.
 - Archive storage per instance.
 - Whether the Jarvis 2 secrets-controller core is reused once it exists.
+
+## Implementation decisions (Deyao, 2026-10-08)
+
+- Server: TypeScript on Node.
+- Each instance's server: single-node k3s + Flux + SOPS.
+- Session machines: Fly Machines, one Fly org per instance (behind a small provider interface, local Docker in CI).
+- The app reaches a session's agent through the instance server: the session dials out, the server checks
+  ownership on every connection and forwards the chat. No Paseo relay, no per-session web addresses.
+- The remaining choices are listed in PLAN-draft.md section 4.
