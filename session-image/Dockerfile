@@ -16,12 +16,13 @@ RUN apt-get update \
  && useradd -m -u 1001 -s /bin/bash jarvis
 
 # OpenCode + the Paseo CLI/daemon. Trims (Jarvis 3 runs OpenCode only):
-#  - opencode copies its platform binary into bin/ at install; the platform packages are copies
-#  - Paseo bundles the Claude Agent SDK's native binary and other agents' SDK binaries: unused
+#  - opencode hard-links its platform binary into bin/opencode.exe at install: the platform
+#    packages (x64 and x64-baseline, 178 MB each) are spare copies
+#  - Paseo bundles the Claude Agent SDK's native binary (250 MB): no Claude here
 RUN npm install -g --omit=dev --no-audit --no-fund opencode-ai@${OPENCODE_VERSION} @getpaseo/cli@${PASEO_VERSION} \
  && npm cache clean --force \
  && cd /usr/local/lib/node_modules \
- && rm -rf opencode-ai/node_modules/opencode-linux-x64-baseline opencode-ai/node_modules/opencode-linux-x64-musl opencode-ai/node_modules/opencode-linux-x64-baseline-musl \
+ && rm -rf opencode-ai/node_modules/opencode-linux-* \
  && find @getpaseo/cli/node_modules/@anthropic-ai -maxdepth 1 -name 'claude-agent-sdk-*' -exec rm -rf {} + \
  && opencode --version && paseo --version
 

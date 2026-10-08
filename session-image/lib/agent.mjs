@@ -141,12 +141,24 @@ function daemonEnv() {
     ...(env.OPENROUTER_BASE_URL ? { OPENROUTER_BASE_URL: env.OPENROUTER_BASE_URL } : {}),
   };
 }
+/**
+ * OpenCode's first start in a fresh home does one-off setup (its database, caches) and Paseo gives
+ * an OpenCode server only 30 s to come up; on a slow shared CPU the first start can miss that. One
+ * throwaway run before the daemon starts takes the one-off cost out of the daemon's path.
+ */
+function warmOpencode() {
+  const { uid, gid } = ids();
+  const t = Date.now();
+  const r = spawnSync("opencode", ["debug", "config"], { cwd: P.workspace, uid, gid, env: daemonEnv(), stdio: "ignore", timeout: 180_000 });
+  log("OpenCode warmed up", { ms: Date.now() - t, status: r.status });
+}
+
 function runDaemon() {
   const { uid, gid } = ids();
   const start = () => {
     if (stopping) return;
     log("starting the Paseo daemon");
-    daemon = spawn("paseo", ["daemon", "start", "--foreground"], { cwd: P.workspace, uid, gid, env: daemonEnv(), stdio: ["ignore", "inherit", "inherit"] });
+    daemon = spawn("paseo", ["daemon", "run", "--home", P.paseo], { cwd: P.workspace, uid, gid, env: daemonEnv(), stdio: ["ignore", "inherit", "inherit"] });
     daemon.on("exit", (code, sig) => {
       daemon = null;
       if (stopping) return;
@@ -172,18 +184,27 @@ async function waitDaemon(timeoutMs = 240_000) {
 
 // ---- 4 + 5. first prompt and status, over one local client connection -----------------------
 
-let client = null;
-async function paseo() {
-  if (client) return client;
-  const c = createPaseoClient({ url: `ws://127.0.0.1:${DAEMON_PORT}${DAEMON_PATH}`, password: PASSWORD, webSocketFactory: (url, o) => new WebSocket(url, o?.protocols, { headers: o?.headers }) });
-  await c.connect();
-  client = c;
-  return c;
+let client = null; // a promise of one connected client, shared by the first prompt and the status loop
+function paseo() {
+  client ??= (async () => {
+    const c = createPaseoClient({ url: `ws://127.0.0.1:${DAEMON_PORT}${DAEMON_PATH}`, password: PASSWORD, webSocketFactory: (url, o) => new WebSocket(url, o?.protocols, { headers: o?.headers }) });
+    try {
+      await c.connect();
+    } catch (e) {
+      c.close().catch(() => {});
+      throw e;
+    }
+    return c;
+  })().catch((e) => {
+    client = null;
+    throw e;
+  });
+  return client;
 }
 function dropClient() {
-  const c = client;
+  const p = client;
   client = null;
-  c?.close().catch(() => {});
+  p?.then((c) => c.close()).catch(() => {});
 }
 
 const mainAgentFile = () => join(P.jarvis, "main-agent");
@@ -196,6 +217,7 @@ async function sendFirstPrompt() {
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
       const c = await paseo();
+      log("creating the main agent", { attempt });
       const agent = await c.agents.create({ config: { provider: `opencode/openrouter/${MODEL}` }, cwd: P.workspace, prompt });
       writeFileSync(mainAgentFile(), agent.id);
       writeFileSync(marker, new Date().toISOString());
@@ -275,6 +297,7 @@ async function main() {
   log("jarvis-agent starting", { version: VERSION, task: env.JARVIS_TASK_ID, model: MODEL });
   await loadLayers();
   const local = localApi();
+  warmOpencode();
   runDaemon();
   if (!(await waitDaemon())) log("the Paseo daemon did not come up in time; carrying on");
   const channel = startChannel({

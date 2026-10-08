@@ -9,13 +9,14 @@
 // session-image/. Run: npm test (in integration/).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { WebSocket } from "ws";
 import { createPaseoClient, type PaseoClient } from "@getpaseo/client";
 import { startStack, MODEL, type Stack } from "./stack.ts";
 
 const IMAGE = process.env.SESSION_IMAGE || "jarvis3-session:test";
 const BOOT_MS = Number(process.env.BOOT_TIMEOUT_MS || 240_000);
-const TURN_MS = 120_000;
+const TURN_MS = Number(process.env.TURN_TIMEOUT_MS || 240_000);
 
 let s: Stack;
 const t0 = Date.now();
@@ -46,6 +47,7 @@ async function waitFor<T>(what: string, fn: () => Promise<T | null | undefined |
       const v = await fn();
       if (v) return v as T;
     } catch (e) {
+      if ((e as { fatal?: boolean }).fatal) throw e;
       last = e;
     }
     if (Date.now() > end) throw new Error(`timed out waiting for ${what}${last ? `: ${(last as Error).message}` : ""}`);
@@ -90,7 +92,7 @@ function wsStatus(email: string | null, path: string): Promise<number> {
 async function exec(machineId: string, script: string): Promise<string> {
   const r = await s.machines.exec(machineId, ["sh", "-c", script], 30);
   if (r.exitCode !== 0) throw new Error(`exec failed (${r.exitCode}): ${r.stderr}`);
-  return r.stdout;
+  return r.stdout.trim();
 }
 
 async function machineOf(taskId: string): Promise<string> {
@@ -101,6 +103,21 @@ async function machineOf(taskId: string): Promise<string> {
 
 const s3exists = async (key: string) => (await s.s3.fetch(`${s.bucketUrl}/${key}`, { method: "HEAD" })).ok;
 
+/** On a failure: what the model was asked, and the session machines' own logs. */
+function diagnose(): void {
+  for (const c of s.openrouter.chats) log(`[model] ${JSON.stringify({ key: c.key.slice(-6), tools: c.tools.length, lastRole: c.lastRole, lastUser: c.lastUser.slice(-120), reply: c.reply })}`);
+  try {
+    const ids = execFileSync("docker", ["ps", "-aq", "--filter", `label=jarvis3.instance=itest`], { encoding: "utf8" }).split("\n").filter(Boolean);
+    for (const id of ids) {
+      const out = execFileSync("docker", ["logs", "--tail", "400", id], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      const lines = out.split("\n").filter((l) => !/"level":(20|30)\b/.test(l)).slice(-80);
+      log(`[machine ${id}]\n${lines.map((l) => l.slice(0, 400)).join("\n")}`);
+    }
+  } catch (e) {
+    log(`(no machine logs: ${(e as Error).message})`);
+  }
+}
+
 const ALICE = "alice@example.org";
 const BOB = "bob@example.org";
 const ADMIN = "admin@example.org";
@@ -109,8 +126,20 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
   let taskId = "";
   let aliceUserId = "";
   let agentId = "";
+  // the steps build on each other: after the first failure, skip the rest
+  let broken = false;
+  const step = (name: string, fn: () => Promise<void>) =>
+    t.test(name, { skip: broken ? "an earlier step failed" : false }, async () => {
+      try {
+        await fn();
+      } catch (e) {
+        broken = true;
+        diagnose();
+        throw e;
+      }
+    });
 
-  await t.test("alice's personal layer, then New task", async () => {
+  await step("alice's personal layer, then New task", async () => {
     const me = await call(ALICE, "GET", "/api/me");
     aliceUserId = me.body.user.id;
     assert.equal((await call(ALICE, "PUT", "/api/users/me/layer/instructions", { text: "PERSONAL-MARK: answer briefly." })).status, 200);
@@ -123,7 +152,7 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.equal(s.openrouter.liveKeys().length, 1, "alice's OpenRouter key was minted");
   });
 
-  await t.test("the machine boots and the daemon dials in", async () => {
+  await step("the machine boots and the daemon dials in", async () => {
     const task = await waitFor(
       "the task to be running and connected",
       async () => {
@@ -137,7 +166,7 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     log(`task ${taskId} is ${task.state}`);
   });
 
-  await t.test("the layers are in the machine, in the right order, policy last", async () => {
+  await step("the layers are in the machine, in the right order, policy last", async () => {
     const m = await machineOf(taskId);
     const ins = await exec(m, "cat /home/jarvis/.jarvis/instructions.md");
     const marks = ["# Jarvis session", "ORG-MARK", "ROLE-MARK: staff", "PERSONAL-MARK", "POLICY-MARK"].map((k) => ins.indexOf(k));
@@ -158,12 +187,15 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.equal((await exec(m, "cat /home/jarvis/org/scripts/hello.sh")).includes("hello from the org"), true);
     assert.equal(await exec(m, "su jarvis -s /bin/sh -c 'touch /home/jarvis/org/x 2>/dev/null && echo writable || echo read-only'"), "read-only");
     // the session token and the gate secret are not in the daemon's (and so the agent's) env
-    const denv = await exec(m, "cat /proc/$(pgrep -u jarvis -f 'daemon' | head -1)/environ | tr '\\0' '\\n' | cut -d= -f1 | sort");
-    assert.ok(denv.includes("OPENROUTER_API_KEY"));
+    // (every process of the agent's user: the daemon, OpenCode, the shells it runs)
+    // (read as `jarvis` itself, from a clean env: root in a container lacks CAP_SYS_PTRACE for another
+    // uid's environ, and an exec inherits the container env, which has the token)
+    const denv = await exec(m, "env -i /bin/su jarvis -s /bin/sh -c 'for p in $(pgrep -u jarvis); do tr \"\\\\000\" \"\\\\n\" < /proc/$p/environ 2>/dev/null; echo; done' | cut -d= -f1 | sort -u");
+    assert.ok(denv.includes("OPENROUTER_API_KEY"), denv);
     assert.ok(!denv.includes("JARVIS_SESSION_TOKEN") && !denv.includes("CF_ACCESS_CLIENT_SECRET"), denv);
   });
 
-  await t.test("the first prompt reached the model with alice's key and the layered system prompt", async () => {
+  await step("the first prompt reached the model with alice's key and the layered system prompt", async () => {
     const chat = await waitFor("the first prompt at the model", async () => s.openrouter.chats.find((c) => c.lastUser.includes("FIRST-PROMPT") && c.tools.length), TURN_MS);
     assert.equal(chat.key, s.openrouter.liveKeys()[0], "alice's own capped key");
     assert.equal(chat.model, MODEL);
@@ -173,7 +205,7 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.ok(chat.tools.includes("bash"));
   });
 
-  await t.test("chat round-trips through the server's daemon proxy (Paseo client SDK)", async () => {
+  await step("chat round-trips through the server's daemon proxy (Paseo client SDK)", async () => {
     const client = await paseoAs(ALICE, taskId);
     try {
       const list = await client.agents.list();
@@ -190,7 +222,7 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     }
   });
 
-  await t.test("'remember' runs jarvis-remember and lands in alice's personal layer", async () => {
+  await step("'remember' runs jarvis-remember and lands in alice's personal layer", async () => {
     const client = await paseoAs(ALICE, taskId);
     try {
       const r = await client.agents.ref(agentId).run("Please remember: My manager is Dana", { timeoutMs: TURN_MS });
@@ -206,7 +238,7 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.equal(note.taskId, taskId);
   });
 
-  await t.test("another user gets 404 on the task and on the daemon socket; the admin sees it", async () => {
+  await step("another user gets 404 on the task and on the daemon socket; the admin sees it", async () => {
     assert.equal((await call(BOB, "GET", `/api/tasks/${taskId}`)).status, 404);
     assert.equal((await call(BOB, "POST", `/api/tasks/${taskId}/pause`)).status, 404);
     assert.equal(await wsStatus(BOB, `/api/tasks/${taskId}/daemon`), 404);
@@ -216,16 +248,16 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.equal((await call(BOB, "GET", `/api/users/${aliceUserId}/layer`)).status, 404);
   });
 
-  await t.test("the task reports idle when the agent is done", async () => {
+  await step("the task reports idle when the agent is done", async () => {
     await waitFor("idle", async () => (await taskOf(ALICE, taskId)).state === "idle", 30_000);
   });
 
-  await t.test("pause: snapshot in the bucket, machine gone", async () => {
+  await step("pause: snapshot in the bucket, machine gone", async () => {
     const r = await call(ALICE, "POST", `/api/tasks/${taskId}/pause`);
     assert.equal(r.status, 202, JSON.stringify(r.body));
     const v = await waitFor("paused", async () => {
       const x = await taskOf(ALICE, taskId);
-      if (x.state !== "pausing" && x.state !== "paused") throw new Error(`pause failed: ${x.state} ${x.error}`);
+      if (x.state !== "pausing" && x.state !== "paused") throw Object.assign(new Error(`pause failed: ${x.state} ${x.error}`), { fatal: true });
       return x.state === "paused" && !x.busy ? x : null;
     }, 5 * 60_000);
     assert.equal(v.pausedReason, "user");
@@ -235,11 +267,11 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.equal(await wsStatus(ALICE, `/api/tasks/${taskId}/daemon`), 503);
   });
 
-  await t.test("resume: a new machine, the same conversation", async () => {
+  await step("resume: a new machine, the same conversation", async () => {
     assert.equal((await call(ALICE, "POST", `/api/tasks/${taskId}/resume`)).status, 202);
     await waitFor("running again", async () => {
       const x = await taskOf(ALICE, taskId);
-      if (x.state === "paused" && !x.busy) throw new Error(`resume failed: ${x.error}`);
+      if (x.state === "paused" && !x.busy) throw Object.assign(new Error(`resume failed: ${x.error}`), { fatal: true });
       return x.connected && (x.state === "running" || x.state === "idle") ? x : null;
     }, BOOT_MS, 2000);
     const m = await machineOf(taskId);
@@ -262,11 +294,11 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     }
   });
 
-  await t.test("destroy: archive in the bucket, machine gone, task archived", async () => {
+  await step("destroy: archive in the bucket, machine gone, task archived", async () => {
     assert.equal((await call(ALICE, "DELETE", `/api/tasks/${taskId}`)).status, 202);
     const v = await waitFor("archived", async () => {
       const x = await taskOf(ALICE, taskId);
-      if (!["destroying", "archived"].includes(x.state)) throw new Error(`destroy failed: ${x.state} ${x.error}`);
+      if (!["destroying", "archived"].includes(x.state)) throw Object.assign(new Error(`destroy failed: ${x.state} ${x.error}`), { fatal: true });
       return x.state === "archived" && !x.busy ? x : null;
     }, 5 * 60_000);
     assert.equal(v.error, null);

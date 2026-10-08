@@ -72,7 +72,7 @@ function makeOrgRepo(dir: string): { mirror: string; commit: string } {
 async function startMinio(gw: string): Promise<{ endpoint: string; container: string; key: string; secret: string }> {
   const key = "itest" + randomBytes(4).toString("hex");
   const secret = randomBytes(16).toString("hex");
-  const container = sh("docker", ["run", "-d", "--rm", "--label", `jarvis3.itest=${INSTANCE}`, "-p", "0:9000", "-e", `MINIO_ROOT_USER=${key}`, "-e", `MINIO_ROOT_PASSWORD=${secret}`, process.env.MINIO_IMAGE || "minio/minio:latest", "server", "/data"]);
+  const container = sh("docker", ["run", "-d", "--rm", "--label", `jarvis3.itest=${INSTANCE}`, "-p", "0:9000", "-e", `MINIO_ROOT_USER=${key}`, "-e", `MINIO_ROOT_PASSWORD=${secret}`, process.env.MINIO_IMAGE || "cgr.dev/chainguard/minio:latest", "server", "/tmp/minio-data"]);
   const port = sh("docker", ["port", container, "9000/tcp"]).split("\n")[0]!.split(":").at(-1)!;
   const endpoint = `http://${gw}:${port}`;
   for (let i = 0; i < 60; i++) {

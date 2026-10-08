@@ -69,7 +69,7 @@ jobs:
       - run: npm run typecheck
         working-directory: integration
       - name: pull MinIO
-        run: docker pull minio/minio:latest
+        run: docker pull cgr.dev/chainguard/minio:latest
       - name: integration test
         working-directory: integration
         env:

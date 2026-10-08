@@ -143,6 +143,14 @@ export function script(messages: Msg[], hasTools: boolean): Reply {
     return { text: `TOOL RESULT: ${out}` };
   }
   const user = lastUserText(messages);
+  // Paseo asks the agent's model for structured answers (e.g. a title + branch name) with a JSON
+  // schema in the prompt: answer with the schema's required keys.
+  const schema = /"required"\s*:\s*\[([^\]]*)\]/.exec(user);
+  if (schema && /JSON/i.test(user)) {
+    const keys = [...schema[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    return { text: JSON.stringify(Object.fromEntries(keys.map((k) => [k, k === "branch" ? "scripted-title" : "Scripted title"]))) };
+  }
+  if (/is not valid JSON|matches the schema/i.test(user)) return { text: JSON.stringify({ title: "Scripted title", branch: "scripted-title" }) };
   const remember = /remember:\s*(.+)/i.exec(user);
   if (remember) {
     const note = remember[1]!.trim().replace(/["\\$`]/g, "");

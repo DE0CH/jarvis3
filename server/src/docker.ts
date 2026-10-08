@@ -9,7 +9,8 @@ import type { ExecResult, MachineInfo, MachineProvider, MachineSpec, MachineStat
 import { httpError } from "./errors.ts";
 import { randomId } from "./crypto.ts";
 
-const API = "/v1.41";
+// Unversioned paths: the engine answers with its own API version (Docker 29 refuses clients below 1.44).
+const API = "";
 const L_INSTANCE = "jarvis3.instance";
 const L_NAME = "jarvis3.name";
 const L_GUEST = "jarvis3.guest";
