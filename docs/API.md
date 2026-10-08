@@ -409,6 +409,14 @@ What the server gives a machine (env) and expects from the session image (built 
 
 Nothing else: no provider tokens, no storage credentials, no Access identity of any person.
 
+The local-Docker provider (CI and local runs only) can set or replace env values per machine
+(`machines.envOverrides`): `JARVIS_URL` as the containers reach the server, and
+`OPENROUTER_BASE_URL`, which the image honours as an OpenAI-compatible endpoint in place of
+OpenRouter (the integration test's stub). A production machine never gets it.
+
+The image's side (boot sequence, layout, what is kept in a snapshot) is in
+[`SESSION-IMAGE.md`](SESSION-IMAGE.md).
+
 **Snapshot command.** The image provides `/usr/local/bin/jarvis-snapshot`:
 
 - `jarvis-snapshot start <run> <presigned PUT url>` — start, detached, a tarball of the session's

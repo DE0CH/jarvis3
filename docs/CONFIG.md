@@ -23,7 +23,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `bootstrapAdmins` | emails that get the first admin role whatever their groups say (suspension still wins) |
 | `roles` | role → `{openrouterMonthlyUsd, machineHoursPerMonth, admin?}`. `null` = no limit. Key order is the precedence when a user is in several mapped groups. At least one role has `admin: true` |
 | `models`, `defaultModel` | the curated OpenRouter model list (`{id, label}`) and its default |
-| `machines` | Fly: `app` (one per instance), `org`, `region`, session `image`, `guest` size, `rootfsGb` |
+| `machines` | `kind: "fly"`: `app` (one per instance), `org`, `region`, session `image`, `guest` size, `rootfsGb`. `kind: "docker"` (CI and local runs only): `image`, `guest`, `socketPath`, `network`, `envOverrides`, `extraHosts` |
 | `storage` | S3 endpoint, region, bucket (Hetzner Object Storage in the instance's own project) |
 | `orgEnv.mirrorPath` | a bare mirror of the org-env repo kept fetched by the deployment (read-only deploy key) |
 | `orgEnv.commit` | the full 40-hex commit every new session loads; changing it is a deploy |
@@ -40,7 +40,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 |---|---|---|
 | `JARVIS_DB_KEY` | 32 random bytes, base64 — seals OpenRouter keys and daemon passwords in the database | — |
 | `OPENROUTER_MANAGEMENT_KEY` | OpenRouter management (provisioning) key | create/update/delete API keys |
-| `FLY_API_TOKEN` | Fly token for the instance's session app | that app only |
+| `FLY_API_TOKEN` | Fly token for the instance's session app (with `machines.kind: "fly"`) | that app only |
 | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | bucket credentials | the instance bucket |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | (google directory) the service account key JSON | domain-wide delegation with `admin.directory.user.readonly` and `admin.directory.group.member.readonly` only |
 | `CF_DEVICE_TOKENS_API` | Cloudflare API token | Access: Service Tokens edit, nothing else |

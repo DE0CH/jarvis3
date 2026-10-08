@@ -42,8 +42,9 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
    daemon is up.
 10. **A `failed` task can only be destroyed** (no retry); the user starts a new task.
 11. **One server replica.** Session channels live in the process's memory.
-12. **No local-Docker MachineProvider yet.** PLAN wants one for CI integration runs; tests use the
-    in-memory fake. The Fly implementation is ported from Jarvis 1 but untested against real Fly.
+12. **Local-Docker MachineProvider** (`server/src/docker.ts`, `machines.kind: "docker"`) runs the
+    integration test and local runs; it is not for production (a container is not a microVM). The
+    Fly implementation is ported from Jarvis 1 but still untested against real Fly.
 
 ## Spend
 
@@ -77,3 +78,38 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
 
 22. **Model curation is config only.** The server accepts exactly the configured models; checking
     each against OpenCode tool calling is a curation step outside the server.
+
+## Session image (v0.1)
+
+23. **The daemon password rides on a Paseo compatibility path.** The server proxies the app's
+    socket with `paseo.bearer.<password>` as a subprotocol; Paseo marks header/subprotocol auth
+    `COMPAT(headerAuth)`, "remove after 2027-03-24", in favour of the password in the client's
+    `hello` message. Before Paseo drops it, the server's proxy (or the session's channel agent) must
+    put the password into the client's first `hello` frame instead. Pin Paseo until then.
+24. **A platform preamble comes before the org layer.** The image puts a short fixed text first in
+    the instructions (what the machine is, where the org-env tree is, how to `jarvis-remember`), so
+    every org gets the remember command without writing it. It is the lowest-precedence text; the
+    org can contradict it.
+25. **A failed restore boots an empty task.** If the snapshot download or unpack fails on resume,
+    the machine logs it and starts without the old state (the conversation is lost for that
+    machine, the snapshot is still in the bucket). Alternative: don't dial in, so the task stays
+    `starting` and an admin can look. There is no route for a session to report a boot error.
+26. **Deny rules on pattern-less OpenCode permissions** (`webfetch`, `websearch`, `todowrite`,
+    `question`, `doom_loop`) deny the whole permission, whatever the pattern says.
+27. **The session token stays out of the agent's processes.** jarvis-agent (root) holds it; the
+    Paseo daemon, OpenCode and every shell the agent runs (user `jarvis`) get only the OpenRouter
+    key and the daemon password. `jarvis-remember` reaches the server through jarvis-agent's local
+    socket. The integration test checks this. Anything on the machine can still ask jarvis-agent to
+    add a note, which is the point of the command.
+28. **Paseo gives OpenCode 30 s to start** (hard-coded). On a slow shared CPU OpenCode's first start
+    can miss it, so the image runs it once before the daemon starts, and the first prompt is retried.
+    Fly's `shared-cpu-2x` with 2 GB is what the example config uses; smaller is untested.
+29. **The snapshot is the whole home directory** (minus the org-env tree, generated layers and
+    caches), taken while the daemon runs. OpenCode's SQLite files are copied live; SQLite recovers
+    from that, but a write mid-copy could lose the last moments. Pausing the daemon's agents first
+    would make it exact.
+30. **MinIO for CI comes from Chainguard** (`cgr.dev/chainguard/minio`): the `minio/minio` images
+    are no longer published on Docker Hub or Quay. `MINIO_IMAGE` overrides it.
+31. **The session image is pushed to GHCR only after the integration test passes on it**, tagged
+    with the commit (12 hex) and `main`. The package is private until the repo goes public, so an
+    instance needs a pull credential until then (Fly: a registry auth on the app).
