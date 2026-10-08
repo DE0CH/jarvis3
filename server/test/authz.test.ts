@@ -1,0 +1,238 @@
+// The full authorisation matrix: every route and the daemon proxy, as
+//   owner (identity login), owner (paired device), another staff member, admin,
+//   a suspended user, an unknown email, a revoked device, a session token,
+//   the session-gate token without a session token, and no credentials.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  harness,
+  seedUsers,
+  call,
+  asEmail,
+  asService,
+  createTask,
+  fakeSession,
+  openWs,
+  nextMessage,
+  GATE,
+  type Harness,
+  type Cred,
+} from "./helpers.ts";
+
+type Who = "owner" | "ownerDevice" | "other" | "admin" | "suspended" | "unknown" | "revokedDevice" | "session" | "gate" | "none";
+const WHO: Who[] = ["owner", "ownerDevice", "other", "admin", "suspended", "unknown", "revokedDevice", "session", "gate", "none"];
+
+/** Route classes: who may call them. */
+type Kind = "member" | "owned" | "admin" | "session";
+
+interface R {
+  kind: Kind;
+  method: string;
+  path: (ids: Ids) => string;
+  body?: unknown;
+}
+interface Ids {
+  task: string; // alice's task
+  alice: string; // alice's user id
+  device: string; // alice's active device
+  note: string; // a note in alice's layer
+}
+
+// Destructive routes come last so the earlier ones see the resources intact.
+const ROUTES: R[] = [
+  { kind: "member", method: "GET", path: () => "/api/me" },
+  { kind: "member", method: "GET", path: () => "/api/models" },
+  { kind: "member", method: "GET", path: () => "/api/tasks" },
+  { kind: "member", method: "GET", path: () => "/api/devices" },
+  { kind: "member", method: "GET", path: () => "/api/notices" },
+  { kind: "member", method: "POST", path: () => "/api/tasks", body: { prompt: "matrix" } },
+  { kind: "owned", method: "GET", path: (i) => `/api/tasks/${i.task}` },
+  { kind: "owned", method: "GET", path: (i) => `/api/tasks?userId=${i.alice}` },
+  { kind: "owned", method: "GET", path: (i) => `/api/users/${i.alice}` },
+  { kind: "owned", method: "GET", path: (i) => `/api/users/${i.alice}/layer` },
+  { kind: "owned", method: "GET", path: (i) => `/api/users/${i.alice}/layers` },
+  { kind: "owned", method: "PUT", path: (i) => `/api/users/${i.alice}/layer/instructions`, body: { text: "be brief" } },
+  { kind: "owned", method: "PUT", path: (i) => `/api/users/${i.alice}/layer/skills/my-skill`, body: { files: { "SKILL.md": "x" } } },
+  { kind: "owned", method: "POST", path: (i) => `/api/users/${i.alice}/layer/notes`, body: { text: "note" } },
+  { kind: "owned", method: "DELETE", path: (i) => `/api/users/${i.alice}/layer/notes/${i.note}` },
+  { kind: "owned", method: "DELETE", path: (i) => `/api/users/${i.alice}/layer/skills/my-skill` },
+  { kind: "owned", method: "POST", path: (i) => `/api/users/${i.alice}/layer/reset` },
+  { kind: "owned", method: "POST", path: (i) => `/api/users/${i.alice}/layer/undo` },
+  { kind: "admin", method: "GET", path: () => "/api/users" },
+  { kind: "admin", method: "GET", path: () => "/api/tasks?all=1" },
+  { kind: "admin", method: "GET", path: () => "/api/devices?all=1" },
+  { kind: "admin", method: "PATCH", path: (i) => `/api/users/${i.alice}/limits`, body: { machineHoursPerMonth: 20 } },
+  { kind: "admin", method: "GET", path: () => "/api/admin/budget" },
+  { kind: "admin", method: "POST", path: () => "/api/admin/directory/sync" },
+  { kind: "session", method: "GET", path: () => "/api/session/bundle" },
+  { kind: "session", method: "GET", path: () => "/api/session/org-env.tar" },
+  { kind: "session", method: "POST", path: () => "/api/session/notes", body: { text: "remember this" } },
+  { kind: "session", method: "POST", path: () => "/api/session/status", body: { activity: "busy" } },
+  { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/pause` },
+  { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/resume` },
+  { kind: "owned", method: "DELETE", path: (i) => `/api/tasks/${i.task}` },
+  { kind: "owned", method: "DELETE", path: (i) => `/api/devices/${i.device}` },
+];
+
+/** The expected outcome: a status, or "allowed" (anything but 401/403/404 — the handler ran). */
+function expected(who: Who, kind: Kind): number | "allowed" {
+  if (who === "none") return 401;
+  if (who === "suspended" || who === "unknown" || who === "revokedDevice") return 403;
+  if (kind === "session") return who === "session" ? "allowed" : 401;
+  if (who === "session" || who === "gate") return 403;
+  if (who === "admin") return "allowed";
+  if (kind === "member") return "allowed";
+  if (kind === "admin") return 404;
+  return who === "owner" || who === "ownerDevice" ? "allowed" : 404;
+}
+
+async function setup(): Promise<{ h: Harness; ids: Ids; creds: Record<Who, Cred | null> }> {
+  const h = await harness();
+  const u = await seedUsers(h);
+  const aliceCred = await asEmail(h, u.alice);
+  const me = await call(h, aliceCred, "GET", "/api/me");
+  const aliceId = me.body.user.id as string;
+  const task = await createTask(h, u.alice);
+  const s = await fakeSession(h, task);
+  // alice pairs two devices; one is revoked
+  const pair = async () => {
+    h.clock.advance(31_000);
+    const r = await call(h, aliceCred, "GET", "/api/devices/pair?state=abcdefghijklmnop1234&name=phone");
+    const loc = new URL(r.headers.get("location")!);
+    return { id: loc.searchParams.get("id")!, clientId: loc.searchParams.get("clientId")! };
+  };
+  const dev = await pair();
+  const revoked = await pair();
+  assert.equal((await call(h, aliceCred, "DELETE", `/api/devices/${revoked.id}`)).status, 200);
+  const note = await call(h, aliceCred, "POST", `/api/users/${aliceId}/layer/notes`, { text: "seed note" });
+  // suspend sam
+  h.directory.set(u.sus, { suspended: true });
+  await h.jarvis.syncDirectory();
+  await h.jarvis.settle();
+  const creds: Record<Who, Cred | null> = {
+    owner: aliceCred,
+    ownerDevice: await asService(h, dev.clientId),
+    other: await asEmail(h, u.bob),
+    admin: await asEmail(h, u.admin),
+    suspended: await asEmail(h, u.sus),
+    unknown: await asEmail(h, "stranger@example.net"),
+    revokedDevice: await asService(h, revoked.clientId),
+    session: await asService(h, GATE, s.token),
+    gate: await asService(h, GATE),
+    none: null,
+  };
+  return { h, ids: { task, alice: aliceId, device: dev.id, note: note.body.id }, creds };
+}
+
+for (const who of WHO) {
+  test(`authorisation matrix: ${who} on every route`, async () => {
+    const { h, ids, creds } = await setup();
+    try {
+      for (const r of ROUTES) {
+        const path = r.path(ids);
+        const res = await call(h, creds[who], r.method, path, r.body);
+        const want = expected(who, r.kind);
+        const label = `${who} ${r.method} ${path} -> ${res.status} ${JSON.stringify(res.body).slice(0, 160)}`;
+        if (want === "allowed") assert.ok(![401, 403, 404].includes(res.status) && res.status < 500, label);
+        if (process.env.MATRIX_DEBUG) console.log(label);
+        else assert.equal(res.status, want, label);
+        if (typeof want === "number") assert.ok(res.body?.error?.code, `${label}: error body`);
+        await h.jarvis.settle();
+      }
+      // health needs no identity at all
+      assert.equal((await call(h, creds[who], "GET", "/api/health")).status, 200);
+    } finally {
+      await h.close();
+    }
+  });
+}
+
+test("authorisation matrix: daemon proxy for every caller", async () => {
+  const { h, ids, creds } = await setup();
+  try {
+    for (const who of WHO) {
+      const path = `/api/tasks/${ids.task}/daemon`;
+      const want: number | "allowed" =
+        who === "none" ? 401 : ["suspended", "unknown", "revokedDevice", "session", "gate"].includes(who) ? 403 : who === "other" ? 404 : "allowed";
+      if (want === "allowed") {
+        const ws = await openWs(h, creds[who], path);
+        ws.send(`hello from ${who}`);
+        assert.equal(await nextMessage(ws), `echo:hello from ${who}`, who);
+        ws.close();
+      } else {
+        await assert.rejects(openWs(h, creds[who], path), (e: { status?: number }) => e.status === want, `${who} should get ${want}`);
+      }
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test("another user's task is indistinguishable from a missing one", async () => {
+  const { h, ids, creds } = await setup();
+  try {
+    const theirs = await call(h, creds.other, "GET", `/api/tasks/${ids.task}`);
+    const missing = await call(h, creds.other, "GET", `/api/tasks/ffffffffffffffff`);
+    assert.equal(theirs.status, 404);
+    assert.deepEqual(theirs.body, missing.body);
+    const layer = await call(h, creds.other, "GET", `/api/users/${ids.alice}/layer`);
+    const nouser = await call(h, creds.other, "GET", `/api/users/nobody/layer`);
+    assert.equal(layer.status, 404);
+    assert.deepEqual(layer.body, nouser.body);
+    const list = await call(h, creds.other, "GET", "/api/tasks");
+    assert.deepEqual(list.body.tasks, [], "bob's list does not show alice's task");
+    const adminList = await call(h, creds.admin, "GET", "/api/tasks?all=1");
+    assert.ok(adminList.body.tasks.some((t: { id: string }) => t.id === ids.task), "admin sees everything");
+  } finally {
+    await h.close();
+  }
+});
+
+test("pairing needs an identity login; a device can't pair another device", async () => {
+  const { h, creds } = await setup();
+  try {
+    h.clock.advance(60_000);
+    const viaDevice = await call(h, creds.ownerDevice, "GET", "/api/devices/pair?state=abcdefghijklmnop9999");
+    const loc = new URL(viaDevice.headers.get("location")!);
+    assert.equal(loc.protocol, "jarvis3:");
+    assert.equal(loc.searchParams.get("status"), "403");
+    assert.equal(loc.searchParams.get("clientSecret"), null);
+    const viaSession = await call(h, creds.session, "GET", "/api/devices/pair?state=abcdefghijklmnop9999");
+    assert.equal(new URL(viaSession.headers.get("location")!).searchParams.get("status"), "403");
+    const bad = await call(h, creds.owner, "GET", "/api/devices/pair?state=short");
+    assert.equal(bad.status, 400);
+    // rate limit: a second pairing within 30 s
+    const first = await call(h, creds.owner, "GET", "/api/devices/pair?state=abcdefghijklmnop0001");
+    assert.ok(new URL(first.headers.get("location")!).searchParams.get("clientSecret"));
+    const second = await call(h, creds.owner, "GET", "/api/devices/pair?state=abcdefghijklmnop0002");
+    assert.equal(new URL(second.headers.get("location")!).searchParams.get("status"), "429");
+  } finally {
+    await h.close();
+  }
+});
+
+test("a session token reaches only its own task's data", async () => {
+  const { h, ids, creds } = await setup();
+  try {
+    // bob's task + session
+    const bobTask = await createTask(h, "bob@example.org");
+    const bobS = await fakeSession(h, bobTask);
+    const bobBundle = await call(h, await asService(h, GATE, bobS.token), "GET", "/api/session/bundle");
+    assert.equal(bobBundle.status, 200);
+    // alice's session writes a note: it lands in alice's layer, not bob's
+    await call(h, creds.session, "POST", "/api/session/notes", { text: "alice fact" });
+    const aliceLayer = await call(h, creds.owner, "GET", `/api/users/${ids.alice}/layer`);
+    assert.ok(aliceLayer.body.notes.some((n: { text: string; taskId: string }) => n.text === "alice fact" && n.taskId === ids.task));
+    const bobLayer = await call(h, await asEmail(h, "bob@example.org"), "GET", "/api/users/me/layer");
+    assert.ok(!bobLayer.body.notes.some((n: { text: string }) => n.text === "alice fact"));
+    // a session token is not accepted with a user's identity, nor a forged token with the gate
+    const withUser = await call(h, { ...creds.owner!, bearer: bobS.token }, "GET", "/api/session/bundle");
+    assert.equal(withUser.status, 401);
+    const forged = await call(h, await asService(h, GATE, "f".repeat(64)), "GET", "/api/session/bundle");
+    assert.equal(forged.status, 401);
+    // a session can't open another task's daemon or channel as someone else
+    await assert.rejects(openWs(h, creds.session, `/api/tasks/${bobTask}/daemon`), (e: { status?: number }) => e.status === 403);
+  } finally {
+    await h.close();
+  }
+});
