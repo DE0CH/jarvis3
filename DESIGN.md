@@ -151,4 +151,15 @@ archives and destroys their sessions, and keeps their personal layer and archive
 - Session machines: Fly Machines, one Fly org per instance (behind a small provider interface, local Docker in CI).
 - The app reaches a session's agent through the instance server: the session dials out, the server checks
   ownership on every connection and forwards the chat. No Paseo relay, no per-session web addresses.
-- The remaining choices are listed in PLAN-draft.md section 4.
+- Instance state: one SQLite file on the server's volume, continuously replicated to the instance's bucket.
+- Per-user OpenRouter keys: minted on the user's first task, monthly limit per role, admin override per
+  person, deleted at offboarding.
+- Code and container images are public; no organisation's data lives in this repo (instance config and
+  org-env live in each organisation's own GitHub org).
+- App: the Paseo fork is the base; Jarvis screens use Paseo's own components.
+- Roles: a read-only Google service account polls the Workspace directory every few minutes (groups →
+  roles, suspended users cut off within minutes).
+- KAMYEE's Cloudflare Access and tunnel: a new KAMYEE Cloudflare account with a delegated subdomain of
+  kamyeegroup.com (the zone stays in Deyao's account).
+- Storage: Hetzner Object Storage in the instance's own Hetzner project.
+- Models: a curated list per instance with one default, each checked against OpenCode tool calling.
