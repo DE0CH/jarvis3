@@ -1,0 +1,23 @@
+{
+  "name": "@jarvis3/integration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis 3 integration test: server + local-Docker machines + the real session image",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 integration.test.ts"
+  },
+  "dependencies": {
+    "@getpaseo/client": "0.11.1",
+    "aws4fetch": "^1.0.20",
+    "jose": "^6.2.12",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2"
+  }
+}

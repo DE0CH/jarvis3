@@ -1,0 +1,28 @@
+#!/bin/bash
+# PID 1's child (under tini): prepare the machine, restore a paused task's snapshot, then hand
+# over to jarvis-agent (lib/agent.mjs). Runs as root; the agent's daemon runs as `jarvis`.
+set -u
+HOME_DIR=/home/jarvis
+STATE=/var/lib/jarvis
+log() { printf '{"t":"%s","msg":"%s"}\n' "$(date -u +%FT%TZ)" "$*"; }
+
+mkdir -p "$STATE" /run/jarvis /run/jarvis/snapshots
+chmod 755 /run/jarvis; chmod 700 /run/jarvis/snapshots
+mkdir -p "$HOME_DIR/workspace"
+
+# Resume: JARVIS_RESTORE_URL is a presigned GET of the pause snapshot (a tar.gz of the home
+# directory, see jarvis-snapshot). Restored once per machine; a container restart keeps it.
+if [ -n "${JARVIS_RESTORE_URL:-}" ] && [ ! -e "$STATE/restored" ]; then
+  log "restoring the snapshot"
+  if curl -fsS --retry 5 --retry-delay 2 -o /var/tmp/restore.tar.gz "$JARVIS_RESTORE_URL" \
+     && tar -xzf /var/tmp/restore.tar.gz -C "$HOME_DIR"; then
+    touch "$STATE/restored"; log "snapshot restored ($(stat -c %s /var/tmp/restore.tar.gz) bytes)"
+  else
+    log "RESTORE FAILED: the task starts without its previous state"
+    touch "$STATE/restore-failed"
+  fi
+  rm -f /var/tmp/restore.tar.gz
+fi
+chown -R jarvis:jarvis "$HOME_DIR"
+
+exec node /usr/local/lib/jarvis/lib/agent.mjs

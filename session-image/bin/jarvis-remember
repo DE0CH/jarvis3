@@ -1,0 +1,30 @@
+#!/usr/bin/env node
+// jarvis-remember "<note>": save a note in the task owner's personal layer ("remember …"). It goes
+// through jarvis-agent's local socket, which holds the session token (the agent's shell never does).
+const http = process.getBuiltinModule("node:http"); // works as CommonJS and as ESM
+const text = process.argv.slice(2).join(" ").trim();
+if (!text) {
+  console.error('usage: jarvis-remember "<the note>"');
+  process.exit(2);
+}
+const body = JSON.stringify({ text });
+const req = http.request(
+  { socketPath: process.env.JARVIS_AGENT_SOCKET || "/run/jarvis/agent.sock", path: "/remember", method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } },
+  (res) => {
+    let out = "";
+    res.on("data", (c) => (out += c));
+    res.on("end", () => {
+      if (res.statusCode === 201) {
+        console.log(`Saved for future tasks: ${text}`);
+      } else {
+        console.error(`jarvis-remember failed (${res.statusCode}): ${out}`);
+        process.exit(1);
+      }
+    });
+  },
+);
+req.on("error", (e) => {
+  console.error(`jarvis-remember: the session agent is not reachable: ${e.message}`);
+  process.exit(1);
+});
+req.end(body);

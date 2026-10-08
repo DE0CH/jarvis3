@@ -1,0 +1,145 @@
+// Turn the server's LayerBundle (GET /api/session/bundle, server/src/api-types.ts) into what
+// OpenCode loads: one instructions file (layers concatenated in the bundle's load order: org,
+// role, personal, policy — policy last), one folder per skill (names as the server assigned them,
+// renames applied to the SKILL.md front matter too), and opencode.json (OpenRouter, the task's
+// model, permission allow + the locked policy's deny rules, nothing else).
+//
+// Pure functions + one writer; test/assemble.test.mjs covers them.
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, normalize, isAbsolute } from "node:path";
+
+/** OpenCode permissions that take a single action, not pattern rules (OpenCode config schema). */
+const ACTION_ONLY = new Set(["todowrite", "question", "webfetch", "websearch", "doom_loop"]);
+
+export const PLATFORM_PREAMBLE = (o) =>
+  [
+    "# Jarvis session",
+    "",
+    "You are an agent in a Jarvis task: a machine of your own, started for one person of the organisation.",
+    `Your working directory is ${o.workspace}. The organisation's environment (its scripts and reference files) is at ${o.orgDir}, read-only.`,
+    "There are no permission prompts: act, but stop and ask before anything outward-facing or irreversible the instructions below don't clearly allow.",
+    'When the user asks you to remember something for future tasks, save it with the shell command: jarvis-remember "<the note>" (one short sentence per note).',
+    "",
+    "The instructions below come in layers: the organisation's, then the user's role, then the user's own, and last the organisation's locked policy, which overrides everything before it.",
+  ].join("\n");
+
+const LAYER_TITLE = { org: "Organisation", role: "Role", personal: "Personal", policy: "Locked policy" };
+
+/** The instructions file: the platform preamble, then every bundle instruction in load order. */
+export function renderInstructions(bundle, o) {
+  const parts = [PLATFORM_PREAMBLE(o)];
+  for (const i of bundle.instructions) {
+    parts.push(`<!-- jarvis layer: ${i.layer} (${i.source}) -->\n## ${LAYER_TITLE[i.layer] || i.layer} instructions\n\n${i.text.trim()}`);
+  }
+  return parts.join("\n\n") + "\n";
+}
+
+/** A relative path from the bundle, refused if it could leave the skill folder. */
+export function safeRel(p) {
+  const n = normalize(p);
+  if (!p || isAbsolute(p) || n.startsWith("..") || n.split(/[\\/]/).includes("..")) throw new Error(`unsafe path in bundle: ${p}`);
+  return n;
+}
+
+export function safeSkillName(name) {
+  if (!/^[a-z0-9][a-z0-9-]{0,127}$/.test(name)) throw new Error(`unsafe skill name in bundle: ${name}`);
+  return name;
+}
+
+/**
+ * SKILL.md with its front matter `name:` set to the name the session sees (the server renames a
+ * clashing skill, e.g. `role-report`); a SKILL.md without front matter gets one (OpenCode needs a
+ * name and a description).
+ */
+export function fixSkillMd(text, name) {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
+  if (fm) {
+    let head = fm[1];
+    head = /^name:.*$/m.test(head) ? head.replace(/^name:.*$/m, `name: ${name}`) : `name: ${name}\n${head}`;
+    if (!/^description:/m.test(head)) head += `\ndescription: ${name}`;
+    return `---\n${head}\n---\n${text.slice(fm[0].length)}`;
+  }
+  const first = text.split("\n").map((l) => l.replace(/^#+\s*/, "").trim()).find(Boolean) || name;
+  const desc = first.slice(0, 200).replace(/\s+/g, " ");
+  return `---\nname: ${name}\ndescription: ${JSON.stringify(desc)}\n---\n${text}`;
+}
+
+/** path (relative to the skills dir) -> content, for every skill in the bundle. */
+export function skillFiles(bundle) {
+  const out = new Map();
+  for (const s of bundle.skills) {
+    const name = safeSkillName(s.name);
+    for (const [rel, text] of Object.entries(s.files)) {
+      const r = safeRel(rel);
+      out.set(join(name, r), r === "SKILL.md" ? fixSkillMd(text, name) : text);
+    }
+  }
+  return out;
+}
+
+/** OpenCode permissions: allow everything, then the locked policy's deny rules on top. */
+export function permissions(deny) {
+  if (!deny.length) return "allow";
+  const p = { "*": "allow" };
+  for (const r of deny) {
+    if (ACTION_ONLY.has(r.permission)) {
+      // these take no patterns in OpenCode: any deny rule on one denies the whole permission
+      p[r.permission] = "deny";
+      continue;
+    }
+    const cur = p[r.permission];
+    const rules = typeof cur === "object" ? cur : { "*": cur === "deny" ? "deny" : "allow" };
+    rules[r.pattern] = "deny"; // OpenCode: the last matching rule wins, so specific denies come after "*"
+    p[r.permission] = rules;
+  }
+  return p;
+}
+
+/** The OpenCode model id for an OpenRouter slug. */
+export const opencodeModel = (slug) => `openrouter/${slug}`;
+
+export function opencodeConfig(o) {
+  const model = opencodeModel(o.model);
+  return {
+    $schema: "https://opencode.ai/config.json",
+    model,
+    small_model: model,
+    autoupdate: false,
+    share: "disabled",
+    instructions: [o.instructionsPath],
+    skills: { paths: [o.skillsDir] },
+    permission: permissions(o.bundle.deny),
+    provider: {
+      openrouter: {
+        options: {
+          apiKey: "{env:OPENROUTER_API_KEY}",
+          ...(o.baseUrl ? { baseURL: o.baseUrl } : {}),
+        },
+        // the curated model is always known to OpenCode, even when models.dev lacks it
+        models: { [o.model]: { tool_call: true } },
+      },
+    },
+  };
+}
+
+/**
+ * Write everything for one boot. Instructions, skills and the OpenCode config are rebuilt from the
+ * bundle every boot (a resumed task loads the layers as they are now); the workspace is untouched.
+ */
+export function writeLayers(bundle, o) {
+  const instructionsPath = join(o.jarvisDir, "instructions.md");
+  const skillsDir = join(o.jarvisDir, "skills");
+  mkdirSync(o.jarvisDir, { recursive: true });
+  writeFileSync(instructionsPath, renderInstructions(bundle, o));
+  writeFileSync(join(o.jarvisDir, "bundle.json"), JSON.stringify(bundle, null, 1));
+  rmSync(skillsDir, { recursive: true, force: true });
+  for (const [rel, text] of skillFiles(bundle)) {
+    const p = join(skillsDir, rel);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, text);
+  }
+  const cfg = opencodeConfig({ model: o.model, bundle, instructionsPath, skillsDir, baseUrl: o.baseUrl });
+  mkdirSync(dirname(o.opencodeConfigPath), { recursive: true });
+  writeFileSync(o.opencodeConfigPath, JSON.stringify(cfg, null, 1));
+  return { instructionsPath, skillsDir, config: cfg };
+}

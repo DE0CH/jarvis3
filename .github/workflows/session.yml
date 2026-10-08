@@ -1,0 +1,90 @@
+name: session
+# The session image and the integration test (PLAN section 5 "Integration"): unit tests of the
+# image's own code, then the image is built and the whole chain runs against it with the server on
+# the local-Docker provider, MinIO and a fake OpenRouter. On main, the tested image is pushed to
+# GHCR (private until the repo goes public).
+on:
+  push:
+    paths: ["session-image/**", "integration/**", "server/**", ".github/workflows/session.yml"]
+  pull_request:
+    paths: ["session-image/**", "integration/**", "server/**", ".github/workflows/session.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: session-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/de0ch/jarvis3-session
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: session-image
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: session-image/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - name: shell scripts parse
+        run: bash -n bin/jarvis-boot && bash -n bin/jarvis-snapshot && node --check bin/jarvis-remember
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: unit
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build the session image
+        uses: docker/build-push-action@v6
+        with:
+          context: session-image
+          load: true
+          tags: jarvis3-session:test
+          cache-from: type=gha,scope=session-image
+          cache-to: type=gha,mode=max,scope=session-image
+      - name: image size
+        run: |
+          docker image inspect jarvis3-session:test --format '{{.Size}}' | awk '{printf "unpacked image size: %.0f MB\n", $1/1e6}' | tee -a "$GITHUB_STEP_SUMMARY"
+          size=$(docker image inspect jarvis3-session:test --format '{{.Size}}')
+          # Fly refuses images over ~8 GB unpacked; stay far below
+          test "$size" -lt 3000000000
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+        working-directory: server
+      - run: npm ci
+        working-directory: integration
+      - run: npm run typecheck
+        working-directory: integration
+      - name: pull MinIO
+        run: docker pull minio/minio:latest
+      - name: integration test
+        working-directory: integration
+        env:
+          SESSION_IMAGE: jarvis3-session:test
+        run: npm test
+      - name: session logs on failure
+        if: failure()
+        run: |
+          for c in $(docker ps -aq --filter label=jarvis3.instance=itest); do echo "== $c"; docker logs --tail 300 "$c" 2>&1; done
+      - name: push to GHCR (main only, after the test passed)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag jarvis3-session:test "$IMAGE:${GITHUB_SHA::12}"
+          docker tag jarvis3-session:test "$IMAGE:main"
+          docker push "$IMAGE:${GITHUB_SHA::12}"
+          docker push "$IMAGE:main"
+          echo "pushed $IMAGE:${GITHUB_SHA::12}" >> "$GITHUB_STEP_SUMMARY"

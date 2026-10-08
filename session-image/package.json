@@ -1,0 +1,15 @@
+{
+  "name": "@jarvis3/session-image",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis 3 session machine: layers, Paseo daemon, reverse channel",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --test 'test/**/*.test.mjs'"
+  },
+  "dependencies": {
+    "@getpaseo/client": "0.11.1",
+    "ws": "^8.18.3"
+  }
+}

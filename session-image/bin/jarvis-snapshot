@@ -1,0 +1,49 @@
+#!/bin/bash
+# The snapshot contract with the server (docs/API.md section 10):
+#   jarvis-snapshot start <run> <presigned PUT url>   start a detached upload, print "started"
+#   jarvis-snapshot status <run>                       print running | ok <bytes> | failed <msg>
+# The snapshot is a tar.gz of /home/jarvis: the workspace, the Paseo daemon home (agents) and
+# OpenCode's data (conversations). The org-env tree and the generated layers are left out: every
+# boot rebuilds them from the server.
+set -u
+DIR=/run/jarvis/snapshots
+HOME_DIR=/home/jarvis
+op="${1:-}"; run="${2:-}"
+mkdir -p "$DIR"; chmod 700 "$DIR"
+if ! [[ "$run" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then echo "failed bad run id"; exit 2; fi
+st="$DIR/$run.status"
+
+case "$op" in
+  start)
+    url="${3:-}"
+    [ -n "$url" ] || { echo "failed no url"; exit 2; }
+    echo running > "$st"
+    # detached: the server's exec is cut off at ~60 s; it polls `status`
+    setsid "$0" _run "$run" "$url" > "$DIR/$run.log" 2>&1 < /dev/null &
+    echo started
+    ;;
+  _run)
+    url="${3:-}"
+    tmp="/var/tmp/jarvis-snapshot-$run.tar.gz"
+    tar -czf "$tmp" -C "$HOME_DIR" \
+      --exclude=./org --exclude=./.jarvis/skills --exclude=./.jarvis/instructions.md \
+      --exclude=./.cache --exclude=./.npm \
+      --warning=no-file-changed --ignore-failed-read .
+    rc=$?
+    # tar exits 1 when a file changed while it was read (a live daemon): the archive is still good
+    if [ "$rc" -gt 1 ]; then echo "failed tar exit $rc" > "$st"; rm -f "$tmp"; exit 1; fi
+    bytes=$(stat -c %s "$tmp")
+    if out=$(curl -fsS --retry 3 --retry-delay 2 -X PUT -H 'Content-Type: application/gzip' -T "$tmp" "$url" 2>&1); then
+      echo "ok $bytes" > "$st"
+    else
+      echo "failed upload: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)" > "$st"
+    fi
+    rm -f "$tmp"
+    ;;
+  status)
+    cat "$st" 2>/dev/null || echo "failed unknown run"
+    ;;
+  *)
+    echo "usage: jarvis-snapshot start <run> <url> | status <run>" >&2; exit 2
+    ;;
+esac
