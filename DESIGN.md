@@ -70,6 +70,17 @@ web page until that is in place. Not available: the Enterprise Program (Apple re
   that member may see and do. A user never sees, starts, messages or reads another user's sessions, files,
   wakeups or channels. The admin sees everything (staff are told this in writing).
 
+## Employee view (for the admin to develop and debug)
+
+- **View as a role.** An admin switches the app into a role's view (e.g. `staff`): the same screens,
+  buttons and limits a member of that role gets, and new sessions started in this view get exactly that
+  role's layers and capabilities, running on the admin's own account and spend. The app shows a persistent
+  banner while in this view, with one tap back to the admin view. This is how the admin develops the staff
+  experience and tests a role change before staff see it.
+- **Look at a user's session (read-only).** For debugging a specific person's problem, an admin can open
+  that user's sessions, transcripts and personal layer read-only. Each such look is logged.
+  Admins never act as another user (no sending or approving in their name).
+
 ## Environment layers (what a session loads)
 
 1. **Org layer — the org-env repo** (KAMYEE: `kamyee-env` in KAMYEE's GitHub org; Deyao's instance: the
