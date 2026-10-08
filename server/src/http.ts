@@ -1,0 +1,408 @@
+// HTTP routes and WebSocket upgrades. Every handler names its target to authorize() first;
+// docs/API.md is the human-readable version of this table.
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
+import { WebSocketServer, type WebSocket } from "ws";
+import type * as A from "./api-types.ts";
+import type { Ctx } from "./ctx.ts";
+import { authorize, resolvePrincipal, userOf, type Principal, type ResolveDeps, type Target } from "./auth.ts";
+import { asHttpError, httpError, HttpError } from "./errors.ts";
+import { pickClientProtocol } from "./channel.ts";
+import * as tasks from "./tasks.ts";
+import * as users from "./users.ts";
+import * as layers from "./layers.ts";
+import { budgetView } from "./spend.ts";
+import { iso } from "./clock.ts";
+
+export const VERSION = "0.1.0";
+
+interface Req {
+  req: IncomingMessage;
+  url: URL;
+  params: Record<string, string>;
+  principal: Principal | null;
+  body: () => Promise<unknown>;
+}
+
+type Result = { status?: number; json?: unknown; redirect?: string; raw?: { type: string; body: Uint8Array } };
+type Handler = (r: Req) => Promise<Result> | Result;
+
+interface Route {
+  method: string;
+  re: RegExp;
+  keys: string[];
+  /** false: no Access identity needed (health only). */
+  auth: boolean;
+  handler: Handler;
+}
+
+export type Routes = Route[];
+
+const ok = (json: unknown, status = 200): Result => ({ json, status });
+
+/** Resolve ":id" = "me" to the caller. */
+function userIdParam(r: Req): string {
+  const id = r.params.id!;
+  if (id === "me") return userOf(r.principal).user.id;
+  return id;
+}
+
+/** Authorise access to user :id's own things (owner or admin), uniform 404 otherwise. */
+function ownedUser(ctx: Ctx, r: Req): { id: string } {
+  authorize(r.principal, { kind: "member" });
+  const id = userIdParam(r);
+  authorize(r.principal, { kind: "owned", ownerId: id, what: "user" });
+  users.requireUser(ctx, id);
+  return { id };
+}
+
+function ownedTask(ctx: Ctx, r: Req) {
+  authorize(r.principal, { kind: "member" });
+  const t = tasks.getTask(ctx, r.params.id!);
+  // a missing task and someone else's task are the same 404
+  authorize(r.principal, { kind: "owned", ownerId: t ? t.user_id : "\0none", what: "task" });
+  if (!t) throw httpError("not_found", "no such task");
+  return t;
+}
+
+function sessionTask(ctx: Ctx, r: Req) {
+  authorize(r.principal, { kind: "session" });
+  const p = r.principal as Extract<Principal, { kind: "session" }>;
+  return tasks.getTask(ctx, p.task.id)!;
+}
+
+export function defineRoutes(ctx: Ctx): Routes {
+  const routes: Route[] = [];
+  const route = (method: string, path: string, handler: Handler, o: { auth?: boolean } = {}): void => {
+    const keys: string[] = [];
+    const re = new RegExp("^" + path.replace(/:(\w+)/g, (_, k: string) => (keys.push(k), "([^/]+)")) + "$");
+    routes.push({ method, re, keys, auth: o.auth ?? true, handler });
+  };
+
+  route("GET", "/api/health", () => ok({ ok: true, version: VERSION } satisfies A.Health), { auth: false });
+
+  // ---- identity -------------------------------------------------------------------------------
+  route("GET", "/api/me", (r) => {
+    authorize(r.principal, { kind: "member" });
+    return ok(users.userDetail(ctx, userOf(r.principal).user) satisfies A.UserDetail);
+  });
+
+  route("GET", "/api/devices/pair", async (r) => {
+    const state = r.url.searchParams.get("state") || "";
+    if (!/^[A-Za-z0-9_-]{16,64}$/.test(state)) throw httpError("bad_request", "missing or malformed state");
+    const back = (p: Record<string, string>) => ({ redirect: `${ctx.config.devices.appScheme}://paired?` + new URLSearchParams({ state, ...p }).toString() });
+    try {
+      authorize(r.principal, { kind: "identity-login" });
+      const res = await users.pairDevice(ctx, userOf(r.principal).user, {
+        name: r.url.searchParams.get("name") || "",
+        model: r.url.searchParams.get("model") || "",
+      });
+      return back({ id: res.id, clientId: res.clientId, clientSecret: res.clientSecret } satisfies Omit<A.PairResult, "state">);
+    } catch (e) {
+      const he = asHttpError(e);
+      return back({ error: he.message, status: String(he.status) });
+    }
+  });
+
+  route("GET", "/api/devices", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const { user, isAdmin } = userOf(r.principal);
+    const all = r.url.searchParams.get("all") === "1";
+    if (all) authorize(r.principal, { kind: "admin", what: "device list" });
+    return ok({ devices: users.listDevices(ctx, all && isAdmin ? null : user.id).map(users.deviceView) } satisfies A.DeviceList);
+  });
+
+  route("DELETE", "/api/devices/:id", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const d = ctx.db.prepare("SELECT * FROM devices WHERE id = ? AND revoked_at IS NULL").get(r.params.id!) as { user_id: string } | undefined;
+    authorize(r.principal, { kind: "owned", ownerId: d ? d.user_id : "\0none", what: "device" });
+    await users.revokeDevice(ctx, users.requireDevice(ctx, r.params.id!));
+    return ok({ ok: true });
+  });
+
+  // ---- models ----------------------------------------------------------------------------------
+  route("GET", "/api/models", (r) => {
+    authorize(r.principal, { kind: "member" });
+    return ok({ models: ctx.config.models.map((m) => ({ id: m.id, label: m.label })), default: ctx.config.defaultModel } satisfies A.ModelList);
+  });
+
+  // ---- tasks -----------------------------------------------------------------------------------
+  route("POST", "/api/tasks", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const t = await tasks.createTask(ctx, userOf(r.principal).user, (await r.body()) as A.CreateTaskRequest);
+    return ok(tasks.taskView(ctx, t) satisfies A.TaskView, 201);
+  });
+
+  route("GET", "/api/tasks", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const { user } = userOf(r.principal);
+    const all = r.url.searchParams.get("all") === "1";
+    const forUser = r.url.searchParams.get("userId");
+    let userId: string | undefined = user.id;
+    if (all) {
+      authorize(r.principal, { kind: "admin", what: "task list" });
+      userId = undefined;
+    } else if (forUser) {
+      authorize(r.principal, { kind: "owned", ownerId: forUser, what: "user" });
+      userId = forUser;
+    }
+    return ok({ tasks: tasks.listTasks(ctx, userId === undefined ? {} : { userId }).map((t) => tasks.taskView(ctx, t)) } satisfies A.TaskList);
+  });
+
+  route("GET", "/api/tasks/:id", (r) => ok(tasks.taskView(ctx, ownedTask(ctx, r)) satisfies A.TaskView));
+
+  route("POST", "/api/tasks/:id/pause", (r) => {
+    const t = ownedTask(ctx, r);
+    tasks.pauseTask(ctx, t, "user");
+    return ok(tasks.taskView(ctx, tasks.getTask(ctx, t.id)!) satisfies A.TaskView, 202);
+  });
+
+  route("POST", "/api/tasks/:id/resume", (r) => {
+    const t = ownedTask(ctx, r);
+    tasks.resumeTask(ctx, t);
+    return ok(tasks.taskView(ctx, tasks.getTask(ctx, t.id)!) satisfies A.TaskView, 202);
+  });
+
+  route("DELETE", "/api/tasks/:id", (r) => {
+    const t = ownedTask(ctx, r);
+    tasks.destroyTask(ctx, t, { force: r.url.searchParams.get("force") === "1" });
+    return ok(tasks.taskView(ctx, tasks.getTask(ctx, t.id)!) satisfies A.TaskView, 202);
+  });
+
+  // ---- users (admin) and limits ------------------------------------------------------------------
+  route("GET", "/api/users", (r) => {
+    authorize(r.principal, { kind: "admin", what: "user list" });
+    return ok({ users: users.listUsers(ctx).map((u) => users.userDetail(ctx, u)) } satisfies A.UserList);
+  });
+
+  route("GET", "/api/users/:id", (r) => {
+    const { id } = ownedUser(ctx, r);
+    return ok(users.userDetail(ctx, users.requireUser(ctx, id)) satisfies A.UserDetail);
+  });
+
+  route("PATCH", "/api/users/:id/limits", async (r) => {
+    authorize(r.principal, { kind: "admin", what: "user" });
+    const u = users.requireUser(ctx, userIdParam(r));
+    const updated = await users.setLimits(ctx, u, (await r.body()) as A.SetLimitsRequest);
+    return ok(users.userDetail(ctx, updated) satisfies A.UserDetail);
+  });
+
+  // ---- personal layer --------------------------------------------------------------------------
+  route("GET", "/api/users/:id/layer", (r) => ok(layers.personalView(ctx, ownedUser(ctx, r).id) satisfies A.PersonalLayerView));
+
+  route("GET", "/api/users/:id/layers", async (r) => {
+    const { id } = ownedUser(ctx, r);
+    const u = users.requireUser(ctx, id);
+    return ok((await layers.bundleFor(ctx, u.id, u.role)) satisfies A.LayerBundle);
+  });
+
+  route("PUT", "/api/users/:id/layer/instructions", async (r) => {
+    const { id } = ownedUser(ctx, r);
+    layers.setInstructions(ctx, id, ((await r.body()) as A.SetInstructionsRequest)?.text);
+    return ok(layers.personalView(ctx, id) satisfies A.PersonalLayerView);
+  });
+
+  route("PUT", "/api/users/:id/layer/skills/:name", async (r) => {
+    const { id } = ownedUser(ctx, r);
+    layers.putSkill(ctx, id, r.params.name!, ((await r.body()) as A.PutSkillRequest)?.files);
+    return ok(layers.personalView(ctx, id) satisfies A.PersonalLayerView);
+  });
+
+  route("DELETE", "/api/users/:id/layer/skills/:name", (r) => {
+    const { id } = ownedUser(ctx, r);
+    layers.deleteSkill(ctx, id, r.params.name!);
+    return ok(layers.personalView(ctx, id) satisfies A.PersonalLayerView);
+  });
+
+  route("POST", "/api/users/:id/layer/notes", async (r) => {
+    const { id } = ownedUser(ctx, r);
+    const note = layers.addNote(ctx, id, ((await r.body()) as A.AddNoteRequest)?.text, "user", null);
+    return ok(note satisfies A.PersonalNote, 201);
+  });
+
+  route("DELETE", "/api/users/:id/layer/notes/:noteId", (r) => {
+    const { id } = ownedUser(ctx, r);
+    layers.deleteNote(ctx, id, r.params.noteId!);
+    return ok(layers.personalView(ctx, id) satisfies A.PersonalLayerView);
+  });
+
+  route("POST", "/api/users/:id/layer/reset", (r) => {
+    const { id } = ownedUser(ctx, r);
+    const version = layers.resetPersonal(ctx, id);
+    return ok({ version, layer: layers.personalView(ctx, id) } satisfies A.ResetResult);
+  });
+
+  route("POST", "/api/users/:id/layer/undo", (r) => {
+    const { id } = ownedUser(ctx, r);
+    layers.undoPersonal(ctx, id);
+    return ok(layers.personalView(ctx, id) satisfies A.PersonalLayerView);
+  });
+
+  // ---- notices ------------------------------------------------------------------------------------
+  route("GET", "/api/notices", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const rows = ctx.db.prepare("SELECT * FROM notices WHERE user_id = ? ORDER BY created_at DESC LIMIT 100").all(userOf(r.principal).user.id) as {
+      id: string;
+      kind: A.NoticeView["kind"];
+      text: string;
+      task_id: string | null;
+      created_at: number;
+    }[];
+    return ok({ notices: rows.map((n) => ({ id: n.id, kind: n.kind, text: n.text, taskId: n.task_id, createdAt: iso(n.created_at) })) } satisfies A.NoticeList);
+  });
+
+  // ---- admin ----------------------------------------------------------------------------------------
+  route("GET", "/api/admin/budget", (r) => {
+    authorize(r.principal, { kind: "admin", what: "budget" });
+    return ok(budgetView(ctx) satisfies A.BudgetView);
+  });
+
+  route("POST", "/api/admin/directory/sync", async (r) => {
+    authorize(r.principal, { kind: "admin", what: "directory" });
+    return ok((await users.syncDirectory(ctx)) satisfies A.SyncResult);
+  });
+
+  // ---- session-facing (session token) ---------------------------------------------------------------
+  route("GET", "/api/session/bundle", async (r) => {
+    const t = sessionTask(ctx, r);
+    const owner = users.requireUser(ctx, t.user_id);
+    return ok((await layers.bundleFor(ctx, owner.id, owner.role)) satisfies A.LayerBundle);
+  });
+
+  route("GET", "/api/session/org-env.tar", async (r) => {
+    sessionTask(ctx, r);
+    return { raw: { type: "application/x-tar", body: await ctx.orgEnv.archive() } };
+  });
+
+  route("POST", "/api/session/notes", async (r) => {
+    const t = sessionTask(ctx, r);
+    const note = layers.addNote(ctx, t.user_id, ((await r.body()) as A.AddNoteRequest)?.text, "session", t.id);
+    return ok(note satisfies A.PersonalNote, 201);
+  });
+
+  route("POST", "/api/session/status", async (r) => {
+    const t = sessionTask(ctx, r);
+    return ok(tasks.reportStatus(ctx, t, (await r.body()) as A.SessionStatusRequest) satisfies A.TaskView);
+  });
+
+  return routes;
+}
+
+// ---- plumbing ------------------------------------------------------------------------------------------
+
+const MAX_BODY = 1024 * 1024;
+
+function readBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        reject(httpError("bad_request", "body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8");
+      if (!text) return resolve({});
+      try {
+        resolve(JSON.parse(text));
+      } catch {
+        reject(httpError("bad_request", "body must be JSON"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  const s = JSON.stringify(body);
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "content-length": Buffer.byteLength(s) });
+  res.end(s);
+}
+
+function sendError(res: ServerResponse, e: unknown): void {
+  const he = asHttpError(e);
+  sendJson(res, he.status, { error: { code: he.code, message: he.message } } satisfies A.ApiError);
+}
+
+export function makeHandler(ctx: Ctx, resolveDeps: ResolveDeps, routes: Routes) {
+  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    try {
+      const url = new URL(req.url || "/", "http://local");
+      const matches = routes.filter((r) => r.re.test(url.pathname));
+      if (!matches.length) throw httpError("not_found", "no such route");
+      const rt = matches.find((r) => r.method === req.method);
+      if (!rt) throw httpError("not_found", "no such route");
+      const m = rt.re.exec(url.pathname)!;
+      const params: Record<string, string> = {};
+      rt.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1]!)));
+      const principal = rt.auth ? await resolvePrincipal(req, resolveDeps) : null;
+      const out = await rt.handler({ req, url, params, principal, body: () => readBody(req) });
+      if (out.redirect) {
+        res.writeHead(302, { location: out.redirect, "cache-control": "no-store" });
+        res.end();
+      } else if (out.raw) {
+        res.writeHead(out.status ?? 200, { "content-type": out.raw.type, "content-length": out.raw.body.length, "cache-control": "no-store" });
+        res.end(out.raw.body);
+      } else sendJson(res, out.status ?? 200, out.json ?? {});
+    } catch (e) {
+      if (!(e instanceof HttpError)) ctx.log("request failed", { url: req.url, error: (e as Error).message });
+      sendError(res, e);
+    }
+  };
+}
+
+// ---- WebSocket upgrades -------------------------------------------------------------------------------
+
+function refuse(socket: Duplex, e: unknown): void {
+  const he = asHttpError(e);
+  const body = JSON.stringify({ error: { code: he.code, message: he.message } });
+  socket.end(
+    `HTTP/1.1 ${he.status} ${he.code}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+  );
+}
+
+export function makeUpgradeHandler(ctx: Ctx, resolveDeps: ResolveDeps) {
+  const daemonWss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024, handleProtocols: (offered) => pickClientProtocol(offered) });
+  const channelWss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
+  const close = () => {
+    daemonWss.close();
+    channelWss.close();
+  };
+  const handler = async (req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> => {
+    socket.on("error", () => socket.destroy());
+    try {
+      const url = new URL(req.url || "/", "http://local");
+      const principal = await resolvePrincipal(req, resolveDeps);
+      if (url.pathname === "/api/session/channel") {
+        authorize(principal, { kind: "session" });
+        const task = (principal as Extract<Principal, { kind: "session" }>).task;
+        channelWss.handleUpgrade(req, socket, head, (ws: WebSocket) => ctx.hub.attachSession(task.id, ws));
+        return;
+      }
+      const m = /^\/api\/tasks\/([^/]+)\/daemon$/.exec(url.pathname);
+      if (!m) throw httpError("not_found", "no such route");
+      authorize(principal, { kind: "member" } satisfies Target);
+      const t = tasks.getTask(ctx, decodeURIComponent(m[1]!));
+      authorize(principal, { kind: "owned", ownerId: t ? t.user_id : "\0none", what: "task" });
+      if (!t) throw httpError("not_found", "no such task");
+      if (!ctx.hub.isConnected(t.id)) throw httpError("unavailable", `the task's session is not connected (state ${t.state})`);
+      const { user } = userOf(principal);
+      const offered = String(req.headers["sec-websocket-protocol"] || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const password = tasks.daemonPassword(ctx, t);
+      daemonWss.handleUpgrade(req, socket, head, (ws: WebSocket) =>
+        ctx.hub.openStream(t.id, user.id, ws, { path: ctx.config.daemonPath, daemonPassword: password, clientProtocols: offered }),
+      );
+    } catch (e) {
+      refuse(socket, e);
+    }
+  };
+  return { handler, close };
+}
