@@ -126,3 +126,38 @@ test("CloudflareDeviceTokens: mint and revoke (already gone is fine)", async () 
   await cf.revoke("tok1");
   assert.match(calls[1]!.url, /service_tokens\/tok1$/);
 });
+
+test("GitOrgEnv: reads the tree at the pinned commit from a bare mirror (later commits are ignored)", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { GitOrgEnv } = await import("../src/orgenv-git.ts");
+  const dir = mkdtempSync(join(tmpdir(), "orgenv-"));
+  try {
+    const work = join(dir, "work");
+    const git = (...a: string[]) => execFileSync("git", ["-C", work, ...a], { encoding: "utf8" }).trim();
+    mkdirSync(join(work, "policy"), { recursive: true });
+    const deep = "skills/" + "very-long-directory-name/".repeat(6) + "SKILL.md";
+    mkdirSync(join(work, deep, ".."), { recursive: true });
+    writeFileSync(join(work, "AGENTS.md"), "org v1");
+    writeFileSync(join(work, "policy/deny.json"), "[]");
+    writeFileSync(join(work, deep), "deep skill");
+    execFileSync("git", ["init", "-q", work]);
+    git("-c", "user.email=ci@example.org", "-c", "user.name=ci", "add", ".");
+    git("-c", "user.email=ci@example.org", "-c", "user.name=ci", "commit", "-qm", "v1");
+    const pinned = git("rev-parse", "HEAD");
+    writeFileSync(join(work, "AGENTS.md"), "org v2");
+    git("-c", "user.email=ci@example.org", "-c", "user.name=ci", "commit", "-qam", "v2");
+    execFileSync("git", ["clone", "-q", "--bare", work, join(dir, "mirror.git")]);
+    const src = new GitOrgEnv(join(dir, "mirror.git"), pinned);
+    const files = await src.files();
+    assert.equal(new TextDecoder().decode(files.get("AGENTS.md")), "org v1");
+    assert.equal(new TextDecoder().decode(files.get(deep)), "deep skill");
+    assert.ok(files.has("policy/deny.json"));
+    assert.ok((await src.archive()).length > 0);
+    assert.throws(() => new GitOrgEnv(dir, "main"), /40-hex/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
