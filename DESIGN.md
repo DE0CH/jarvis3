@@ -156,7 +156,7 @@ archives and destroys their sessions, and keeps their personal layer and archive
   person, deleted at offboarding.
 - Code and container images are public; no organisation's data lives in this repo (instance config and
   org-env live in each organisation's own GitHub org).
-- App: the Paseo fork is the base; Jarvis screens use Paseo's own components.
+- App: a new repo DE0CH/jarvis3-app made from upstream getpaseo/paseo (kept rebasable); Deyao's existing fork DE0CH/paseo stays as it is. Jarvis screens use Paseo's own components.
 - Roles: a read-only Google service account polls the Workspace directory every few minutes (groups →
   roles, suspended users cut off within minutes).
 - KAMYEE's Cloudflare Access and tunnel: a new KAMYEE Cloudflare account with a delegated subdomain of
