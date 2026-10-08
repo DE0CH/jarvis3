@@ -4,6 +4,7 @@
 import type { Ctx } from "./ctx.ts";
 import type { KeyRow, UserRow } from "./rows.ts";
 import { limitsFor } from "./spend.ts";
+import { HttpError, httpError } from "./errors.ts";
 
 const aad = (userId: string) => `openrouter:${userId}`;
 
@@ -22,7 +23,12 @@ export function ensureKey(ctx: Ctx, user: UserRow): Promise<string> {
   if (inflight) return inflight;
   const p = (async () => {
     const limit = limitsFor(ctx, user).openrouterMonthlyUsd;
-    const minted = await ctx.keys.create(`${ctx.config.instanceName}: ${user.email}`, limit);
+    let minted;
+    try {
+      minted = await ctx.keys.create(`${ctx.config.instanceName}: ${user.email}`, limit);
+    } catch (e) {
+      throw e instanceof HttpError ? e : httpError("upstream", `OpenRouter: could not create the key: ${(e as Error).message}`);
+    }
     ctx.db
       .prepare("INSERT INTO openrouter_keys(user_id, hash, key_sealed, limit_usd, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(user.id, minted.hash, ctx.sealer.seal(minted.key, aad(user.id)), limit, ctx.clock.now());
