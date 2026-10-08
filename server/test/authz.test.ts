@@ -133,8 +133,8 @@ for (const who of WHO) {
         const res = await call(h, creds[who], r.method, path, r.body);
         const want = expected(who, r.kind);
         const label = `${who} ${r.method} ${path} -> ${res.status} ${JSON.stringify(res.body).slice(0, 160)}`;
-        if (want === "allowed") assert.ok(![401, 403, 404].includes(res.status) && res.status < 500, label);
         if (process.env.MATRIX_DEBUG) console.log(label);
+        if (want === "allowed") assert.ok(![401, 403, 404].includes(res.status) && res.status < 500, label);
         else assert.equal(res.status, want, label);
         if (typeof want === "number") assert.ok(res.body?.error?.code, `${label}: error body`);
         await h.jarvis.settle();
