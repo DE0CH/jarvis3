@@ -20,7 +20,7 @@ Published by CI (`.github/workflows/session.yml`) as `ghcr.io/de0ch/jarvis3-sess
 | `bin/jarvis-snapshot` | the snapshot command the server execs (`start` / `status`) |
 | `bin/jarvis-remember` | the agent's "remember" command |
 
-Size: ~1.4 GB unpacked (CI prints it on every run and fails above 3 GB; Fly refuses ~8 GB). The
+Size: ~870 MB unpacked (CI, 2026-10-08) (CI prints it on every run and fails above 3 GB; Fly refuses ~8 GB). The
 biggest parts are OpenCode's binary (~180 MB) and the Paseo daemon with its dependencies (~300 MB).
 The trims: OpenCode's two spare platform packages (it hard-links one into `bin/`), and Paseo's
 bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
@@ -93,6 +93,6 @@ provider sets it from `envOverrides`), `JARVIS_STATUS_MS`, `JARVIS_DAEMON_PORT`.
 ## Testing
 
 - `cd session-image && npm test`: assembly and the channel relay (node:test, no Docker).
-- `integration/`: the image end to end (see `integration/README` comments in
-  `integration.test.ts`): `docker build -t jarvis3-session:test session-image`, then
-  `cd integration && npm ci && npm test` (needs `server/` installed too, and Docker).
+- `integration/`: the image end to end (the header of `integration.test.ts` lists the checks):
+  `docker build -t jarvis3-session:test session-image`, then `cd server && npm ci`, then
+  `cd integration && npm ci && npm test` (needs Docker; `SESSION_IMAGE` picks another tag).
