@@ -3,6 +3,7 @@ import { loadConfig, loadSecrets } from "./config.ts";
 import { openDb } from "./db.ts";
 import { createJarvis } from "./app.ts";
 import { FlyMachines } from "./fly.ts";
+import { DockerMachines } from "./docker.ts";
 import { S3BlobStore } from "./s3.ts";
 import { OpenRouterKeys } from "./openrouter.ts";
 import { GoogleDirectory, StaticDirectory } from "./directory-google.ts";
@@ -11,6 +12,7 @@ import { GitOrgEnv } from "./orgenv-git.ts";
 
 const config = loadConfig();
 const secrets = loadSecrets();
+if (config.machines.kind === "fly" && !secrets.flyApiToken) throw new Error("missing secret env FLY_API_TOKEN");
 const db = openDb(process.env.JARVIS_DB || "/data/jarvis.db");
 
 const directory =
@@ -29,7 +31,10 @@ const jarvis = createJarvis({
   dbKey: secrets.dbKey,
   sessionGateClientSecret: secrets.sessionGateClientSecret,
   providers: {
-    machines: new FlyMachines({ token: secrets.flyApiToken, app: config.machines.app, region: config.machines.region, ...(config.machines.rootfsGb ? { rootfsGb: config.machines.rootfsGb } : {}) }),
+    machines:
+      config.machines.kind === "fly"
+        ? new FlyMachines({ token: secrets.flyApiToken, app: config.machines.app, region: config.machines.region, ...(config.machines.rootfsGb ? { rootfsGb: config.machines.rootfsGb } : {}) })
+        : new DockerMachines({ instance: config.instanceName, ...config.machines }),
     blobs: new S3BlobStore({
       endpoint: config.storage.endpoint,
       region: config.storage.region,

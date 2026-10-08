@@ -36,6 +36,32 @@ export type DirectoryConfig =
       intervalSeconds?: number;
     };
 
+export type GuestConfig = { cpu_kind: "shared" | "performance"; cpus: number; memory_mb: number };
+
+/** Production: Fly Machines, one app per instance. */
+export interface FlyMachinesConfig {
+  kind: "fly";
+  app: string;
+  org: string;
+  region: string;
+  image: string;
+  guest: GuestConfig;
+  rootfsGb?: number;
+}
+
+/** CI and local runs: containers on the local Docker Engine (server/src/docker.ts). */
+export interface DockerMachinesConfig {
+  kind: "docker";
+  image: string;
+  guest: GuestConfig;
+  /** Default /var/run/docker.sock. */
+  socketPath?: string;
+  network?: string;
+  /** Env set in every machine, e.g. JARVIS_URL as the containers reach this server. */
+  envOverrides?: Record<string, string>;
+  extraHosts?: string[];
+}
+
 export interface Config {
   instanceName: string;
   /** https://<instance host> — no trailing slash. Sessions reach the server here. */
@@ -55,15 +81,7 @@ export interface Config {
   roles: Record<string, RoleConfig>;
   models: ModelConfig[];
   defaultModel: string;
-  machines: {
-    kind: "fly";
-    app: string;
-    org: string;
-    region: string;
-    image: string;
-    guest: { cpu_kind: "shared" | "performance"; cpus: number; memory_mb: number };
-    rootfsGb?: number;
-  };
+  machines: FlyMachinesConfig | DockerMachinesConfig;
   storage: {
     kind: "s3";
     endpoint: string; // e.g. https://fsn1.your-objectstorage.com
@@ -125,6 +143,8 @@ export function validateConfig(c: Config): Config {
     for (const u of c.directory.users) if (!c.roles[u.role]) fail(`directory.users names unknown role ${u.role}`);
   }
   if (!c.daemonPath?.startsWith("/")) fail("daemonPath must start with /");
+  if (c.machines?.kind !== "fly" && c.machines?.kind !== "docker") fail("machines.kind must be fly or docker");
+  if (!c.machines.image) fail("machines.image is required");
   return c;
 }
 
@@ -141,7 +161,7 @@ export function loadSecrets(env: NodeJS.ProcessEnv = process.env): Secrets {
   return {
     dbKey: need("JARVIS_DB_KEY"),
     openrouterManagementKey: need("OPENROUTER_MANAGEMENT_KEY"),
-    flyApiToken: need("FLY_API_TOKEN"),
+    flyApiToken: env.FLY_API_TOKEN || "", // required with machines.kind = fly (checked in main.ts)
     s3AccessKeyId: need("S3_ACCESS_KEY_ID"),
     s3SecretAccessKey: need("S3_SECRET_ACCESS_KEY"),
     googleServiceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON || "",
