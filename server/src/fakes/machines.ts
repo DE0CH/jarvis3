@@ -15,6 +15,8 @@ export class FakeMachines implements MachineProvider {
   readonly execLog: { id: string; command: string[] }[] = [];
   failCreate: string | null = null;
   failSnapshot: string | null = null;
+  /** While set, snapshot status stays "running" (to observe a task mid-operation). */
+  hold: Promise<void> | null = null;
   /** Called with the presigned URL when a snapshot "uploads" (wired to FakeBlobStore.acceptPut). */
   upload: (url: string) => Promise<void> = async () => {};
   #runs = new Map<string, string>();
@@ -48,6 +50,7 @@ export class FakeMachines implements MachineProvider {
         }
         return { stdout: "started\n", stderr: "", exitCode: 0 };
       }
+      if (op === "status" && this.hold) await this.hold;
       if (op === "status") return { stdout: (this.#runs.get(run!) || "running") + "\n", stderr: "", exitCode: 0 };
     }
     return { stdout: "", stderr: "unknown command", exitCode: 127 };
