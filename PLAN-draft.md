@@ -163,7 +163,7 @@ OpenCode gets all of this through generated `instructions` and skill folders, as
   - an API token scoped to Access service tokens only, for device pairing.
 - **Identity provider:** a Google Workspace domain, the groups `jarvis-admin` and `jarvis-staff`, and a service account with read-only Directory access (domain-wide delegation, user and group-member read scopes only).
 - **GitHub org:** the org-env repo and the instance deploy repo, plus a read-only deploy key or GitHub App installation for the server's org-env access.
-- **OpenRouter account:** a provisioning key, billing and an organisation-level cap.
+- **OpenRouter account:** a provisioning key held only by the server (on the organisation's own account, or for a while on the operator's, DESIGN "Instance isolation"), billing and an account-level cap.
 - **Archive storage:** an S3-compatible bucket for snapshots, archives and personal-layer versions, with credentials held by the server only.
 - **Secrets:** an age key for SOPS (kept in the admin's password manager), the server's database encryption key and the k8s admin token. Infrastructure credentials (Tier 3) are never readable by any session.
 
