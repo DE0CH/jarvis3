@@ -155,6 +155,9 @@ function warmOpencode() {
 
 function runDaemon() {
   const { uid, gid } = ids();
+  // A restored snapshot carries the old machine's pid lock; its pid can be alive here as another
+  // process, and the daemon then exits as "already running".
+  rmSync(join(P.paseo, "paseo.pid"), { force: true });
   const start = () => {
     if (stopping) return;
     log("starting the Paseo daemon");
@@ -205,6 +208,19 @@ function dropClient() {
   const p = client;
   client = null;
   p?.then((c) => c.close()).catch(() => {});
+}
+
+async function waitDaemonAccepting(timeoutMs = 240_000) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    try {
+      await paseo();
+      return true;
+    } catch {
+      await sleep(1000);
+    }
+  }
+  return false;
 }
 
 const mainAgentFile = () => join(P.jarvis, "main-agent");
@@ -305,6 +321,10 @@ async function main() {
   warmOpencode();
   runDaemon();
   if (!(await waitDaemon())) log("the Paseo daemon did not come up in time; carrying on");
+  // /api/health answers before the daemon accepts WebSockets (it restores its agents first, and
+  // answers 503 meanwhile): dial in only once a client gets through, so the app's first socket
+  // through the server isn't refused.
+  if (!(await waitDaemonAccepting())) log("the Paseo daemon does not accept connections yet; carrying on");
   const channel = startChannel({
     url: SERVER.replace(/^http/, "ws") + "/api/session/channel",
     headers: serverHeaders,

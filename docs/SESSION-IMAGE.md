@@ -49,10 +49,14 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
      `todowrite`, `question`, `doom_loop`), a deny rule denies the whole permission.
    Everything here is rebuilt on every boot, so a resumed task loads the layers as they are now
    (including notes remembered in the task before the pause).
-3. **Daemon**: `paseo daemon run --home ~/.paseo` as user `jarvis` in a restart loop, listening on
+3. **Daemon**: `paseo daemon run --home ~/.paseo` as user `jarvis` in a restart loop (a restored
+   `paseo.pid` is removed first: the old machine's pid can belong to another process here), listening on
    `127.0.0.1:6767` with `PASEO_PASSWORD`, relay, web UI, dictation and voice off. Its env holds only
    HOME/PATH, the Paseo settings, the password and `OPENROUTER_API_KEY` (and `OPENROUTER_BASE_URL`
    when set): **not** the session token or the gate secret, so nothing the agent runs can read them.
+   The daemon answers `/api/health` before it accepts WebSockets (it restores its agents first
+   and answers 503 meanwhile), so jarvis-agent waits until its own client gets through before it
+   dials in: a task is `running` only once the app's socket can reach the daemon.
 4. **Channel**: one WebSocket to `$JARVIS_URL/api/session/channel` (`ws-open` / `ws-msg` / `ws-close`,
    `hello`, `ping` every 30 s; reconnects with backoff 1 s → 30 s). Each `ws-open` becomes a local
    socket to `ws://127.0.0.1:6767<path>` with the server's subprotocols (the first is
