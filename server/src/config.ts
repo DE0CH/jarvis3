@@ -79,6 +79,32 @@ export interface SuggestionsConfig {
   auth: { kind: "token" } | { kind: "app"; appId: string; installationId: string };
 }
 
+/**
+ * One named action of the broker (docs/ACTIONS.md). Its credentials (Tier 2) stay on the server:
+ * `credentials` names environment variables, read at start-up, never sent anywhere.
+ */
+export interface ActionConfig {
+  /** A built-in action type: "smtp.send", "instance.set_budget" (server/src/actions/). */
+  type: string;
+  label: string;
+  description?: string;
+  /** Roles whose sessions may use it ("*" = every role). Others file an access request. */
+  roles: string[];
+  /** Who approves when no auto rule matches. Tier 3 types always need the owner. Default "admin". */
+  approval?: "auto" | "self" | "admin";
+  /**
+   * Auto-approval rules (either one suffices):
+   *  allowList: every subject of the call (e.g. each email recipient) matches one entry
+   *             ("x@example.org" exactly, or "*@example.org" for a whole domain);
+   *  below:     the call's amount is under this number.
+   */
+  auto?: { allowList?: string[]; below?: number };
+  /** Type-specific settings (an SMTP host, a sender address). */
+  settings?: Record<string, unknown>;
+  /** Credential name -> environment variable holding it (e.g. {"password": "SMTP_SUPPORT_PASSWORD"}). */
+  credentials?: Record<string, string>;
+}
+
 export interface Config {
   instanceName: string;
   /** https://<instance host> — no trailing slash. Sessions reach the server here. */
@@ -127,6 +153,10 @@ export interface Config {
   presignSeconds?: number;
   /** Absent: the "Suggest for everyone" button is off. */
   suggestions?: SuggestionsConfig;
+  /** The instance's owner (an admin's email): the only person who approves Tier 3 changes, with a passkey. */
+  owner?: string;
+  /** The broker's named actions (Tier 2 and 3), by name ([a-z0-9_]{1,64}). */
+  actions?: Record<string, ActionConfig>;
 }
 
 /** Secrets come only from the environment. */
@@ -177,11 +207,34 @@ export function validateConfig(c: Config): Config {
       if (!/^\d+$/.test(String(sg.auth.appId)) || !/^\d+$/.test(String(sg.auth.installationId))) fail("suggestions.auth needs numeric appId and installationId");
     } else if (sg.auth?.kind !== "token") fail("suggestions.auth.kind must be token or app");
   }
+  if (c.owner !== undefined && !/^[^@\s]+@[^@\s]+$/.test(c.owner)) fail("owner must be an email");
+  for (const [name, a] of Object.entries(c.actions ?? {})) {
+    if (!/^[a-z0-9_]{1,64}$/.test(name)) fail(`actions: bad name ${name}`);
+    if (!a.type || !a.label) fail(`actions.${name}: type and label are required`);
+    if (!Array.isArray(a.roles)) fail(`actions.${name}: roles must be a list`);
+    for (const r of a.roles) if (r !== "*" && !c.roles[r]) fail(`actions.${name}: unknown role ${r}`);
+    if (a.approval !== undefined && !["auto", "self", "admin"].includes(a.approval)) fail(`actions.${name}: approval must be auto, self or admin`);
+  }
   return c;
 }
 
 export function loadConfig(path = process.env.JARVIS_CONFIG || "/etc/jarvis/config.json"): Config {
   return validateConfig(JSON.parse(readFileSync(path, "utf8")) as Config);
+}
+
+/** The actions' credentials, from the environment variables the config names. Missing = refuse to start. */
+export function loadActionSecrets(c: Config, env: NodeJS.ProcessEnv = process.env): Record<string, Record<string, string>> {
+  const out: Record<string, Record<string, string>> = {};
+  for (const [name, a] of Object.entries(c.actions ?? {})) {
+    const creds: Record<string, string> = {};
+    for (const [cred, v] of Object.entries(a.credentials ?? {})) {
+      const val = env[v];
+      if (!val) throw new Error(`missing secret env ${v} (credential ${cred} of action ${name})`);
+      creds[cred] = val;
+    }
+    out[name] = creds;
+  }
+  return out;
 }
 
 export function loadSecrets(env: NodeJS.ProcessEnv = process.env): Secrets {

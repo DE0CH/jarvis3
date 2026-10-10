@@ -18,6 +18,9 @@ import { iso } from "./clock.ts";
 import * as suggestions from "./suggestions.ts";
 import { capTick } from "./ticks.ts";
 import { archiveKey } from "./tasks.ts";
+import * as approvals from "./approvals.ts";
+import * as passkeys from "./passkeys.ts";
+import { approvalPage, PAGE_HEADERS, passkeysPage, safeReturn } from "./pages.ts";
 
 export const VERSION = "0.1.0";
 
@@ -32,7 +35,7 @@ interface Req {
   body: () => Promise<unknown>;
 }
 
-type Result = { status?: number; json?: unknown; redirect?: string; raw?: { type: string; body: Uint8Array } };
+type Result = { status?: number; json?: unknown; redirect?: string; raw?: { type: string; body: Uint8Array; headers?: Record<string, string> } };
 type Handler = (r: Req) => Promise<Result> | Result;
 
 interface Route {
@@ -97,6 +100,8 @@ export function defineRoutes(ctx: Ctx): Routes {
       ...users.userDetail(ctx, user),
       unreadNotices: notices.unreadCount(ctx, user.id),
       features: { suggestions: suggestions.suggestionsEnabled(ctx) },
+      pendingApprovals: approvals.pendingCount(ctx, userOf(r.principal)),
+      isOwner: approvals.isOwner(ctx, user),
     } satisfies A.MeView);
   });
 
@@ -296,6 +301,98 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok({ unreadNotices } satisfies A.MarkNoticesReadResult);
   });
 
+  // ---- approvals ------------------------------------------------------------------------------------
+  route("GET", "/api/approvals", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const taskId = r.url.searchParams.get("taskId") || undefined;
+    if (taskId) ownedTask(ctx, { ...r, params: { id: taskId } });
+    const list = approvals.listApprovals(ctx, userOf(r.principal), { pending: r.url.searchParams.get("pending") === "1", ...(taskId ? { taskId } : {}) });
+    return ok({ approvals: list } satisfies A.ApprovalList);
+  });
+
+  route("GET", "/api/approvals/:id", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const v = userOf(r.principal);
+    return ok(approvals.approvalView(ctx, approvals.visibleApproval(ctx, r.params.id!, v), v) satisfies A.ApprovalView);
+  });
+
+  route("POST", "/api/approvals/:id/decide", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const v = userOf(r.principal);
+    const row = approvals.decide(ctx, v, r.params.id!, (await r.body()) as A.DecideRequest);
+    return ok(approvals.approvalView(ctx, row, v) satisfies A.ApprovalView);
+  });
+
+  route("POST", "/api/approvals/:id/passkey/options", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const v = userOf(r.principal);
+    passkeys.requireOwner(ctx, v.user);
+    return ok((await passkeys.approvalOptions(ctx, v.user, approvals.visibleApproval(ctx, r.params.id!, v))) as unknown as A.PasskeyApprovalOptions);
+  });
+
+  route("POST", "/api/approvals/:id/passkey", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const v = userOf(r.principal);
+    passkeys.requireOwner(ctx, v.user);
+    const row = await passkeys.approveWithPasskey(ctx, v.user, approvals.visibleApproval(ctx, r.params.id!, v), (await r.body()) as { response?: never });
+    return ok(approvals.approvalView(ctx, row, v) satisfies A.ApprovalView);
+  });
+
+  // ---- passkeys (the owner only; anyone else gets the admin-style 404) ---------------------------------
+  route("GET", "/api/passkeys", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const { user } = userOf(r.principal);
+    passkeys.requireOwner(ctx, user);
+    return ok({ passkeys: passkeys.listPasskeys(ctx, user.id).map(passkeys.passkeyView) } satisfies A.PasskeyList);
+  });
+
+  route("POST", "/api/passkeys/register/options", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    passkeys.requireOwner(ctx, userOf(r.principal).user);
+    // a passkey is added only on an identity login: a paired device's token can't add one
+    authorize(r.principal, { kind: "identity-login" });
+    return ok(await passkeys.registrationOptions(ctx, userOf(r.principal).user));
+  });
+
+  route("POST", "/api/passkeys/register", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    passkeys.requireOwner(ctx, userOf(r.principal).user);
+    authorize(r.principal, { kind: "identity-login" });
+    const row = await passkeys.register(ctx, userOf(r.principal).user, (await r.body()) as { response?: never; name?: unknown });
+    return ok(passkeys.passkeyView(row) satisfies A.PasskeyView, 201);
+  });
+
+  route("DELETE", "/api/passkeys/:id", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const { user } = userOf(r.principal);
+    passkeys.requireOwner(ctx, user);
+    passkeys.deletePasskey(ctx, user, r.params.id!);
+    return ok({ ok: true });
+  });
+
+  // ---- the passkey pages (HTML, pages.ts) --------------------------------------------------------------
+  route("GET", "/api/pages/passkeys", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const { user } = userOf(r.principal);
+    passkeys.requireOwner(ctx, user);
+    const body = passkeysPage(ctx, { email: user.email, ret: safeReturn(ctx, r.url.searchParams.get("return")), count: passkeys.listPasskeys(ctx, user.id).length });
+    return { raw: { type: "text/html; charset=utf-8", body, headers: PAGE_HEADERS } };
+  });
+
+  route("GET", "/api/pages/approvals/:id", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const v = userOf(r.principal);
+    passkeys.requireOwner(ctx, v.user);
+    const row = approvals.visibleApproval(ctx, r.params.id!, v);
+    if (row.approver !== "owner") throw httpError("not_found", "no such approval");
+    const body = approvalPage(ctx, {
+      approval: approvals.approvalView(ctx, row, v),
+      ret: safeReturn(ctx, r.url.searchParams.get("return")),
+      hasPasskey: passkeys.listPasskeys(ctx, v.user.id).length > 0,
+    });
+    return { raw: { type: "text/html; charset=utf-8", body, headers: PAGE_HEADERS } };
+  });
+
   // ---- admin ----------------------------------------------------------------------------------------
   route("GET", "/api/admin/budget", (r) => {
     authorize(r.principal, { kind: "admin", what: "budget" });
@@ -323,6 +420,25 @@ export function defineRoutes(ctx: Ctx): Routes {
     const t = sessionTask(ctx, r);
     const note = layers.addNote(ctx, t.user_id, ((await r.body()) as A.AddNoteRequest)?.text, "session", t.id);
     return ok(note satisfies A.PersonalNote, 201);
+  });
+
+  route("GET", "/api/session/actions", (r) => {
+    const t = sessionTask(ctx, r);
+    return ok({ actions: approvals.catalogue(ctx, t, users.requireUser(ctx, t.user_id)) } satisfies A.ActionCatalogue);
+  });
+
+  route("POST", "/api/session/approvals", async (r) => {
+    const t = sessionTask(ctx, r);
+    const row = await approvals.requestFromSession(ctx, t, (await r.body()) as A.SessionApprovalRequest);
+    return ok(approvals.approvalView(ctx, row, null) satisfies A.ApprovalView, 201);
+  });
+
+  route("GET", "/api/session/approvals/:id", async (r) => {
+    const t = sessionTask(ctx, r);
+    const row = approvals.getApproval(ctx, r.params.id!);
+    if (!row || row.task_id !== t.id) throw httpError("not_found", "no such approval");
+    const wait = Math.max(0, Math.min(55, Number(r.url.searchParams.get("wait") || 0) || 0));
+    return ok(approvals.approvalView(ctx, await approvals.waitSettled(ctx, row.id, wait), null) satisfies A.ApprovalView);
   });
 
   route("POST", "/api/session/status", async (r) => {
@@ -445,7 +561,7 @@ export function makeHandler(ctx: Ctx, resolveDeps: ResolveDeps, routes: Routes, 
         res.writeHead(302, { location: out.redirect, "cache-control": "no-store" });
         res.end();
       } else if (out.raw) {
-        res.writeHead(out.status ?? 200, { "content-type": out.raw.type, "content-length": out.raw.body.length, "cache-control": "no-store" });
+        res.writeHead(out.status ?? 200, { ...out.raw.headers, "content-type": out.raw.type, "content-length": out.raw.body.length, "cache-control": "no-store" });
         res.end(out.raw.body);
       } else sendJson(res, out.status ?? 200, out.json ?? {});
     } catch (e) {

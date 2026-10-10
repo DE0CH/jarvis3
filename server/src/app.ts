@@ -15,6 +15,8 @@ import { onSessionConnected } from "./tasks.ts";
 import { finishOffboarding, syncDirectory } from "./users.ts";
 import { budgetTick, capTick, idleTick, suggestionTick } from "./ticks.ts";
 import type { SyncResult } from "./api-types.ts";
+import { EventEmitter } from "node:events";
+import { checkActions } from "./actions/index.ts";
 
 export interface JarvisOptions {
   config: Config;
@@ -30,6 +32,8 @@ export interface JarvisOptions {
   snapshotTimeoutMs?: number;
   /** The app's web build, served at the root (null: only /api). */
   web?: WebApp | null;
+  /** The actions' credentials (loadActionSecrets). */
+  actionSecrets?: Record<string, Record<string, string>>;
 }
 
 export interface Jarvis {
@@ -48,6 +52,9 @@ export interface Jarvis {
 export function createJarvis(o: JarvisOptions): Jarvis {
   const clock = o.clock ?? systemClock;
   const log: Logger = o.log ?? ((msg, extra) => console.log(JSON.stringify({ t: new Date(clock.now()).toISOString(), msg, ...extra })));
+  checkActions(o.config.actions, o.actionSecrets ?? {});
+  const approvalBus = new EventEmitter();
+  approvalBus.setMaxListeners(0);
   let ctxRef: Ctx | null = null;
   const hub = new ChannelHub({ onConnect: (taskId) => ctxRef && onSessionConnected(ctxRef, taskId) });
   const ctx: Ctx = {
@@ -64,6 +71,8 @@ export function createJarvis(o: JarvisOptions): Jarvis {
     sessionGateClientSecret: o.sessionGateClientSecret,
     snapshotPollMs: o.snapshotPollMs ?? 3000,
     snapshotTimeoutMs: o.snapshotTimeoutMs ?? 15 * 60_000,
+    actionSecrets: o.actionSecrets ?? {},
+    approvalBus,
   };
   ctxRef = ctx;
 

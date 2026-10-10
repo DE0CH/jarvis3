@@ -97,9 +97,24 @@ export function applySample(
   return { state: s, enforce, capNotice, warnNotice };
 }
 
+/** The monthly cap in force: the owner's override (a Tier 3 change, actions/budget.ts) or the config's. */
+export function budgetCapUsd(ctx: Ctx): number | null {
+  const o = kvGet<{ monthlyUsd: number | null }>(ctx.db, "budget.override");
+  return o ? o.monthlyUsd || null : ctx.config.budget.monthlyUsd || null;
+}
+
+/** Set the override; a cap raised above (or removed from) this month's spend lifts the pause on new tasks. */
+export function setBudgetOverride(ctx: Ctx, monthlyUsd: number | null): void {
+  kvSet(ctx.db, "budget.override", { monthlyUsd });
+  const s = budgetState(ctx);
+  const cap = budgetCapUsd(ctx);
+  if (s.capped && (cap === null || s.spentUsd < cap)) saveBudget(ctx, { ...s, capped: false, warned: false });
+}
+
 export function budgetThresholds(ctx: Ctx): { capUsd: number | null; warnUsd: number | null } {
-  const cap = ctx.config.budget.monthlyUsd || null;
-  const warn = ctx.config.budget.warnUsd ?? (cap ? Math.round(cap * 0.8 * 100) / 100 : null);
+  const overridden = kvGet(ctx.db, "budget.override") !== null;
+  const cap = budgetCapUsd(ctx);
+  const warn = (overridden ? null : ctx.config.budget.warnUsd) ?? (cap ? Math.round(cap * 0.8 * 100) / 100 : null);
   return { capUsd: cap, warnUsd: warn || null };
 }
 

@@ -7,6 +7,7 @@ import type { BlobStore, DeviceTokenIssuer, DirectoryProvider, KeyProvisioner, M
 import type { ChannelHub } from "./channel.ts";
 import type { NoticeView } from "./api-types.ts";
 import { randomId } from "./crypto.ts";
+import type { EventEmitter } from "node:events";
 
 export interface Providers {
   machines: MachineProvider;
@@ -36,6 +37,10 @@ export interface Ctx extends Providers {
   /** Snapshot status poll interval (ms) and overall timeout (ms). */
   snapshotPollMs: number;
   snapshotTimeoutMs: number;
+  /** Each action's Tier 2 credentials (action name -> credential name -> value). Never leaves the server. */
+  actionSecrets: Record<string, Record<string, string>>;
+  /** Emits the approval id whenever an approval changes (the sessions' long polls wait on it). */
+  approvalBus: EventEmitter;
 }
 
 export const isAdminRole = (config: Config, role: string): boolean => !!config.roles[role]?.admin;

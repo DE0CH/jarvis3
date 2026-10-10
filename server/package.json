@@ -13,13 +13,18 @@
     "test": "npm run typecheck && node --disable-warning=ExperimentalWarning --test --test-concurrency=1 'test/**/*.test.ts'"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13.3.3",
     "aws4fetch": "^1.0.20",
     "jose": "^6.2.12",
+    "nodemailer": "^7.0.13",
     "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
+    "@types/nodemailer": "^8.0.2",
+    "@types/smtp-server": "^3.5.13",
     "@types/ws": "^8.18.2",
+    "smtp-server": "^3.19.20",
     "typescript": "^7.0.2"
   }
 }

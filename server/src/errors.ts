@@ -11,6 +11,7 @@ const STATUS: Record<ErrorCode, number> = {
   machine_hours_cap: 429,
   instance_budget: 429,
   too_many_requests: 429,
+  capability_missing: 403,
   upstream: 502,
   unavailable: 503,
   internal: 500,

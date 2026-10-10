@@ -3,7 +3,7 @@
 //   1. org       the org-env repo at the pinned commit: AGENTS.md, skills/<name>/…
 //   2. role      roles/<role>/AGENTS.md, roles/<role>/skills/<name>/…
 //   3. personal  per user, stored here (instructions text, skills, notes)
-//   4. policy    policy/AGENTS.md, policy/skills/<name>/…, policy/deny.json — loaded LAST
+//   4. policy    policy/AGENTS.md, policy/skills/<name>/…, policy/deny.json, policy/guards.json — loaded LAST
 //
 // Precedence for skill names: policy > org > role > personal. A skill whose name is already
 // claimed by a higher-precedence layer is renamed "<layer>-<name>" (so nothing can shadow an org
@@ -12,6 +12,7 @@ import type {
   AssembledInstruction,
   AssembledSkill,
   DenyRule,
+  GuardRule,
   LayerBundle,
   LayerName,
   PersonalLayerView,
@@ -218,6 +219,29 @@ function parseDeny(files: Map<string, Uint8Array>): DenyRule[] {
   });
 }
 
+export function parseGuards(raw: string | null): GuardRule[] {
+  if (!raw) return [];
+  const j = JSON.parse(raw) as unknown;
+  if (!Array.isArray(j)) throw new Error("policy/guards.json must be an array");
+  const seen = new Set<string>();
+  return j.map((r: Partial<GuardRule>, i) => {
+    const where = `policy/guards.json[${i}]`;
+    if (typeof r?.id !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(r.id)) throw new Error(`${where}: id must match [a-z0-9][a-z0-9-]{0,63}`);
+    if (seen.has(r.id)) throw new Error(`${where}: duplicate id ${r.id}`);
+    seen.add(r.id);
+    if (typeof r.tool !== "string" || !r.tool) throw new Error(`${where}: tool is required`);
+    if (typeof r.match !== "string" || !r.match) throw new Error(`${where}: match is required`);
+    try {
+      new RegExp(r.match, "i");
+    } catch (e) {
+      throw new Error(`${where}: match is not a valid regular expression: ${(e as Error).message}`);
+    }
+    if (r.approval !== "self" && r.approval !== "admin") throw new Error(`${where}: approval must be self or admin`);
+    if (typeof r.label !== "string" || !r.label.trim()) throw new Error(`${where}: label is required`);
+    return { id: r.id, tool: r.tool, match: r.match, approval: r.approval, label: r.label.trim() };
+  });
+}
+
 export function renderNotes(notes: PersonalNote[]): string {
   return ["Things the user asked you to remember:", ...notes.map((n) => `- ${n.text.replace(/\n+/g, " ")}`)].join("\n");
 }
@@ -259,7 +283,8 @@ export function assemble(o: { commit: string; files: Map<string, Uint8Array>; ro
   const layerRank: Record<LayerName, number> = { org: 0, role: 1, personal: 2, policy: 3 };
   const skills = [...claimed.values()].sort((a, b) => layerRank[a.layer] - layerRank[b.layer] || (a.name < b.name ? -1 : 1));
 
-  return { orgEnvCommit: o.commit, role, instructions, skills, deny: parseDeny(files) };
+  const guards = files.get("policy/guards.json");
+  return { orgEnvCommit: o.commit, role, instructions, skills, deny: parseDeny(files), guards: parseGuards(guards ? dec.decode(guards) : null) };
 }
 
 export async function bundleFor(ctx: Ctx, userId: string, role: string): Promise<LayerBundle> {

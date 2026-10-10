@@ -16,6 +16,7 @@ import { mintToken, randomId, sha256hex } from "./crypto.ts";
 import { httpError, notFound } from "./errors.ts";
 import { ensureKey } from "./userkeys.ts";
 import { budgetCapped, machineHoursCapReached, startRun, stopRuns } from "./spend.ts";
+import { cancelForTask } from "./approvals.ts";
 
 export type BusyKind = "creating" | "pausing" | "resuming" | "destroying";
 export type PauseReason = "user" | "idle" | "machine_hours_cap" | "instance_budget" | "offboarded";
@@ -119,6 +120,8 @@ async function launch(ctx: Ctx, task: TaskRow, user: UserRow, o: { firstPrompt?:
 /** Tear down the machine side of a task (after its state is safe elsewhere). */
 async function release(ctx: Ctx, task: TaskRow): Promise<void> {
   ctx.hub.closeTask(task.id);
+  // nobody is waiting for these any more: the machine (and the agent's tool call) is gone
+  cancelForTask(ctx, task.id, "the task stopped before a decision");
   if (task.machine_id) await ctx.machines.destroy(task.machine_id);
   stopRuns(ctx, task.id);
   update(ctx, task.id, { machine_id: null, session_token_hash: null, idle_since: null });

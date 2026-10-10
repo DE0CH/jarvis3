@@ -21,6 +21,7 @@ export type ErrorCode =
   | "machine_hours_cap" // 429: the user's monthly machine-hour cap is reached
   | "instance_budget" // 429: the instance-wide monthly machine budget is reached
   | "too_many_requests" // 429: rate limit (device pairing)
+  | "capability_missing" // 403 (session routes): the task's role lacks this action; file an access request
   | "upstream" // 502: a provider (Fly, OpenRouter, Cloudflare, Google, S3) failed
   | "unavailable" // 503: the session is not connected yet
   | "internal"; // 500
@@ -71,6 +72,10 @@ export interface UserDetail {
 export interface MeView extends UserDetail {
   /** Notices the caller has not marked read yet (POST /api/notices/read). */
   unreadNotices: number;
+  /** Approvals waiting for the caller's decision (GET /api/approvals?pending=1). */
+  pendingApprovals: number;
+  /** Whether the caller is the instance's owner: the one who approves Tier 3 changes with a passkey. */
+  isOwner: boolean;
   /** What this instance has switched on. */
   features?: InstanceFeatures;
 }
@@ -314,6 +319,24 @@ export interface LayerBundle {
   instructions: AssembledInstruction[];
   skills: AssembledSkill[];
   deny: DenyRule[];
+  /** Locked-policy guard rules (policy/guards.json): tool calls that stop for an approval first. */
+  guards: GuardRule[];
+}
+
+/**
+ * A locked-policy guard (policy/guards.json): a tool call whose input matches `match` (a regular
+ * expression, case-insensitive, searched anywhere in the bash command, or in the tool's JSON
+ * arguments for other tools) stops and waits for an approval before it runs.
+ */
+export interface GuardRule {
+  id: string; // [a-z0-9][a-z0-9-]{0,63}
+  /** OpenCode tool name, e.g. "bash", "webfetch"; "*" = every tool. */
+  tool: string;
+  match: string;
+  /** "self": one tap by the task's owner; "admin": one tap by an admin. */
+  approval: "self" | "admin";
+  /** What the action is, for people: "Send an email from your own mailbox". */
+  label: string;
 }
 
 // ---- session-facing ---------------------------------------------------------------------------
@@ -331,7 +354,7 @@ export interface SessionStatusRequest {
 
 export interface NoticeView {
   id: string;
-  kind: "machine_hours_cap" | "instance_budget" | "task_failed" | "offboarded" | "suggestion";
+  kind: "machine_hours_cap" | "instance_budget" | "task_failed" | "offboarded" | "suggestion" | "approval_needed" | "approval_decided" | "passkey_added";
   text: string;
   taskId: string | null;
   createdAt: IsoTime;
@@ -373,6 +396,138 @@ export interface SyncResult {
   updated: string[];
   offboarded: string[];
   reactivated: string[];
+}
+
+// ---- actions and approvals -------------------------------------------------------------------
+
+/** One named action of the broker (config `actions`), as a session sees it. */
+export interface ActionView {
+  name: string; // config key, e.g. "company_email"
+  type: string; // the built-in action type, e.g. "smtp.send"
+  label: string;
+  description: string;
+  /** 2 = shared company asset (the server holds the credential); 3 = infrastructure (owner + passkey). */
+  tier: 2 | 3;
+  /** Parameter name -> what it takes. */
+  params: Record<string, ActionParamView>;
+  /** Whether the asking task may use it now (its role has it, or a grant). If not: file an access request. */
+  available: boolean;
+  /** Who approves when no auto rule matches: "auto", "self", "admin" or "owner" (Tier 3). */
+  approval: ApprovalLevel;
+}
+
+export interface ActionParamView {
+  type: "string" | "number" | "string[]" | "number|null";
+  required: boolean;
+  description: string;
+}
+
+/** GET /api/session/actions */
+export interface ActionCatalogue {
+  actions: ActionView[];
+}
+
+export type ApprovalKind = "action" | "guard" | "access" | "question";
+/** auto: allowed by the action's policy, no person needed. self: the task's owner. admin: any admin. owner: the instance's owner with a passkey (Tier 3). */
+export type ApprovalLevel = "auto" | "self" | "admin" | "owner";
+/**
+ * pending   waiting for a decision
+ * approved  approved (a guard may run; an access request is granted; a question is answered)
+ * executing an approved action is running on the server
+ * done      the action ran (`result`)
+ * failed    the action ran and failed (`error`)
+ * denied    refused (`decision.note` says why)
+ * cancelled the task stopped (paused, destroyed or offboarded) before a decision
+ */
+export type ApprovalState = "pending" | "approved" | "executing" | "done" | "failed" | "denied" | "cancelled";
+
+/** Exactly what will happen, for the person deciding. */
+export interface ApprovalPreview {
+  /** One line: "Send an email to x@example.net from support@example.org". */
+  summary: string;
+  fields: { label: string; value: string }[];
+  /** A longer text shown as-is (an email body, a command, a question), or null. */
+  body: string | null;
+}
+
+export interface ApprovalView {
+  id: string;
+  taskId: string | null;
+  taskTitle: string | null;
+  /** The task's owner, on whose behalf it was asked. */
+  user: { id: string; email: string; name: string };
+  kind: ApprovalKind;
+  approver: ApprovalLevel;
+  state: ApprovalState;
+  /** The action name (action, access), or the guard rule id (guard); null for a question. */
+  action: string | null;
+  preview: ApprovalPreview;
+  /** Why the agent asks (from the agent). */
+  reason: string;
+  /** A question's suggested answers (may be empty), else null. */
+  options: string[] | null;
+  /** Tier 3: sha256 (hex) of the canonical change the passkey signs; null otherwise. */
+  changeHash: string | null;
+  decision: null | {
+    by: { id: string; email: string; name: string } | null; // null for auto
+    at: IsoTime;
+    /** A denial's reason, or a question's answer. */
+    note: string | null;
+    /** An access grant's scope. */
+    grantScope: "task" | "role" | null;
+    /** Approved with a passkey (Tier 3). */
+    passkey: boolean;
+  };
+  result: Record<string, unknown> | null;
+  error: string | null;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+  /** Whether the caller may decide it now. */
+  canDecide: boolean;
+  /** How: "tap" (POST …/decide), "passkey" (approve on the passkey page; deny is still a tap), or null. */
+  decideWith: "tap" | "passkey" | null;
+}
+
+/** GET /api/approvals */
+export interface ApprovalList {
+  approvals: ApprovalView[];
+}
+
+/** POST /api/approvals/:id/decide */
+export interface DecideRequest {
+  decision: "approve" | "deny";
+  /** A denial's reason (optional), or a question's answer (required to approve a question). */
+  note?: string;
+  /** Required to approve an access request: grant it for the asking task only, or for its whole role. */
+  grantScope?: "task" | "role";
+}
+
+/** POST /api/session/approvals: what a session asks for. */
+export type SessionApprovalRequest =
+  | { kind: "action"; action: string; params: Record<string, unknown>; reason?: string }
+  | { kind: "guard"; rule: string; tool: string; input: string; reason?: string }
+  | { kind: "access"; action: string; reason: string }
+  | { kind: "question"; question: string; options?: string[]; reason?: string };
+
+// ---- passkeys (Tier 3 approvals) ---------------------------------------------------------------
+
+export interface PasskeyView {
+  id: string; // the credential id, base64url
+  name: string;
+  createdAt: IsoTime;
+  lastUsedAt: IsoTime | null;
+}
+
+/** GET /api/passkeys */
+export interface PasskeyList {
+  passkeys: PasskeyView[];
+}
+
+/** POST /api/approvals/:id/passkey/options: the WebAuthn request options and the change they sign. */
+export interface PasskeyApprovalOptions {
+  options: Record<string, unknown>; // PublicKeyCredentialRequestOptionsJSON
+  change: Record<string, unknown>;
+  changeHash: string;
 }
 
 /** GET /api/health */

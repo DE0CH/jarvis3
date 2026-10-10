@@ -119,6 +119,65 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX suggestions_user ON suggestions(user_id);
   `,
+  // 4: actions and approvals (the queue, access grants), passkeys for Tier 3 approvals
+  `
+  CREATE TABLE approvals (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks(id),
+    user_id TEXT NOT NULL REFERENCES users(id),   -- the task's owner (on whose behalf it is asked)
+    kind TEXT NOT NULL CHECK (kind IN ('action','guard','access','question')),
+    approver TEXT NOT NULL CHECK (approver IN ('auto','self','admin','owner')),
+    state TEXT NOT NULL CHECK (state IN ('pending','approved','executing','done','failed','denied','cancelled')),
+    action TEXT,                                  -- action name, or guard rule id
+    payload TEXT NOT NULL,                        -- JSON: the call's parameters, the guarded input, the question
+    preview TEXT NOT NULL,                        -- JSON ApprovalPreview
+    reason TEXT NOT NULL DEFAULT '',
+    options TEXT,                                 -- JSON string[] (questions)
+    change_hash TEXT,                             -- Tier 3: sha256 of the canonical change
+    decided_by TEXT REFERENCES users(id),
+    decided_at INTEGER,
+    decision_note TEXT,
+    grant_scope TEXT,
+    passkey_proof TEXT,                           -- Tier 3: JSON of the WebAuthn assertion that approved it
+    result TEXT,                                  -- JSON
+    error TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX approvals_task ON approvals(task_id);
+  CREATE INDEX approvals_user ON approvals(user_id);
+  CREATE INDEX approvals_state ON approvals(state);
+  CREATE TABLE grants (
+    id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('task','role')),
+    task_id TEXT REFERENCES tasks(id),
+    role TEXT,
+    granted_by TEXT NOT NULL REFERENCES users(id),
+    approval_id TEXT REFERENCES approvals(id),
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX grants_action ON grants(action);
+  CREATE TABLE passkeys (
+    id TEXT PRIMARY KEY,                          -- credential id, base64url
+    user_id TEXT NOT NULL REFERENCES users(id),
+    public_key TEXT NOT NULL,                     -- COSE public key, base64url
+    counter INTEGER NOT NULL,
+    transports TEXT NOT NULL DEFAULT '[]',
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER
+  );
+  CREATE INDEX passkeys_user ON passkeys(user_id);
+  CREATE TABLE webauthn_challenges (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    purpose TEXT NOT NULL CHECK (purpose IN ('register','approve')),
+    approval_id TEXT REFERENCES approvals(id),
+    challenge TEXT NOT NULL,                      -- base64url
+    expires_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 export type Db = DatabaseSync;

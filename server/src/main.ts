@@ -1,5 +1,5 @@
 // Production entry: config from JARVIS_CONFIG, secrets from the environment, state in JARVIS_DB.
-import { loadConfig, loadSecrets } from "./config.ts";
+import { loadActionSecrets, loadConfig, loadSecrets } from "./config.ts";
 import { openDb } from "./db.ts";
 import { createJarvis } from "./app.ts";
 import { FlyMachines } from "./fly.ts";
@@ -47,6 +47,7 @@ const jarvis = createJarvis({
   config,
   web: webDir ? new WebApp(webDir) : null,
   db,
+  actionSecrets: loadActionSecrets(config),
   dbKey: secrets.dbKey,
   sessionGateClientSecret: secrets.sessionGateClientSecret,
   providers: {
