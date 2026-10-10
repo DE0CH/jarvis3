@@ -5,6 +5,7 @@
 //   last message is a tool result          -> "TOOL RESULT: <first line of the output>"
 //   the user says "remember: <note>"       -> a bash tool call: jarvis-remember "<note>"
 //   the user says "run: <command>"         -> a bash tool call running <command>
+//   the user says "call: <tool> <json>"    -> a call of any tool (e.g. jarvis_action) with those arguments
 //   a request without tools (title etc.)   -> "Scripted title"
 //   anything else                          -> "ECHO: <the user's text>"
 //
@@ -156,6 +157,8 @@ export function script(messages: Msg[], hasTools: boolean): Reply {
     const note = remember[1]!.trim().replace(/["\\$`]/g, "");
     return { tool: { name: "bash", args: { command: `jarvis-remember "${note}"`, description: "Save a note for the user" } } };
   }
+  const callTool = /call:\s*([a-z_]+)\s+(\{.*\})\s*$/is.exec(user);
+  if (callTool) return { tool: { name: callTool[1]!, args: JSON.parse(callTool[2]!) as Record<string, unknown> } };
   const run = /run:\s*(.+)/i.exec(user);
   if (run) return { tool: { name: "bash", args: { command: run[1]!.trim(), description: "Run a command" } } };
   return { text: `ECHO: ${user.trim().split("\n").at(-1)}` };

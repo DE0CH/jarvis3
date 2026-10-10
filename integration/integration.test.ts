@@ -6,6 +6,10 @@
 //   MinIO). Another user gets 404 on the task and on the daemon socket. The task carries its main
 //   agent's id, and the HTTP relay reaches the daemon.
 //
+// Then actions and approvals (DESIGN "Actions and approvals") through the real OpenCode policy
+// plugin: self-confirm, admin approval, denial (of an action and of a guarded tool call), and a
+// Tier 3 change signed by the owner with a software passkey.
+//
 // Needs Docker and the session image: SESSION_IMAGE (default jarvis3-session:test), built from
 // session-image/. Run: npm test (in integration/).
 import { test, before, after } from "node:test";
@@ -13,7 +17,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { WebSocket } from "ws";
 import { createPaseoClient, type PaseoClient } from "@getpaseo/client";
+import { SMTPServer } from "smtp-server";
+import type { AddressInfo } from "node:net";
 import { startStack, MODEL, type Stack } from "./stack.ts";
+import { SoftAuthenticator } from "../server/src/fakes/soft-authenticator.ts";
 
 const IMAGE = process.env.SESSION_IMAGE || "jarvis3-session:test";
 const BOOT_MS = Number(process.env.BOOT_TIMEOUT_MS || 240_000);
@@ -23,11 +30,46 @@ let s: Stack;
 const t0 = Date.now();
 const log = (m: string) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s] ${m}`);
 
+// the company mailbox the broker's smtp.send actions use (the server talks to it, never a machine)
+const SMTP_PASS = "itest-smtp-" + Math.random().toString(36).slice(2);
+const mails: { to: string[]; data: string }[] = [];
+const smtp = new SMTPServer({
+  authOptional: false,
+  allowInsecureAuth: true,
+  disabledCommands: ["STARTTLS"],
+  logger: false,
+  onAuth: (a, _s, cb) => (a.username === "support@example.org" && a.password === SMTP_PASS ? cb(null, { user: a.username }) : cb(new Error("bad login"))),
+  onData(stream, session, cb) {
+    let data = "";
+    stream.on("data", (c) => (data += c));
+    stream.on("end", () => {
+      mails.push({ to: session.envelope.rcptTo.map((r) => r.address), data });
+      cb();
+    });
+  },
+});
+
 before(async () => {
-  s = await startStack({ image: IMAGE, log });
+  await new Promise<void>((r) => smtp.listen(0, "127.0.0.1", () => r()));
+  const smtpSettings = { host: "127.0.0.1", port: (smtp.server.address() as AddressInfo).port, security: "none", from: "support@example.org" };
+  const creds = { user: "ITEST_SMTP_USER", password: "ITEST_SMTP_PASS" };
+  s = await startStack({
+    image: IMAGE,
+    log,
+    config: {
+      owner: "admin@example.org",
+      actions: {
+        desk_email: { type: "smtp.send", label: "Email from your desk address", roles: ["staff"], approval: "self", settings: smtpSettings, credentials: creds },
+        company_email: { type: "smtp.send", label: "Email from the support mailbox", roles: ["*"], approval: "admin", auto: { allowList: ["*@example.org"] }, settings: smtpSettings, credentials: creds },
+        set_budget: { type: "instance.set_budget", label: "Change the instance budget", roles: ["admin"] },
+      },
+    },
+    actionSecrets: { desk_email: { user: "support@example.org", password: SMTP_PASS }, company_email: { user: "support@example.org", password: SMTP_PASS }, set_budget: {} },
+  });
 });
 after(async () => {
   await s?.close();
+  await new Promise<void>((r) => smtp.close(() => r()));
 });
 
 async function call(email: string, method: string, path: string, body?: unknown) {
@@ -322,5 +364,185 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.equal(meta.id, taskId);
     assert.equal(await s3exists(`snapshots/${taskId}/state.tar.gz`), false);
     assert.equal((await s.machines.list()).length, 0);
+  });
+});
+
+test("actions and approvals through the real policy plugin", { timeout: 20 * 60_000 }, async (t) => {
+  let broken = false;
+  const step = (name: string, fn: () => Promise<void>) =>
+    t.test(name, { skip: broken ? "an earlier step failed" : false }, async () => {
+      try {
+        await fn();
+      } catch (e) {
+        broken = true;
+        diagnose();
+        throw e;
+      }
+    });
+  const tasks: Record<string, { id: string; agent: string }> = {};
+
+  /** A task for `email` with its main agent idle. */
+  const startTask = async (email: string) => {
+    const r = await call(email, "POST", "/api/tasks", { prompt: `Hello from ${email}`, requestId: `itest-approvals-${email}` });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    await waitFor(`${email}'s task running`, async () => {
+      const v = await taskOf(email, r.body.id);
+      if (v.state === "failed") throw Object.assign(new Error(`task failed: ${v.error}`), { fatal: true });
+      return v.connected && (v.state === "running" || v.state === "idle") ? v : null;
+    }, BOOT_MS, 2000);
+    const client = await paseoAs(email, r.body.id);
+    try {
+      const agents = await waitFor("the main agent", async () => (await client.agents.list()).entries.map((e: any) => e.agent ?? e), 60_000);
+      await client.agents.ref(agents[0].id).waitForFinish(TURN_MS);
+      return { id: r.body.id as string, agent: agents[0].id as string };
+    } finally {
+      await client.close();
+    }
+  };
+
+  /** Send a message and, while the agent waits on the tool, act on the request it filed. */
+  const turn = async (email: string, text: string, onRequest: (a: any) => Promise<void>, as: string) => {
+    const task = tasks[email]!;
+    const client = await paseoAs(email, task.id);
+    try {
+      const before = new Set(((await call(as, "GET", `/api/approvals?taskId=${task.id}`)).body?.approvals ?? []).map((a: { id: string }) => a.id));
+      const running = client.agents.ref(task.agent).run(text, { timeoutMs: TURN_MS });
+      const a = await waitFor("the request in the queue", async () => {
+        const list = (await call(as, "GET", "/api/approvals?pending=1")).body.approvals as any[];
+        return list.find((x) => x.taskId === task.id && !before.has(x.id));
+      }, TURN_MS);
+      await onRequest(a);
+      const r = await running;
+      assert.equal(r.status, "idle", JSON.stringify(r));
+      return { request: a, reply: String(r.lastMessage) };
+    } finally {
+      await client.close();
+    }
+  };
+
+  await step("tasks for alice (staff) and the admin (the owner)", async () => {
+    tasks[ALICE] = await startTask(ALICE);
+    tasks[ADMIN] = await startTask(ADMIN);
+    const m = await machineOf(tasks[ALICE]!.id);
+    const cfg = JSON.parse(await exec(m, "cat /home/jarvis/.config/opencode/opencode.json"));
+    assert.deepEqual(cfg.plugin, ["file:///usr/local/lib/jarvis/lib/opencode-plugin.mjs"]);
+    assert.equal(await exec(m, "stat -c %U /usr/local/lib/jarvis/lib/opencode-plugin.mjs"), "root");
+    const chat = s.openrouter.chats.findLast((c) => c.tools.length)!;
+    for (const name of ["jarvis_actions", "jarvis_action", "jarvis_request_access", "jarvis_ask_boss"]) assert.ok(chat.tools.includes(name), `the model is offered ${name}: ${chat.tools}`);
+  });
+
+  await step("self-confirm: alice sees exactly what will be sent, taps, and the agent gets the result", async () => {
+    const { request, reply } = await turn(
+      ALICE,
+      `call: jarvis_action {"action":"desk_email","params":{"to":["client@example.net"],"subject":"Your quote","text":"Dear client,\\nthe quote is attached."},"reason":"the user asked"}`,
+      async (a) => {
+        assert.equal(a.approver, "self");
+        assert.equal(a.kind, "action");
+        assert.equal(a.preview.summary, "Send an email to client@example.net from support@example.org");
+        assert.deepEqual(a.preview.fields.map((f: { label: string }) => f.label), ["From", "To", "Subject"]);
+        assert.equal(a.preview.body, "Dear client,\nthe quote is attached.");
+        assert.equal((await call(ADMIN, "GET", `/api/approvals/${a.id}`)).body.canDecide, false, "only alice confirms her own");
+        assert.equal((await call(BOB, "GET", `/api/approvals/${a.id}`)).status, 404);
+        const d = await call(ALICE, "POST", `/api/approvals/${a.id}/decide`, { decision: "approve" });
+        assert.equal(d.status, 200, JSON.stringify(d.body));
+      },
+      ALICE,
+    );
+    assert.match(reply, /TOOL RESULT: Done: Send an email to client@example.net/);
+    assert.ok(mails.some((m) => m.to.includes("client@example.net") && m.data.includes("the quote is attached")));
+    assert.equal((await call(ALICE, "GET", `/api/approvals/${request.id}`)).body.state, "done");
+  });
+
+  await step("admin approval: mail leaving the company waits for an admin", async () => {
+    const { reply } = await turn(
+      ALICE,
+      `call: jarvis_action {"action":"company_email","params":{"to":["partner@example.net"],"subject":"Update","text":"Hello partner"}}`,
+      async (a) => {
+        assert.equal(a.approver, "admin");
+        assert.equal((await call(ALICE, "POST", `/api/approvals/${a.id}/decide`, { decision: "approve" })).status, 403, "staff can't approve it");
+        assert.equal((await call(ADMIN, "POST", `/api/approvals/${a.id}/decide`, { decision: "approve" })).status, 200);
+      },
+      ADMIN,
+    );
+    assert.match(reply, /TOOL RESULT: Done: Send an email to partner@example.net/);
+    assert.ok(mails.some((m) => m.to.includes("partner@example.net")));
+  });
+
+  await step("denial: the admin refuses with a reason; nothing is sent and the agent is told", async () => {
+    const { reply } = await turn(
+      ALICE,
+      `call: jarvis_action {"action":"company_email","params":{"to":["press@example.net"],"subject":"Leak","text":"Secret plans"}}`,
+      async (a) => {
+        assert.equal((await call(ADMIN, "POST", `/api/approvals/${a.id}/decide`, { decision: "deny", note: "not to the press" })).status, 200);
+      },
+      ADMIN,
+    );
+    assert.match(reply, /TOOL RESULT: Denied by Admin: Send an email to press@example.net.*not to the press/);
+    assert.ok(!mails.some((m) => m.to.includes("press@example.net")));
+  });
+
+  await step("a guarded tool call stops until alice confirms it; a denied one never runs", async () => {
+    const ok = await turn(
+      ALICE,
+      "run: echo gmail-send would go out now",
+      async (a) => {
+        assert.equal(a.kind, "guard");
+        assert.equal(a.approver, "self");
+        assert.equal(a.preview.summary, "Send an email from your own mailbox");
+        assert.equal(a.preview.body, "echo gmail-send would go out now");
+        assert.equal((await call(ALICE, "POST", `/api/approvals/${a.id}/decide`, { decision: "approve" })).status, 200);
+      },
+      ALICE,
+    );
+    assert.match(ok.reply, /TOOL RESULT: gmail-send would go out now/);
+    const m = await machineOf(tasks[ALICE]!.id);
+    const no = await turn(
+      ALICE,
+      "run: echo gmail-send > /tmp/guard-ran",
+      async (a) => {
+        assert.equal((await call(ALICE, "POST", `/api/approvals/${a.id}/decide`, { decision: "deny", note: "wrong recipient" })).status, 200);
+      },
+      ALICE,
+    );
+    assert.match(no.reply, /locked policy \(Send an email from your own mailbox\)/);
+    assert.equal(await exec(m, "test -e /tmp/guard-ran && echo ran || echo not-run"), "not-run");
+  });
+
+  await step("Tier 3: the owner signs exactly the change with a user-verified passkey", async () => {
+    const auth = new SoftAuthenticator();
+    const ro = await call(ADMIN, "POST", "/api/passkeys/register/options");
+    assert.equal(ro.status, 200, JSON.stringify(ro.body));
+    const reg = await call(ADMIN, "POST", "/api/passkeys/register", { response: auth.create(ro.body), name: "itest phone" });
+    assert.equal(reg.status, 201, JSON.stringify(reg.body));
+    const { reply } = await turn(
+      ADMIN,
+      `call: jarvis_action {"action":"set_budget","params":{"monthlyUsd":75},"reason":"more sessions this month"}`,
+      async (a) => {
+        assert.equal(a.approver, "owner");
+        assert.equal(a.decideWith, "passkey");
+        assert.equal(a.preview.summary, "Change the instance's monthly machine budget from no cap to USD 75.00 a month");
+        assert.equal((await call(ADMIN, "POST", `/api/approvals/${a.id}/decide`, { decision: "approve" })).status, 400, "a tap is not enough");
+        const o = await call(ADMIN, "POST", `/api/approvals/${a.id}/passkey/options`);
+        assert.equal(o.body.changeHash, a.changeHash);
+        auth.o.uv = false;
+        assert.equal((await call(ADMIN, "POST", `/api/approvals/${a.id}/passkey`, { response: auth.get(o.body.options) })).status, 400, "no Face ID, no approval");
+        auth.o.uv = true;
+        const o2 = await call(ADMIN, "POST", `/api/approvals/${a.id}/passkey/options`);
+        const r = await call(ADMIN, "POST", `/api/approvals/${a.id}/passkey`, { response: auth.get(o2.body.options) });
+        assert.equal(r.status, 200, JSON.stringify(r.body));
+        assert.equal(r.body.decision.passkey, true);
+      },
+      ADMIN,
+    );
+    assert.match(reply, /TOOL RESULT: Done: Change the instance's monthly machine budget/);
+    assert.equal((await call(ADMIN, "GET", "/api/admin/budget")).body.capUsd, 75);
+  });
+
+  await step("clean up: destroy both tasks", async () => {
+    for (const email of [ALICE, ADMIN]) assert.equal((await call(email, "DELETE", `/api/tasks/${tasks[email]!.id}`)).status, 202);
+    await waitFor("both archived", async () => {
+      for (const email of [ALICE, ADMIN]) if ((await taskOf(email, tasks[email]!.id)).state !== "archived") return false;
+      return true;
+    }, 5 * 60_000, 2000);
   });
 });

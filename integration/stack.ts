@@ -42,6 +42,7 @@ export const ORG_FILES: Record<string, string> = {
   "roles/admin/AGENTS.md": "ROLE-MARK: admins run the instance.",
   "policy/AGENTS.md": "POLICY-MARK: never send money.",
   "policy/deny.json": JSON.stringify([{ permission: "bash", pattern: "rm -rf /*" }]),
+  "policy/guards.json": JSON.stringify([{ id: "own-mail", tool: "bash", match: "gmail-send", approval: "self", label: "Send an email from your own mailbox" }]),
   "scripts/hello.sh": "#!/bin/sh\necho hello from the org\n",
 };
 
@@ -98,7 +99,16 @@ export interface Stack {
   close(): Promise<void>;
 }
 
-export async function startStack(o: { image: string; log?: (m: string) => void }): Promise<Stack> {
+export interface StackOptions {
+  image: string;
+  log?: (m: string) => void;
+  /** Extra config (e.g. `owner`, `actions`). */
+  config?: Partial<Config>;
+  /** The actions' credentials (what loadActionSecrets reads from the env in production). */
+  actionSecrets?: Record<string, Record<string, string>>;
+}
+
+export async function startStack(o: StackOptions): Promise<Stack> {
   const log = o.log ?? ((m: string) => console.log(m));
   const dir = mkdtempSync(join(tmpdir(), "jarvis3-itest-"));
   const gw = dockerGateway();
@@ -152,6 +162,7 @@ export async function startStack(o: { image: string; log?: (m: string) => void }
     budget: { monthlyUsd: null },
     devices: { appScheme: "jarvis3", cloudflareAccountId: "itest" },
     presignSeconds: 3600,
+    ...o.config,
   });
 
   const jarvis = createJarvis({
@@ -163,6 +174,7 @@ export async function startStack(o: { image: string; log?: (m: string) => void }
     snapshotPollMs: 1000,
     snapshotTimeoutMs: 5 * 60_000,
     log: (m, e) => log(`[jarvis] ${m} ${e ? JSON.stringify(e) : ""}`),
+    actionSecrets: o.actionSecrets ?? {},
     providers: {
       machines,
       blobs: new S3BlobStore({ endpoint: minio.endpoint, region: "us-east-1", bucket, accessKeyId: minio.key, secretAccessKey: minio.secret }),
