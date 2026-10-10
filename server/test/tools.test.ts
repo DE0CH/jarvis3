@@ -261,9 +261,9 @@ describe("authorisation", () => {
       await call(h, await session(h, tb), "POST", "/api/session/tools/search", { query: "b" });
       assert.equal((await call(h, await asEmail(h, alice), "GET", "/api/me")).body.tools.web.calls, 0);
       assert.equal((await call(h, await asEmail(h, bob), "GET", "/api/me")).body.tools.web.calls, 1);
-      // a paused task's token is dead
-      await call(h, await asEmail(h, alice), "POST", `/api/tasks/${ta}/pause`);
+      // a paused task's token is dead (read it first: the pause may release the machine at once)
       const old = sessionTokenOf(h, ta);
+      await call(h, await asEmail(h, alice), "POST", `/api/tasks/${ta}/pause`);
       await h.jarvis.settle();
       assert.equal((await call(h, await asService(h, GATE, old), "POST", "/api/session/tools/search", { query: "x" })).status, 401);
     } finally {
