@@ -27,6 +27,7 @@ test("create: machine gets the right env; state starting until the session dials
     assert.equal(m.state, "started");
     assert.equal(m.image, "ghcr.io/example/session:test");
     assert.equal(m.env.JARVIS_FIRST_PROMPT, "Write the weekly report\nwith numbers");
+    assert.equal(m.env.JARVIS_TASK_TITLE, "Write the weekly report");
     assert.equal(m.env.JARVIS_MODEL, "openai/gpt-test");
     assert.equal(m.env.JARVIS_URL, "https://jarvis.example.org");
     assert.equal(m.env.CF_ACCESS_CLIENT_ID, GATE);
@@ -146,6 +147,7 @@ test("pause snapshots then destroys; the session token dies; resume restores on 
     assert.notEqual(m2.id, firstMachine);
     assert.equal(m2.env.JARVIS_RESTORE_URL, `fake-s3://get/snapshots/${id}/state.tar.gz?expires=3600`);
     assert.equal(m2.env.JARVIS_FIRST_PROMPT, undefined, "the first prompt is not replayed");
+    assert.equal(m2.env.JARVIS_TASK_TITLE, undefined);
     assert.notEqual(m2.env.JARVIS_SESSION_TOKEN, oldToken);
     assert.equal(m2.env.PASEO_PASSWORD, machineOf(h, id)!.env.PASEO_PASSWORD);
     assert.equal((await call(h, c, "POST", `/api/tasks/${id}/resume`)).status, 409, "already resumed");

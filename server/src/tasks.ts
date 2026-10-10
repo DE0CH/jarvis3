@@ -105,7 +105,13 @@ async function launch(ctx: Ctx, task: TaskRow, user: UserRow, o: { firstPrompt?:
     JARVIS_TIME_ZONE: user.time_zone || "UTC",
   };
   if (ctx.config.models.find((m) => m.id === task.model)?.images) env.JARVIS_MODEL_IMAGES = "1";
-  if (o.firstPrompt) env.JARVIS_FIRST_PROMPT = o.firstPrompt;
+  if (o.firstPrompt) {
+    env.JARVIS_FIRST_PROMPT = o.firstPrompt;
+    // the main agent is created with this title, so the title the session reports back (Paseo's agent
+    // title) is the task's own, not Paseo's placeholder cut from the first prompt (a schedule's run
+    // would otherwise be renamed to its "[Scheduled task …" header line)
+    env.JARVIS_TASK_TITLE = task.title;
+  }
   // Tier 0 proxy, subuser providers: the owner's own capped sub-account (jarvis-agent keeps it out
   // of the agent's environment and serves it as a local proxy). Relay providers need nothing here.
   const proxy = await proxyEnv(ctx, user);

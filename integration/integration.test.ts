@@ -831,6 +831,8 @@ test("scheduled tasks, wakeups and channels on the real session image", { timeou
       return v.connected && (v.state === "running" || v.state === "idle") && v.agentId ? v : null;
     }, BOOT_MS, 2000);
     agentId = (await taskOf(ALICE, taskId)).agentId;
+    const runTitle = r.body.task.title;
+    assert.match(runTitle, /^Weekly digest · /);
     const chat = await waitFor("the scheduled prompt at the model", seenChat("SCHEDULED-MARK", before), TURN_MS);
     assert.match(chat.lastUser, /^\[Scheduled task "Weekly digest", started by hand from its schedule/);
     assert.ok(chat.tools.includes("jarvis_wakeup") && chat.tools.includes("jarvis_post") && chat.tools.includes("jarvis_wakeups"), `${chat.tools}`);
@@ -839,6 +841,8 @@ test("scheduled tasks, wakeups and channels on the real session image", { timeou
     assert.equal((await call(BOB, "GET", `/api/schedules/${scheduleId}`)).status, 404);
     assert.equal((await call(BOB, "POST", `/api/schedules/${scheduleId}/run`)).status, 404);
     await idle();
+    // the session reported its main agent's title by now: the run keeps the schedule's title
+    assert.equal((await taskOf(ALICE, taskId)).title, runTitle);
   });
 
   await step("the agent posts to the task's channel (plugin tool); alice is told; bob sees nothing", async () => {

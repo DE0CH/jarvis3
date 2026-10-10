@@ -584,6 +584,7 @@ What the server gives a machine (env) and expects from the session image (built 
 | `PASEO_PASSWORD` | the daemon password (stable for the task's life) |
 | `JARVIS_DAEMON_PATH` | where the channel agent opens proxied sockets |
 | `JARVIS_FIRST_PROMPT` | first create only |
+| `JARVIS_TASK_TITLE` | first create only: the task's title, given to the main agent so the title the session reports (`POST /api/session/status`) stays the task's own |
 | `JARVIS_ATTACHMENTS` | first create only, when the prompt has attachments: a JSON list of paths in the owner's files |
 | `JARVIS_MODEL_IMAGES` | `1` when the task's model takes image input (config `models[].images`) |
 | `JARVIS_FILES_SYNC_BYTES` | how much of the owner's files the session copies at boot (config `files.sessionSyncBytes`) |

@@ -284,7 +284,11 @@ async function sendFirstPrompt() {
       // images go to the model inline; if that keeps failing (a model without image input), without them
       const withImages = images.length > 0 && attempt < 3;
       log("creating the main agent", { attempt, attachments: note ? "yes" : "no", images: withImages ? images.length : 0 });
-      const agent = await c.agents.create({ config: { provider: `opencode/openrouter/${MODEL}` }, cwd: P.workspace, prompt: text, ...(withImages ? { images } : {}) });
+      // the task's title as the agent's (else Paseo titles it after the prompt's first line, and that
+      // comes back to the server as the task's title)
+      const title = (env.JARVIS_TASK_TITLE || "").trim();
+      const config = { provider: `opencode/openrouter/${MODEL}`, ...(title ? { title } : {}) };
+      const agent = await c.agents.create({ config, cwd: P.workspace, prompt: text, ...(withImages ? { images } : {}) });
       writeFileSync(mainAgentFile(), agent.id);
       writeFileSync(marker, new Date().toISOString());
       chownR(P.jarvis);
