@@ -392,7 +392,14 @@ test("actions and approvals through the real policy plugin", { timeout: 20 * 60_
     }, BOOT_MS, 2000);
     const client = await paseoAs(email, r.body.id);
     try {
-      const agents = await waitFor("the main agent", async () => (await client.agents.list()).entries.map((e: any) => e.agent ?? e), 60_000);
+      const agents = await waitFor(
+        "the main agent",
+        async () => {
+          const list = (await client.agents.list()).entries.map((e: any) => e.agent ?? e);
+          return list.length ? list : null;
+        },
+        TURN_MS,
+      );
       await client.agents.ref(agents[0].id).waitForFinish(TURN_MS);
       return { id: r.body.id as string, agent: agents[0].id as string };
     } finally {
