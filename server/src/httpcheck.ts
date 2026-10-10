@@ -11,7 +11,9 @@ import type { CheckResponse, HttpChecker } from "./providers.ts";
 const MAX_BODY = 256 * 1024;
 const TIMEOUT_MS = 10_000;
 
+// two lists: an IPv6 rule for ::ffff:0:0/96 would also match every IPv4 address checked as IPv4
 const blocked = new BlockList();
+const blocked6 = new BlockList();
 for (const [net, bits] of [
   ["0.0.0.0", 8],
   ["10.0.0.0", 8],
@@ -42,13 +44,13 @@ for (const [net, bits] of [
   ["fe80::", 10],
   ["ff00::", 8],
 ] as const)
-  blocked.addSubnet(net, bits, "ipv6");
+  blocked6.addSubnet(net, bits, "ipv6");
 
 /** Whether an address is on the public internet (not loopback, private, link-local, reserved …). */
 export function isPublicAddress(addr: string): boolean {
   const v = isIP(addr);
   if (v === 4) return !blocked.check(addr, "ipv4");
-  if (v === 6) return !blocked.check(addr, "ipv6");
+  if (v === 6) return !blocked6.check(addr, "ipv6");
   return false;
 }
 

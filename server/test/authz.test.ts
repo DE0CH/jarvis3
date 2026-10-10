@@ -19,6 +19,7 @@ import {
   type Cred,
 } from "./helpers.ts";
 import { FakeFetch, FakeRelayProxy, FakeSearch } from "../src/fakes/tools.ts";
+import { enqueue } from "../src/inbox.ts";
 
 type Who = "owner" | "ownerDevice" | "other" | "admin" | "suspended" | "unknown" | "revokedDevice" | "session" | "gate" | "none";
 const WHO: Who[] = ["owner", "ownerDevice", "other", "admin", "suspended", "unknown", "revokedDevice", "session", "gate", "none"];
@@ -38,6 +39,9 @@ interface Ids {
   device: string; // alice's active device
   note: string; // a note in alice's layer
   approval: string; // a question from alice's task
+  schedule: string; // alice's schedule
+  wakeup: string; // a wakeup of alice's task
+  inbox: string; // a message in alice's task's inbox
 }
 
 // Destructive routes come last so the earlier ones see the resources intact.
@@ -81,6 +85,23 @@ const ROUTES: R[] = [
   { kind: "member", method: "GET", path: () => "/api/approvals" },
   { kind: "owned", method: "GET", path: (i) => `/api/approvals/${i.approval}` },
   { kind: "owned", method: "GET", path: (i) => `/api/approvals?taskId=${i.task}` },
+  { kind: "member", method: "GET", path: () => "/api/schedules" },
+  { kind: "member", method: "POST", path: () => "/api/schedules", body: { prompt: "matrix", cron: "0 9 * * *", timeZone: "UTC" } },
+  { kind: "member", method: "POST", path: () => "/api/schedules/preview", body: { cron: "0 9 * * *", timeZone: "UTC" } },
+  { kind: "member", method: "GET", path: () => "/api/wakeups" },
+  { kind: "member", method: "GET", path: () => "/api/channels" },
+  { kind: "owned", method: "GET", path: (i) => `/api/schedules/${i.schedule}` },
+  { kind: "owned", method: "GET", path: (i) => `/api/schedules?userId=${i.alice}` },
+  { kind: "owned", method: "PATCH", path: (i) => `/api/schedules/${i.schedule}`, body: { title: "renamed" } },
+  { kind: "owned", method: "POST", path: (i) => `/api/schedules/${i.schedule}/run` },
+  { kind: "owned", method: "GET", path: (i) => `/api/wakeups?taskId=${i.task}` },
+  { kind: "owned", method: "GET", path: (i) => `/api/wakeups?userId=${i.alice}` },
+  { kind: "owned", method: "GET", path: (i) => `/api/channels?userId=${i.alice}` },
+  { kind: "owned", method: "GET", path: (i) => `/api/tasks/${i.task}/posts` },
+  { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/posts/read` },
+  { kind: "admin", method: "GET", path: () => "/api/schedules?all=1" },
+  { kind: "admin", method: "GET", path: () => "/api/wakeups?all=1" },
+  { kind: "admin", method: "GET", path: () => "/api/channels?all=1" },
   { kind: "admin", method: "GET", path: () => "/api/users" },
   { kind: "admin", method: "GET", path: () => "/api/suggestions?all=1" },
   { kind: "admin", method: "GET", path: () => "/api/tasks?all=1" },
@@ -108,6 +129,14 @@ const ROUTES: R[] = [
   { kind: "session", method: "GET", path: () => "/api/session/search?q=matrix" },
   { kind: "session", method: "GET", path: (i) => `/api/session/tasks/${i.task}/transcript` },
   { kind: "owned", method: "DELETE", path: (i) => `/api/users/${i.alice}/files/docs/a.txt` },
+  { kind: "session", method: "GET", path: () => "/api/session/wakeups" },
+  { kind: "session", method: "POST", path: () => "/api/session/wakeups", body: { name: "matrix", inSeconds: 600, prompt: "matrix" } },
+  { kind: "session", method: "DELETE", path: () => "/api/session/wakeups/matrix" },
+  { kind: "session", method: "GET", path: () => "/api/session/inbox" },
+  { kind: "session", method: "POST", path: (i) => `/api/session/inbox/${i.inbox}/ack` },
+  { kind: "session", method: "POST", path: () => "/api/session/posts", body: { text: "matrix result" } },
+  { kind: "owned", method: "DELETE", path: (i) => `/api/wakeups/${i.wakeup}` },
+  { kind: "owned", method: "DELETE", path: (i) => `/api/schedules/${i.schedule}` },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/pause` },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/resume` },
   { kind: "owned", method: "DELETE", path: (i) => `/api/tasks/${i.task}` },
@@ -173,7 +202,15 @@ async function setup(): Promise<{ h: Harness; ids: Ids; creds: Record<Who, Cred 
     none: null,
   };
   const q = await call(h, creds.session, "POST", "/api/session/approvals", { kind: "question", question: "Which client first?" });
-  return { h, ids: { task, alice: aliceId, device: dev.id, note: note.body.id, approval: q.body.id }, creds };
+  const sched = await call(h, aliceCred, "POST", "/api/schedules", { prompt: "seed", cron: "0 9 * * 1", timeZone: "Europe/London" });
+  const wake = await call(h, creds.session, "POST", "/api/session/wakeups", { name: "seed", inSeconds: 3000, prompt: "seed" });
+  const inboxId = enqueue(h.jarvis.ctx, task, "wakeup", wake.body.id, "seed message");
+  await call(h, creds.session, "POST", "/api/session/posts", { text: "seed post" });
+  return {
+    h,
+    ids: { task, alice: aliceId, device: dev.id, note: note.body.id, approval: q.body.id, schedule: sched.body.id, wakeup: wake.body.id, inbox: inboxId },
+    creds,
+  };
 }
 
 for (const who of WHO) {
