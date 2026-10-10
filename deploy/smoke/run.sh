@@ -34,6 +34,7 @@ k3d cluster create "$CLUSTER" --image "rancher/k3s:$K3S" --k3s-arg '--disable=tr
 k3d image import -c "$CLUSTER" ghcr.io/de0ch/jarvis3-server:smoke
 
 step "bootstrap + instance"
+kubectl create namespace flux-system  # made by `flux install` on a real box
 kubectl apply -k deploy/bootstrap
 kubectl apply -k deploy/smoke
 k wait --for=condition=complete job/make-bucket --timeout=180s
