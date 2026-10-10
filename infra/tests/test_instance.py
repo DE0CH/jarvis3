@@ -279,6 +279,26 @@ class Cloudflare(unittest.TestCase):
         self.assertNotIn("require", pols[0])
         self.assertEqual(pols[1]["include"], [{"any_valid_service_token": {}}])
 
+    def test_external_app_gets_only_its_tunnel(self):
+        fake = FakeCloudflare()
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(instance.urllib.request, "urlopen", fake):
+            repo = Path(td) / "repo"
+            shutil.copytree(EXAMPLE, repo)
+            c = json.loads((repo / "instance.json").read_text())
+            app = c["apps"][0]
+            app.update(hostname="hello.other.example", external=True)
+            del app["accessEmails"]
+            self.assertEqual(instance.validate_instance(c), [])
+            (repo / "instance.json").write_text(json.dumps(c))
+            out = run(["cloudflare", str(repo), "--out", f"{td}/cf.env", "--apply"], SECRET_ENV)
+            self.assertEqual(instance.read_env_file(Path(f"{td}/cf.env"))["APP_HELLO_TUNNEL_TOKEN"], APP_TUNNEL_TOKEN)
+        self.assertEqual([a["domain"] for a in fake.apps], ["jarvis.example.org"])
+        self.assertEqual([d["name"] for d in fake.dns], ["jarvis.example.org"])
+        self.assertEqual(fake.ingresses["tun2"]["config"]["ingress"][0]["hostname"], "hello.other.example")
+        self.assertIn("hello.other.example -> CNAME tun2.cfargotunnel.com", out)
+        app["accessEmails"] = ["a@b.example"]
+        self.assertTrue(any("accessEmails" in x for x in instance.validate_instance(c)))
+
     def test_members_need_a_domain_or_an_email(self):
         c = json.loads((EXAMPLE / "instance.json").read_text())
         del c["cloudflare"]["allowedEmailDomains"]

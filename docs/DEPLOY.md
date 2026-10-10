@@ -79,6 +79,12 @@ infrastructure"), declared in the instance repo, never in this one. Each gets:
   every namespace on the box denies ingress from elsewhere, so the app and the Jarvis 3 server can't
   reach each other's data. The metadata service is blocked there too.
 
+An app that keeps an address in a zone the instance's Cloudflare token doesn't manage (say, the address
+its users had before it moved onto the box) sets `"external": true` and no `accessEmails`:
+`instance.py cloudflare` then makes only its tunnel and ingress and prints the CNAME target. Its Access
+app and DNS record stay with that zone's owner; make or keep the Access app before pointing the record
+at the tunnel.
+
 The app's own manifests (Deployments, Services, its own SOPS secrets as `*.enc.yaml`) go in
 `apps/<name>/app/` of the instance repo, as a kustomization without a namespace. Its tunnel's origin
 (`instance.json` `apps[].origin`) must be a Service of the app itself

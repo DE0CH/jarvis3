@@ -139,8 +139,13 @@ def validate_instance(c: dict) -> list[str]:
         o = app.get("origin")
         if not isinstance(o, str) or not re.fullmatch(rf"https?://[a-z0-9-]+\.{re.escape(app_namespace(an))}\.svc\.cluster\.local(:[0-9]{{1,5}})?", o):
             out.append(f"{where}.origin: http://<service>.{app_namespace(an)}.svc.cluster.local[:port] (a Service of the app itself)")
+        if "external" in app and not isinstance(app["external"], bool):
+            out.append(f"{where}.external: true or false")
         em = app.get("accessEmails")
-        if not isinstance(em, list) or not em or not all(isinstance(e, str) and "@" in e for e in em):
+        if app.get("external"):
+            if em is not None:
+                out.append(f"{where}.accessEmails: not with external (its Access app is managed outside instance.py)")
+        elif not isinstance(em, list) or not em or not all(isinstance(e, str) and "@" in e for e in em):
             out.append(f"{where}.accessEmails: a non-empty list of emails (who may open it)")
     for k in ["github.instanceRepo", "github.orgEnvRepo"]:
         v = c.get("github", {}).get(k.split(".")[1])
@@ -590,8 +595,19 @@ def cmd_cloudflare(a) -> None:
 
     # 6. each extra app: its own Access app (the listed emails, through the account's login methods), its own
     # tunnel to its own Service, then DNS. Nothing of it reaches the instance's tunnel or Access app.
+    # An `external` app's hostname is in a zone this token doesn't manage (e.g. an address the app had
+    # before it moved here): only its tunnel is made; its Access app and CNAME stay with that zone's owner.
+    external = []
     for xa in apps_of(c):
         an = f"{c['name']}-app-{xa['name']}"
+        if xa.get("external"):
+            ts = call("GET", f"{acc}/cfd_tunnel?name={an}&is_deleted=false")
+            xt = ts[0] if ts else call("POST", f"{acc}/cfd_tunnel", {"name": an, "config_src": "cloudflare"})
+            call("PUT", f"{acc}/cfd_tunnel/{xt['id']}/configurations", {"config": {"ingress": [
+                {"hostname": xa["hostname"], "service": xa["origin"], "originRequest": {}}, {"service": "http_status:404"}]}})
+            vals[app_token_key(xa["name"])] = call("GET", f"{acc}/cfd_tunnel/{xt['id']}/token")
+            external.append(f"{xa['hostname']} -> CNAME {xt['id']}.cfargotunnel.com (proxied), behind an Access app made there first")
+            continue
         xapp = next((x for x in apps if x.get("domain") == xa["hostname"]), None)
         xbody = {"name": f"{xa['name']} ({c['name']})", "domain": xa["hostname"], "type": "self_hosted",
                  "session_duration": "720h", "app_launcher_visible": False}
@@ -614,6 +630,8 @@ def cmd_cloudflare(a) -> None:
     else:
         write_secret_file(out, vals)
         print(f"wrote {keys} to {out} (mode 600)")
+    for e in external:
+        print(f"external app, yours to set up in its zone: {e}")
     print(f"config.json: access.audience={app['aud']} access.sessionGateClientId={gate_client_id} "
           f"access.teamDomain={cf['teamDomain']}; tunnel {tun['id']}")
 
