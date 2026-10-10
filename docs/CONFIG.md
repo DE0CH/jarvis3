@@ -33,6 +33,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `devices.appScheme` | URL scheme that receives the pairing answer |
 | `devices.cloudflareAccountId` | the account holding the device service tokens |
 | `presignSeconds` | lifetime of snapshot upload/restore URLs, default 3600 |
+| `suggestions` | optional; turns on "Suggest for everyone": `kind: "github"`, `repo` (`owner/name` of the org-env repo), `baseBranch` (default `main`), `apiUrl` (default `https://api.github.com`; a GitHub Enterprise Server's `https://<host>/api/v3`), `auth`: `{kind: "token"}` or `{kind: "app", appId, installationId}`. Absent: the app hides the button and the route answers 409 |
 
 ## Secrets (environment)
 
@@ -45,6 +46,8 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | (google directory) the service account key JSON | domain-wide delegation with `admin.directory.user.readonly` and `admin.directory.group.member.readonly` only |
 | `CF_DEVICE_TOKENS_API` | Cloudflare API token | Access: Service Tokens edit, nothing else |
 | `SESSION_GATE_CLIENT_SECRET` | secret of the session gate service token (handed to session machines) | — |
+| `GITHUB_SUGGEST_TOKEN` | (`suggestions.auth.kind: "token"`) a fine-grained token | the org-env repo only: Contents (read and write), Pull requests (read and write) |
+| `GITHUB_APP_PRIVATE_KEY` | (`suggestions.auth.kind: "app"`) the GitHub App's private key, PEM | an App installed on the org-env repo only, with Contents and Pull requests (write); the server asks GitHub for installation tokens narrowed to that repo and those two permissions |
 
 Other environment: `JARVIS_DB` (SQLite path, default `/data/jarvis.db`), `PORT` (default 8080),
 `JARVIS_WEB_DIR` (the app's web build served at `/`; `/app/web` in the server image; unset = only

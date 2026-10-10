@@ -62,6 +62,23 @@ export interface DockerMachinesConfig {
   extraHosts?: string[];
 }
 
+/**
+ * "Suggest for everyone": the server opens pull requests on the org-env repo. Its credential is
+ * either a token (GITHUB_SUGGEST_TOKEN, scoped to that one repo: contents + pull requests write) or
+ * a GitHub App installed on that repo only (GITHUB_APP_PRIVATE_KEY; the installation token the
+ * server mints is narrowed to the repo and those two permissions).
+ */
+export interface SuggestionsConfig {
+  kind: "github";
+  /** "owner/name" of the org-env repo. */
+  repo: string;
+  /** Branch the pull requests target (default "main"). */
+  baseBranch?: string;
+  /** Default https://api.github.com (a GitHub Enterprise Server: https://<host>/api/v3). */
+  apiUrl?: string;
+  auth: { kind: "token" } | { kind: "app"; appId: string; installationId: string };
+}
+
 export interface Config {
   instanceName: string;
   /** https://<instance host> — no trailing slash. Sessions reach the server here. */
@@ -108,6 +125,8 @@ export interface Config {
   };
   /** Snapshot/restore presigned URL lifetime, seconds (default 3600). */
   presignSeconds?: number;
+  /** Absent: the "Suggest for everyone" button is off. */
+  suggestions?: SuggestionsConfig;
 }
 
 /** Secrets come only from the environment. */
@@ -124,6 +143,10 @@ export interface Secrets {
   cloudflareDeviceTokensApi: string;
   /** The session gate service token's secret, handed to every session machine. */
   sessionGateClientSecret: string;
+  /** suggestions.auth.kind = token: a token for the org-env repo only. */
+  githubSuggestToken: string;
+  /** suggestions.auth.kind = app: the GitHub App's private key (PEM). */
+  githubAppPrivateKey: string;
 }
 
 export function validateConfig(c: Config): Config {
@@ -145,6 +168,15 @@ export function validateConfig(c: Config): Config {
   if (!c.daemonPath?.startsWith("/")) fail("daemonPath must start with /");
   if (c.machines?.kind !== "fly" && c.machines?.kind !== "docker") fail("machines.kind must be fly or docker");
   if (!c.machines.image) fail("machines.image is required");
+  if (c.suggestions) {
+    const sg = c.suggestions;
+    if (sg.kind !== "github") fail("suggestions.kind must be github");
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(sg.repo || "")) fail("suggestions.repo must be owner/name");
+    if (sg.apiUrl !== undefined && !/^https?:\/\/[^\s]+[^/]$/.test(sg.apiUrl)) fail("suggestions.apiUrl must be a URL with no trailing slash");
+    if (sg.auth?.kind === "app") {
+      if (!/^\d+$/.test(String(sg.auth.appId)) || !/^\d+$/.test(String(sg.auth.installationId))) fail("suggestions.auth needs numeric appId and installationId");
+    } else if (sg.auth?.kind !== "token") fail("suggestions.auth.kind must be token or app");
+  }
   return c;
 }
 
@@ -167,5 +199,7 @@ export function loadSecrets(env: NodeJS.ProcessEnv = process.env): Secrets {
     googleServiceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON || "",
     cloudflareDeviceTokensApi: need("CF_DEVICE_TOKENS_API"),
     sessionGateClientSecret: need("SESSION_GATE_CLIENT_SECRET"),
+    githubSuggestToken: env.GITHUB_SUGGEST_TOKEN || "", // with suggestions.auth.kind = token (checked in main.ts)
+    githubAppPrivateKey: env.GITHUB_APP_PRIVATE_KEY || "", // with suggestions.auth.kind = app
   };
 }

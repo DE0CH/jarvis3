@@ -5,7 +5,8 @@ import { addNotice, isAdminRole } from "./ctx.ts";
 import type { UserRow } from "./rows.ts";
 import { monthKey } from "./clock.ts";
 import { kvGet, kvSet } from "./db.ts";
-import { applySample, budgetState, budgetThresholds, hourlyMachineCostUSD, machineHoursCapReached, saveBudget } from "./spend.ts";
+import { applySample, budgetState, budgetThresholds, hourlyMachineCostUSD, limitsFor, machineHoursCapReached, saveBudget } from "./spend.ts";
+import { listSuggestions, refreshSuggestions } from "./suggestions.ts";
 import { liveTasksOf, pauseTask } from "./tasks.ts";
 import type { TaskRow } from "./rows.ts";
 
@@ -36,11 +37,14 @@ export function capTick(ctx: Ctx): string[] {
     if (!machineHoursCapReached(ctx, u)) continue;
     const live = liveTasksOf(ctx, u.id);
     for (const t of live) if (tryPause(ctx, t, "machine_hours_cap")) paused.push(t.id);
-    const flag = `notice:cap:${u.id}:${monthKey(ctx.clock.now())}`;
+    // once per month and cap: an admin who raises the cap and sees it reached again is told again
+    const flag = `notice:cap:${u.id}:${monthKey(ctx.clock.now())}:${limitsFor(ctx, u).machineHoursPerMonth}`;
     if (!kvGet<boolean>(ctx.db, flag)) {
       kvSet(ctx.db, flag, true);
-      addNotice(ctx, u.id, "machine_hours_cap", "You have used this month's machine hours. Your tasks are paused until next month or until an admin raises your limit.");
-      for (const a of admins(ctx)) if (a.id !== u.id) addNotice(ctx, a.id, "machine_hours_cap", `${u.email} reached their monthly machine-hour cap; their tasks were paused.`);
+      const cap = limitsFor(ctx, u).machineHoursPerMonth;
+      addNotice(ctx, u.id, "machine_hours_cap", `You have used this month's ${cap} machine hours. Your tasks are paused until next month or until an admin raises your limit.`);
+      for (const a of admins(ctx))
+        if (a.id !== u.id) addNotice(ctx, a.id, "machine_hours_cap", `${u.email} reached their monthly machine-hour cap (${cap} h); their tasks were paused. You can raise it on the Users page.`);
     }
   }
   return paused;
@@ -66,4 +70,12 @@ export async function budgetTick(ctx: Ctx): Promise<{ enforce: boolean; paused: 
     for (const a of admins(ctx)) addNotice(ctx, a.id, "instance_budget", `The instance's machine spend for ${r.state.month} passed USD ${warnUsd} (cap USD ${capUsd}).`);
   }
   return { enforce: r.enforce, paused };
+}
+
+/** How often the background loop re-checks open "Suggest for everyone" pull requests. */
+export const SUGGESTION_POLL_MS = 5 * 60_000;
+
+export async function suggestionTick(ctx: Ctx): Promise<void> {
+  if (!ctx.forge) return;
+  await refreshSuggestions(ctx, listSuggestions(ctx, null), SUGGESTION_POLL_MS);
 }

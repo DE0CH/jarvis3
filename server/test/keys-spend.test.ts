@@ -148,6 +148,39 @@ test("machine hours count per user per calendar month; at the cap tasks pause an
     s.ws.close();
   }));
 
+test("machine-hour cap: a lowered override pauses at once; a raised cap reached again is told again", () =>
+  run(async (h, u) => {
+    const fresh = () => asEmail(h, u.alice);
+    const id = await createTask(h, u.alice);
+    const s = await fakeSession(h, id);
+    const aliceId = (await call(h, await fresh(), "GET", "/api/me")).body.user.id;
+    h.clock.advance(2 * 3_600_000);
+    // the admin lowers alice's cap below what she used: her task pauses without waiting for the tick
+    const patched = await call(h, await asEmail(h, u.admin), "PATCH", `/api/users/${aliceId}/limits`, { machineHoursPerMonth: 1 });
+    assert.equal(patched.body.usage.machineHoursCapReached, true);
+    await h.jarvis.settle();
+    assert.equal((await call(h, await fresh(), "GET", `/api/tasks/${id}`)).body.pausedReason, "machine_hours_cap");
+    const capNotices = async (email: string) =>
+      (await call(h, await asEmail(h, email), "GET", "/api/notices")).body.notices.filter((n: { kind: string }) => n.kind === "machine_hours_cap");
+    assert.equal((await capNotices(u.alice)).length, 1);
+    assert.match((await capNotices(u.admin))[0].text, /\(1 h\)/);
+    // raised to 3 h: she resumes, uses it up, and both are told again
+    await call(h, await asEmail(h, u.admin), "PATCH", `/api/users/${aliceId}/limits`, { machineHoursPerMonth: 3 });
+    assert.equal((await call(h, await fresh(), "POST", `/api/tasks/${id}/resume`)).status, 202);
+    await h.jarvis.settle();
+    h.clock.advance(3_600_000 + 1000);
+    await h.jarvis.tick();
+    await h.jarvis.settle();
+    assert.equal((await call(h, await fresh(), "GET", `/api/tasks/${id}`)).body.state, "paused");
+    assert.equal((await capNotices(u.alice)).length, 2);
+    assert.equal((await capNotices(u.admin)).length, 2);
+    // the admin's Users page shows the cap state
+    const list = (await call(h, await asEmail(h, u.admin), "GET", "/api/users")).body.users;
+    const a = list.find((x: { user: { id: string } }) => x.user.id === aliceId);
+    assert.deepEqual([a.limits.machineHoursPerMonth, a.limits.machineHoursOverride, a.usage.machineHoursCapReached], [3, true, true]);
+    s.ws.close();
+  }));
+
 test("machine hours reset with the calendar month (a run across midnight on the 1st is split)", () =>
   run(async (h, u) => {
     h.clock.t = Date.UTC(2026, 9, 31, 22, 0, 0);

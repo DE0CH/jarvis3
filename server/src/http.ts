@@ -14,8 +14,14 @@ import * as users from "./users.ts";
 import * as layers from "./layers.ts";
 import * as notices from "./notices.ts";
 import { budgetView } from "./spend.ts";
+import * as suggestions from "./suggestions.ts";
+import { capTick } from "./ticks.ts";
+import { archiveKey } from "./tasks.ts";
 
 export const VERSION = "0.1.0";
+
+/** Lifetime of an archive download link (GET /api/tasks/:id/archive). */
+const ARCHIVE_LINK_SECONDS = 600;
 
 interface Req {
   req: IncomingMessage;
@@ -86,7 +92,11 @@ export function defineRoutes(ctx: Ctx): Routes {
   route("GET", "/api/me", (r) => {
     authorize(r.principal, { kind: "member" });
     const { user } = userOf(r.principal);
-    return ok({ ...users.userDetail(ctx, user), unreadNotices: notices.unreadCount(ctx, user.id) } satisfies A.MeView);
+    return ok({
+      ...users.userDetail(ctx, user),
+      unreadNotices: notices.unreadCount(ctx, user.id),
+      features: { suggestions: suggestions.suggestionsEnabled(ctx) },
+    } satisfies A.MeView);
   });
 
   route("GET", "/api/devices/pair", async (r) => {
@@ -165,6 +175,13 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok(tasks.taskView(ctx, tasks.getTask(ctx, t.id)!) satisfies A.TaskView, 202);
   });
 
+  route("GET", "/api/tasks/:id/archive", async (r) => {
+    const t = ownedTask(ctx, r);
+    const key = archiveKey(t.user_id, t.id);
+    if (t.state !== "archived" || !(await ctx.blobs.exists(key))) throw httpError("conflict", "this task has no archived state");
+    return { redirect: await ctx.blobs.presignGet(key, ARCHIVE_LINK_SECONDS) };
+  });
+
   route("DELETE", "/api/tasks/:id", (r) => {
     const t = ownedTask(ctx, r);
     tasks.destroyTask(ctx, t, { force: r.url.searchParams.get("force") === "1" });
@@ -186,6 +203,7 @@ export function defineRoutes(ctx: Ctx): Routes {
     authorize(r.principal, { kind: "admin", what: "user" });
     const u = users.requireUser(ctx, userIdParam(r));
     const updated = await users.setLimits(ctx, u, (await r.body()) as A.SetLimitsRequest);
+    capTick(ctx); // a lowered cap pauses at once, not at the next minute's tick
     return ok(users.userDetail(ctx, updated) satisfies A.UserDetail);
   });
 
@@ -238,6 +256,28 @@ export function defineRoutes(ctx: Ctx): Routes {
     const { id } = ownedUser(ctx, r);
     layers.undoPersonal(ctx, id);
     return ok(layers.personalView(ctx, id) satisfies A.PersonalLayerView);
+  });
+
+  route("POST", "/api/users/:id/layer/suggest", async (r) => {
+    const { id } = ownedUser(ctx, r);
+    const s = await suggestions.suggest(ctx, users.requireUser(ctx, id), userOf(r.principal).user, (await r.body()) as A.SuggestRequest);
+    return ok(suggestions.suggestionView(ctx, s) satisfies A.SuggestionView, 201);
+  });
+
+  // ---- suggestions -------------------------------------------------------------------------------
+  route("GET", "/api/suggestions", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const { user } = userOf(r.principal);
+    let userId: string | null = user.id;
+    if (r.url.searchParams.get("all") === "1") {
+      authorize(r.principal, { kind: "admin", what: "suggestion list" });
+      userId = null;
+    } else if (r.url.searchParams.get("userId")) {
+      userId = r.url.searchParams.get("userId")!;
+      authorize(r.principal, { kind: "owned", ownerId: userId, what: "user" });
+    }
+    await suggestions.refreshSuggestions(ctx, suggestions.listSuggestions(ctx, userId));
+    return ok({ suggestions: suggestions.listSuggestions(ctx, userId).map((s) => suggestions.suggestionView(ctx, s)) } satisfies A.SuggestionList);
   });
 
   // ---- notices ------------------------------------------------------------------------------------

@@ -6,11 +6,12 @@ import type { DeviceRow, UserRow } from "./rows.ts";
 import type { DirectoryUser } from "./providers.ts";
 import { iso, monthKey } from "./clock.ts";
 import { randomId } from "./crypto.ts";
-import { tx } from "./db.ts";
+import { kvGet, kvSet, tx } from "./db.ts";
 import { httpError, notFound } from "./errors.ts";
 import { limitsFor, machineHours, machineHoursCapReached } from "./spend.ts";
 import { keyRow, revokeKey, syncKeyLimit } from "./userkeys.ts";
-import { liveTasksOf, pauseTask } from "./tasks.ts";
+import { destroyTask, unarchivedTasksOf } from "./tasks.ts";
+import { getPersonal } from "./layers.ts";
 
 export function getUser(ctx: Ctx, id: string): UserRow | null {
   return (ctx.db.prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined) ?? null;
@@ -155,41 +156,90 @@ export async function syncDirectory(ctx: Ctx): Promise<SyncResult> {
 }
 
 /**
- * The minimal offboarding (PLAN section 2): cut the person's open daemon connections, pause their
- * sessions (forced: the machine goes even if the snapshot fails), delete their OpenRouter key and
- * revoke their devices. Their tasks, archives and personal layer stay for the organisation.
+ * Offboarding (DESIGN "Offboarding"), for a user just suspended or removed:
+ *   1. their open daemon sockets close (4403) and the server already refuses them (status);
+ *   2. their OpenRouter key is deleted and their devices' Access service tokens are revoked;
+ *   3. their personal layer (with its versions) is copied to archives/<userId>/ in the bucket;
+ *   4. every task of theirs is archived to the bucket and its machine destroyed.
+ * The tasks, archives and personal layer stay for the organisation; admins see them. Whatever
+ * fails here is retried by finishOffboarding on the next tick.
  */
 export async function offboard(ctx: Ctx, userId: string): Promise<void> {
   ctx.hub.closeUser(userId, "your access was removed");
-  for (const t of liveTasksOf(ctx, userId)) {
-    try {
-      pauseTask(ctx, t, "offboarded", { force: true });
-    } catch (e) {
-      ctx.log("offboard: pause failed", { task: t.id, error: (e as Error).message });
-    }
-  }
   try {
     await revokeKey(ctx, userId);
   } catch (e) {
-    ctx.log("offboard: key revoke failed (retried next sync)", { user: userId, error: (e as Error).message });
+    ctx.log("offboard: key revoke failed (retried next tick)", { user: userId, error: (e as Error).message });
   }
   await revokeDevices(ctx, userId);
+  await archiveLayer(ctx, userId).catch((e: Error) => ctx.log("offboard: layer archive failed (retried next tick)", { user: userId, error: e.message }));
+  const n = archiveTasksOf(ctx, userId);
+  const u = getUser(ctx, userId)!;
   addNotice(ctx, userId, "offboarded", "Your access to this instance was removed.");
+  for (const a of listUsers(ctx)) {
+    if (a.status !== "active" || !isAdminRole(ctx.config, a.role) || a.id === userId) continue;
+    addNotice(
+      ctx,
+      a.id,
+      "offboarded",
+      `${u.email} was offboarded (${u.status} in the directory): their key and devices were revoked and ${n} task${n === 1 ? "" : "s"} are being archived. Their personal layer and archives are kept.`,
+    );
+  }
 }
 
-/** Retry what a previous offboarding could not finish (keys/devices of inactive users). */
+/** Archive and destroy each of the user's tasks that isn't archived yet (busy ones: next tick). */
+function archiveTasksOf(ctx: Ctx, userId: string): number {
+  let n = 0;
+  for (const t of unarchivedTasksOf(ctx, userId)) {
+    try {
+      destroyTask(ctx, t, { offboarding: true });
+      n++;
+    } catch (e) {
+      ctx.log("offboard: archive refused", { task: t.id, error: (e as Error).message });
+    }
+  }
+  return n;
+}
+
+const layerArchivedFlag = (u: UserRow) => `offboard:layer:${u.id}:${u.status_changed_at}`;
+
+/** archives/<userId>/user.json and personal-layer.json (the layer and every version), once per offboarding. */
+async function archiveLayer(ctx: Ctx, userId: string): Promise<void> {
+  const u = getUser(ctx, userId);
+  if (!u || u.status === "active" || kvGet<boolean>(ctx.db, layerArchivedFlag(u))) return;
+  const versions = ctx.db.prepare("SELECT version, data, reason, created_at FROM personal_layer_versions WHERE user_id = ? ORDER BY version").all(userId) as {
+    version: number;
+    data: string;
+    reason: string;
+    created_at: number;
+  }[];
+  const at = iso(ctx.clock.now());
+  await ctx.blobs.put(
+    `archives/${userId}/personal-layer.json`,
+    JSON.stringify({
+      userId,
+      archivedAt: at,
+      layer: getPersonal(ctx, userId).data,
+      versions: versions.map((v) => ({ version: v.version, reason: v.reason, createdAt: iso(v.created_at), layer: JSON.parse(v.data) as unknown })),
+    }),
+    "application/json",
+  );
+  await ctx.blobs.put(
+    `archives/${userId}/user.json`,
+    JSON.stringify({ id: u.id, email: u.email, name: u.name, role: u.role, status: u.status, offboardedAt: iso(u.status_changed_at), archivedAt: at }),
+    "application/json",
+  );
+  kvSet(ctx.db, layerArchivedFlag(u), true);
+}
+
+/** Retry what a previous offboarding could not finish (keys, devices, layer copy, tasks of inactive users). */
 export async function finishOffboarding(ctx: Ctx): Promise<void> {
   const inactive = ctx.db.prepare("SELECT id FROM users WHERE status != 'active'").all() as { id: string }[];
   for (const { id } of inactive) {
     if (keyRow(ctx, id)) await revokeKey(ctx, id).catch(() => {});
     await revokeDevices(ctx, id).catch(() => {});
-    for (const t of liveTasksOf(ctx, id)) {
-      try {
-        pauseTask(ctx, t, "offboarded", { force: true });
-      } catch {
-        /* busy: next tick */
-      }
-    }
+    await archiveLayer(ctx, id).catch(() => {});
+    archiveTasksOf(ctx, id);
   }
 }
 

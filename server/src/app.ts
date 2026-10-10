@@ -13,7 +13,7 @@ import { defineRoutes, makeHandler, makeUpgradeHandler } from "./http.ts";
 import type { WebApp } from "./web.ts";
 import { onSessionConnected } from "./tasks.ts";
 import { finishOffboarding, syncDirectory } from "./users.ts";
-import { budgetTick, capTick, idleTick } from "./ticks.ts";
+import { budgetTick, capTick, idleTick, suggestionTick } from "./ticks.ts";
 import type { SyncResult } from "./api-types.ts";
 
 export interface JarvisOptions {
@@ -52,6 +52,7 @@ export function createJarvis(o: JarvisOptions): Jarvis {
   const hub = new ChannelHub({ onConnect: (taskId) => ctxRef && onSessionConnected(ctxRef, taskId) });
   const ctx: Ctx = {
     ...o.providers,
+    forge: o.providers.forge ?? null,
     config: o.config,
     db: o.db,
     clock,
@@ -88,6 +89,7 @@ export function createJarvis(o: JarvisOptions): Jarvis {
       capTick(ctx);
       await budgetTick(ctx).catch((e: Error) => log("budget tick failed", { error: e.message }));
       await finishOffboarding(ctx).catch((e: Error) => log("offboarding retry failed", { error: e.message }));
+      await suggestionTick(ctx).catch((e: Error) => log("suggestion check failed", { error: e.message }));
     } finally {
       ticking = false;
     }

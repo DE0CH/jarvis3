@@ -100,6 +100,25 @@ const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN agent_id TEXT;
   ALTER TABLE notices ADD COLUMN read_at INTEGER;
   `,
+  // 3: "Suggest for everyone" pull requests on the org-env repo
+  `
+  CREATE TABLE suggestions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),  -- whose personal layer the suggestion came from
+    by_user_id TEXT NOT NULL REFERENCES users(id), -- who pressed the button (the owner or an admin)
+    kind TEXT NOT NULL CHECK (kind IN ('skill','instructions','note')),
+    name TEXT NOT NULL,                     -- the skill name, the note id, or '' for instructions
+    title TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    pr_url TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open','merged','closed')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    checked_at INTEGER NOT NULL
+  );
+  CREATE INDEX suggestions_user ON suggestions(user_id);
+  `,
 ];
 
 export type Db = DatabaseSync;

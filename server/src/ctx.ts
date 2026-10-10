@@ -3,7 +3,7 @@ import type { Config } from "./config.ts";
 import type { Db } from "./db.ts";
 import type { Clock } from "./clock.ts";
 import type { Sealer } from "./crypto.ts";
-import type { BlobStore, DeviceTokenIssuer, DirectoryProvider, KeyProvisioner, MachineProvider, OrgEnvSource } from "./providers.ts";
+import type { BlobStore, DeviceTokenIssuer, DirectoryProvider, KeyProvisioner, MachineProvider, OrgEnvForge, OrgEnvSource } from "./providers.ts";
 import type { ChannelHub } from "./channel.ts";
 import type { NoticeView } from "./api-types.ts";
 import { randomId } from "./crypto.ts";
@@ -15,6 +15,8 @@ export interface Providers {
   directory: DirectoryProvider;
   deviceTokens: DeviceTokenIssuer;
   orgEnv: OrgEnvSource;
+  /** null: "Suggest for everyone" is not set up on this instance. */
+  forge?: OrgEnvForge | null;
 }
 
 export type Logger = (msg: string, extra?: Record<string, unknown>) => void;

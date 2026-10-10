@@ -24,10 +24,15 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
 
 ## Offboarding
 
-6. **v1 pauses, it does not archive and destroy.** The task asked for "pause that user's sessions"
-   (PLAN's minimal offboarding); DESIGN's full offboarding archives and destroys them. Pausing is
-   forced: the machine is destroyed even when the snapshot fails. Archiving a departed person's
-   paused tasks is a later step (an admin can already DELETE them).
+6. **Offboarding archives and destroys every session of the person** (DESIGN "Offboarding"; API.md
+   section 6). A running machine is destroyed even when its final snapshot fails: the last pause
+   snapshot is archived instead, or the task is archived without its state. Cutting the person off
+   wins over keeping that last state. A task with no machine is never destroyed without its
+   archive; it is retried every minute. Alternative: keep a machine whose snapshot failed running
+   (without its key) until an admin decides.
+34. **The personal layer is copied to the bucket at offboarding** (`archives/<userId>/`), in
+    addition to staying in the database, so the archive holds everything of the person in one
+    place. A returning member keeps their layer.
 
 ## Tasks and machines
 
@@ -125,3 +130,14 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
 33. **Revoked versus suspended.** A revoked device of an active user answers 403 `device_revoked`;
     once the user is suspended or removed, their devices (revoked too) answer 403 `forbidden`, so
     the app can tell "pair again" from "no access".
+
+## Suggest for everyone (v0.3)
+
+35. **A suggestion targets the org layer only**: a skill goes to `skills/<name>/`, instructions and
+    notes are appended to `AGENTS.md`. Moving it into a role (`roles/<role>/…`) is the reviewing
+    admin's edit on the pull request. Alternative: a target picker in the app.
+36. **Instructions and single notes can be suggested too**, not only skills (DESIGN names skills).
+37. **State is polled, not pushed**: GitHub webhooks would need a public, un-Accessed route. The
+    server re-reads open pull requests every 5 minutes and on a listing older than 60 s.
+38. **A merge doesn't reach sessions by itself**: sessions load the pinned `orgEnv.commit`, which a
+    deploy moves. The notice on merge says so.

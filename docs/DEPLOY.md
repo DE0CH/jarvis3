@@ -138,6 +138,7 @@ the base.
 | `instance.py cloudflare` | `GOOGLE_IDP_CLIENT_ID`, `GOOGLE_IDP_CLIENT_SECRET` | an OAuth client (Web) in the organisation's own Google Workspace Cloud project, consent screen **internal**, redirect URI `https://<team domain>/cdn-cgi/access/callback` |
 | `instance.py deploy-keys` | `GITHUB_TOKEN` | fine-grained, Administration: write on the instance repo and the org-env repo (to add read-only deploy keys) |
 | the server (`CF_DEVICE_TOKENS_API`) | a Cloudflare API token made in the dashboard | Account: Access: Service Tokens (edit) only |
+| the server (`GITHUB_SUGGEST_TOKEN` or `GITHUB_APP_PRIVATE_KEY`, optional) | for "Suggest for everyone": a fine-grained token or a GitHub App installation, made in the organisation's GitHub org | the org-env repo only: Contents and Pull requests (write). Never the instance repo |
 | the server and Litestream (`S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`) | Hetzner Object Storage credentials | the instance bucket; bucket and credentials are made in the Hetzner Console (the API has no credential endpoint) |
 
 The other server secrets (CONFIG.md) come from the instance's Fly org, OpenRouter organisation and

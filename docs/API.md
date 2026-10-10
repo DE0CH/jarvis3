@@ -84,6 +84,7 @@ Error body (every non-2xx JSON answer):
 | POST | `/api/tasks` | M (creates a task owned by the caller) |
 | GET | `/api/tasks` | M (own); `?userId=U`: O of U, A; `?all=1`: A |
 | GET | `/api/tasks/:id` | O, A |
+| GET | `/api/tasks/:id/archive` | O, A |
 | POST | `/api/tasks/:id/pause` | O, A |
 | POST | `/api/tasks/:id/resume` | O, A |
 | DELETE | `/api/tasks/:id` | O, A |
@@ -101,6 +102,8 @@ Error body (every non-2xx JSON answer):
 | DELETE | `/api/users/:id/layer/notes/:noteId` | O, A |
 | POST | `/api/users/:id/layer/reset` | O, A |
 | POST | `/api/users/:id/layer/undo` | O, A |
+| POST | `/api/users/:id/layer/suggest` | O, A |
+| GET | `/api/suggestions` | M (own); `?userId=U`: O of U, A; `?all=1`: A |
 | GET | `/api/notices` | M (own notices) |
 | POST | `/api/notices/read` | M (own notices) |
 | GET | `/api/admin/budget` | A |
@@ -123,7 +126,8 @@ Error body (every non-2xx JSON answer):
 ### `GET /api/me` → `MeView`
 
 A `UserDetail` plus `unreadNotices`, the number of the caller's notices not yet marked read
-(section 6).
+(section 6), and `features` (`InstanceFeatures`): `{ "suggestions": true }` when "Suggest for
+everyone" is set up (section 7a).
 
 ```json
 {
@@ -131,7 +135,8 @@ A `UserDetail` plus `unreadNotices`, the number of the caller's notices not yet 
             "status": "active", "isAdmin": false, "createdAt": "2026-10-08T12:00:00.000Z" },
   "limits": { "openrouterMonthlyUsd": 20, "openrouterOverride": false, "machineHoursPerMonth": 10, "machineHoursOverride": false },
   "usage": { "month": "2026-10", "machineHours": 1.5, "machineHoursCapReached": false, "openrouterKey": true },
-  "unreadNotices": 0
+  "unreadNotices": 0,
+  "features": { "suggestions": true }
 }
 ```
 
@@ -244,7 +249,14 @@ that can't be made leaves the task `paused` with `error` set.
 Allowed from every state but `archived`. Archives first (a running machine uploads its final state; a
 paused task's snapshot is moved), writes `task.json`, then destroys the machine; final state
 `archived`. If archiving fails the task returns to its previous state with `error` set, unless
-`?force=1`, which destroys anyway (`error` then says so).
+`?force=1`, which destroys anyway (`error` then says so). A pause snapshot is deleted only once it,
+or a newer state, is in the archive.
+
+### `GET /api/tasks/:id/archive` → 302
+For an `archived` task whose state is in the bucket: a redirect to a presigned GET of
+`archives/<userId>/<taskId>/state.tar.gz`, valid 10 minutes. 409 `conflict` when the task isn't
+archived or was destroyed without an archive. This is how an admin reads an offboarded person's
+sessions.
 
 ### `WS /api/tasks/:id/daemon` — the chat
 
@@ -305,7 +317,10 @@ A field left out is unchanged; a number (≥ 0) sets a per-user override; `null`
 - **Machine hours:** the server counts each user's machine time per UTC calendar month (a run across
   the 1st is split). At the cap their live tasks are paused (`pausedReason: machine_hours_cap`), new
   tasks and resumes answer 429 `machine_hours_cap`, and the user and the admins get a notice (once
-  a month).
+  per month and cap value: an admin who raises the cap is told again if the new one is reached).
+  The cap is the role's `machineHoursPerMonth` or the admin's per-user override; an override
+  below what the user already used pauses their tasks as the `PATCH` returns. Raising it doesn't
+  restart anything: the user presses Start.
 - **Instance budget:** every minute the server sums the hourly cost of all started machines and
   integrates it over the month. At `budget.monthlyUsd` every live task is paused
   (`instance_budget`), creates/resumes answer 429 `instance_budget`, admins (and the affected
@@ -317,7 +332,7 @@ A field left out is unchanged; a number (≥ 0) sets a per-user override; `null`
 
 ### `GET /api/notices` → `NoticeList`
 The caller's last 100 notices, newest first: `{ id, kind, text, taskId, createdAt, read }`, `kind`
-one of `machine_hours_cap`, `instance_budget`, `task_failed`, `offboarded`.
+one of `machine_hours_cap`, `instance_budget`, `task_failed`, `offboarded`, `suggestion`.
 
 ### `POST /api/notices/read` (`MarkNoticesReadRequest`) → `MarkNoticesReadResult`
 `{}` marks all the caller's notices read; `{ "upTo": "<notice id>" }` marks that notice and every
@@ -331,10 +346,29 @@ answer changes nothing (`ok: false`).
 **Directory rules.** A directory user is a member when they are in a group mapped to a role
 (`directory.groupRoles`; with several, the first role in `roles` order wins) or listed in
 `bootstrapAdmins`. Suspended in the directory → status `suspended`; no longer a member → `removed`.
-Either way, at once: their open daemon sockets close (4403), their live tasks are paused (the machine
-is destroyed even if the snapshot fails), their OpenRouter key is deleted and their devices are
-revoked. Their tasks, archives and personal layer are kept. A returning member is reactivated; they
-pair their devices again and get a new key on their next task.
+The static directory (`directory.users`) works the same way: `suspended: true` on an entry, or the
+entry gone from the list, offboards that person at the next sync (the server reads its config at
+start).
+
+**Offboarding**, at once:
+
+1. their open daemon sockets close (4403) and every route answers them 403;
+2. their OpenRouter key is deleted and their devices' Access service tokens are revoked at
+   Cloudflare (Access refuses those tokens from then on);
+3. their personal layer, with every Reset/Undo version, is copied to
+   `archives/<userId>/personal-layer.json` (plus `archives/<userId>/user.json`);
+4. every task of theirs that isn't archived is archived and its machine destroyed, as `DELETE
+   /api/tasks/:id` does (`task.json` gets `reason: "offboarded"`). A running machine always goes: if
+   its final state can't be captured, the last pause snapshot is archived instead, or, with none, it
+   is destroyed without an archive and `error` says so. A task without a machine whose archive fails
+   stays as it is and is retried every minute, as are a key, device or layer copy that failed, and
+   a task that was mid-operation.
+
+Admins get an `offboarded` notice. The person's user record, personal layer (`GET
+/api/users/:id/layer`), tasks (`GET /api/tasks?userId=…`) and archives (`GET
+/api/tasks/:id/archive`) stay for the organisation and are visible to admins. A returning member is
+reactivated; they pair their devices again, get a new key on their next task, and start with their
+kept personal layer; their old tasks stay archived.
 
 ## 7. Personal layer
 
@@ -378,8 +412,41 @@ Restores the latest version. If the layer has content (added since the Reset), t
 archived as a new version (reason `undo`), so nothing is lost and a second Undo swaps back. Versions
 are never deleted. 409 `conflict` when there is no version.
 
+### `POST /api/users/:id/layer/suggest` (`SuggestRequest`) → 201 `SuggestionView`
+"Suggest for everyone" (section 7a).
+
 ### `GET /api/users/:id/layers` → `LayerBundle`
 A preview of exactly what that user's next session loads (section 8).
+
+## 7a. Suggest for everyone
+
+Part of a personal layer becomes a pull request on the organisation's org-env repo, for an admin to
+review there. The server opens it with its own credential (CONFIG.md `suggestions`); no user or
+session ever holds a GitHub credential.
+
+`POST /api/users/:id/layer/suggest`, owner or admin (an admin suggests on the owner's behalf):
+
+| body | the pull request |
+|---|---|
+| `{ "kind": "skill", "name": "invoices" }` | `skills/invoices/` becomes exactly the personal skill's files (files it lacks are deleted) |
+| `{ "kind": "instructions" }` | the personal instructions, appended to `AGENTS.md` |
+| `{ "kind": "note", "noteId": "…" }` | the note, appended to `AGENTS.md` as a bullet |
+
+Optional `message` (≤ 4000) is quoted in the pull request's description, which also names whose
+layer it came from. Branch `jarvis/suggest-<kind>-<name>-<id>` off `suggestions.baseBranch`.
+
+- 404 for a skill or note that isn't in the layer; 409 `conflict` when the feature isn't set up,
+  the instructions are empty, the same thing is already suggested and still open (the message has
+  the link), 20 suggestions of the person are open, or the org-env repo already has exactly this;
+  502 `upstream` when GitHub fails (nothing is recorded).
+- Admins get a `suggestion` notice with the link.
+
+### `GET /api/suggestions` → `SuggestionList`
+Newest first: the caller's own; `?userId=U` (that user or an admin); `?all=1` (admin). Each
+`SuggestionView` has `number`, `url` and `state` (`open`, `merged`, `closed`). Open pull requests
+are re-read from GitHub when the listing comes more than 60 s after the last check, and by the
+background loop every 5 minutes; the owner gets a `suggestion` notice when theirs is merged or
+closed. A merge reaches sessions once the instance's `orgEnv.commit` is moved past it (a deploy).
 
 ## 8. Layers a session loads (`LayerBundle`)
 

@@ -67,6 +67,12 @@ function userRow(ctx: Ctx, id: string): UserRow {
   return ctx.db.prepare("SELECT * FROM users WHERE id = ?").get(id) as unknown as UserRow;
 }
 
+/** Tasks of a user that still need archiving (not archived, not mid-operation). */
+export function unarchivedTasksOf(ctx: Ctx, userId: string): TaskRow[] {
+  const rows = ctx.db.prepare("SELECT * FROM tasks WHERE user_id = ? AND state NOT IN ('archived','destroying')").all(userId) as unknown as TaskRow[];
+  return rows.filter((t) => !ctx.locks.has(t.id));
+}
+
 function checkCaps(ctx: Ctx, user: UserRow): void {
   if (budgetCapped(ctx)) throw httpError("instance_budget", "the instance's machine budget for this month is used up");
   if (machineHoursCapReached(ctx, user)) throw httpError("machine_hours_cap", "your machine hours for this month are used up");
@@ -257,42 +263,76 @@ export function resumeTask(ctx: Ctx, task: TaskRow): void {
   );
 }
 
-/** Destroy = archive first, then delete the machine. `force`: destroy even if archiving fails. */
-export function destroyTask(ctx: Ctx, task: TaskRow, o: { force?: boolean } = {}): void {
+/**
+ * Destroy = archive first, then delete the machine.
+ * - `force` (the owner or an admin, `?force=1`): destroy even if archiving fails.
+ * - `offboarding` (the owner was suspended or removed): a running machine always goes; if its final
+ *   state can't be captured, the last pause snapshot (if any) is archived instead. A task without a
+ *   machine whose archive fails is left as it was (no machine runs) and retried by the next tick.
+ * A pause snapshot is deleted only once it, or a newer state, is safely in the archive.
+ */
+export function destroyTask(ctx: Ctx, task: TaskRow, o: { force?: boolean; offboarding?: boolean } = {}): void {
   if (task.state === "archived") throw httpError("conflict", "the task is already archived");
   lock(ctx, task.id, "destroying");
   const prev = task.state;
+  const live = !!task.machine_id && LIVE.has(prev);
   update(ctx, task.id, { state: "destroying", error: null });
   ctx.ops.run(
     (async () => {
       try {
         let archiveError: string | null = null;
+        let note: string | null = null;
+        let stateArchived = false;
         try {
-          if (task.machine_id && LIVE.has(prev)) {
-            await runSnapshot(ctx, task.machine_id, archiveKey(task.user_id, task.id));
+          if (live) {
+            try {
+              await runSnapshot(ctx, task.machine_id!, archiveKey(task.user_id, task.id));
+            } catch (e) {
+              if (!o.offboarding || !task.has_snapshot) throw e;
+              await ctx.blobs.copy(snapshotKey(task.id), archiveKey(task.user_id, task.id));
+              note = `the final state could not be captured (${(e as Error).message.slice(0, 200)}); the last pause snapshot was archived instead`;
+            }
+            stateArchived = true;
           } else if (task.has_snapshot) {
             await ctx.blobs.copy(snapshotKey(task.id), archiveKey(task.user_id, task.id));
+            stateArchived = true;
           }
           const t = getTask(ctx, task.id)!;
+          const owner = userRow(ctx, t.user_id);
           await ctx.blobs.put(
             archiveKey(task.user_id, task.id, "task.json"),
-            JSON.stringify({ id: t.id, userId: t.user_id, title: t.title, model: t.model, createdAt: iso(t.created_at), archivedAt: iso(ctx.clock.now()) }),
+            JSON.stringify({
+              id: t.id,
+              userId: t.user_id,
+              userEmail: owner?.email ?? null,
+              title: t.title,
+              model: t.model,
+              createdAt: iso(t.created_at),
+              archivedAt: iso(ctx.clock.now()),
+              reason: o.offboarding ? "offboarded" : "destroyed",
+              hasState: stateArchived,
+            }),
             "application/json",
           );
         } catch (e) {
           archiveError = (e as Error).message;
         }
-        if (archiveError && !o.force) {
-          update(ctx, task.id, { state: prev, error: `destroy stopped, the archive failed: ${archiveError}` });
+        const forced = o.force || (o.offboarding && live);
+        if (archiveError && !forced) {
+          update(ctx, task.id, {
+            state: prev,
+            error: o.offboarding ? `archiving for offboarding failed, retried shortly: ${archiveError}` : `destroy stopped, the archive failed: ${archiveError}`,
+          });
           return;
         }
         await release(ctx, getTask(ctx, task.id)!);
-        if (task.has_snapshot) await ctx.blobs.delete(snapshotKey(task.id)).catch(() => {});
+        const keepSnapshot = !!task.has_snapshot && !stateArchived;
+        if (task.has_snapshot && !keepSnapshot) await ctx.blobs.delete(snapshotKey(task.id)).catch(() => {});
         update(ctx, task.id, {
           state: "archived",
           archived_at: ctx.clock.now(),
-          has_snapshot: 0,
-          error: archiveError ? `destroyed without an archive: ${archiveError}` : null,
+          has_snapshot: keepSnapshot ? 1 : 0,
+          error: archiveError ? `destroyed without an archive: ${archiveError}` : note,
         });
       } finally {
         unlock(ctx, task.id);

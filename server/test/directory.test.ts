@@ -45,12 +45,21 @@ test("bootstrap admins are admins whatever their groups; suspension still wins",
     { config: { bootstrapAdmins: ["Owner@example.org"] } },
   ));
 
-test("suspension: 403 at once, sessions paused, OpenRouter key deleted, devices revoked, open daemon sockets closed", () =>
+test("suspension: 403 at once, sockets closed, key and devices revoked, sessions archived and destroyed, layer kept", () =>
   run(async (h) => {
-    const { alice } = await seedUsers(h);
+    const { alice, admin } = await seedUsers(h);
     const c = await asEmail(h, alice);
     const task = await createTask(h, alice);
     const s = await fakeSession(h, task);
+    const aliceId = (await me(h, alice)).body.user.id as string;
+    await call(h, c, "PUT", `/api/users/${aliceId}/layer/instructions`, { text: "Answer in German." });
+    await call(h, c, "POST", `/api/users/${aliceId}/layer/reset`);
+    await call(h, c, "POST", `/api/users/${aliceId}/layer/notes`, { text: "My manager is Dana." });
+    // a second task, paused earlier: its snapshot is moved into the archive
+    const paused = await createTask(h, alice, "second");
+    await call(h, c, "POST", `/api/tasks/${paused}/pause`);
+    await h.jarvis.settle();
+    assert.ok(h.blobs.objects.has(`snapshots/${paused}/state.tar.gz`));
     const pair = await call(h, c, "GET", "/api/devices/pair?state=abcdefghijklmnop1234&name=phone");
     const clientId = new URL(pair.headers.get("location")!).searchParams.get("clientId")!;
     const deviceCred = await asService(h, clientId);
@@ -70,28 +79,114 @@ test("suspension: 403 at once, sessions paused, OpenRouter key deleted, devices 
     assert.ok(h.keys.log.some((l) => l.startsWith("delete ")));
     assert.equal(h.deviceTokens.tokens.size, 0, "device token deleted at Cloudflare");
     assert.equal(h.machines.machines.size, 0, "machine destroyed");
-    const admin = await asEmail(h, "admin@example.org");
-    const t = await call(h, admin, "GET", `/api/tasks/${task}`);
-    assert.equal(t.body.state, "paused");
-    assert.equal(t.body.pausedReason, "offboarded");
-    // the task and the personal layer are kept for the organisation
-    const users = await call(h, admin, "GET", "/api/users");
+
+    const a = await asEmail(h, admin);
+    for (const id of [task, paused]) {
+      const t = await call(h, a, "GET", `/api/tasks/${id}`);
+      assert.equal(t.body.state, "archived", id);
+      assert.equal(t.body.error, null);
+      assert.ok(h.blobs.objects.has(`archives/${aliceId}/${id}/state.tar.gz`), `state of ${id} archived`);
+      const meta = JSON.parse(new TextDecoder().decode(h.blobs.objects.get(`archives/${aliceId}/${id}/task.json`)!));
+      assert.equal(meta.reason, "offboarded");
+      assert.equal(meta.userEmail, alice);
+      // the admin can download the archive
+      const dl = await call(h, a, "GET", `/api/tasks/${id}/archive`);
+      assert.equal(dl.status, 302);
+      assert.match(dl.headers.get("location")!, new RegExp(`^fake-s3://get/archives/${aliceId}/${id}/state\\.tar\\.gz`));
+    }
+    assert.ok(!h.blobs.objects.has(`snapshots/${paused}/state.tar.gz`), "pause snapshot moved, not copied");
+
+    // the personal layer is kept (and visible to admins), and copied to the bucket with its versions
+    const layer = await call(h, a, "GET", `/api/users/${aliceId}/layer`);
+    assert.equal(layer.status, 200);
+    assert.equal(layer.body.notes[0].text, "My manager is Dana.");
+    assert.equal(layer.body.versions.length, 1);
+    const copy = JSON.parse(new TextDecoder().decode(h.blobs.objects.get(`archives/${aliceId}/personal-layer.json`)!));
+    assert.equal(copy.layer.notes[0].text, "My manager is Dana.");
+    assert.equal(copy.versions[0].layer.instructions, "Answer in German.");
+    const userJson = JSON.parse(new TextDecoder().decode(h.blobs.objects.get(`archives/${aliceId}/user.json`)!));
+    assert.equal(userJson.status, "suspended");
+    // admins are told
+    const notices = (await call(h, a, "GET", "/api/notices")).body.notices;
+    assert.ok(notices.some((n: { kind: string; text: string }) => n.kind === "offboarded" && n.text.includes(alice) && n.text.includes("2 tasks")));
+    const users = await call(h, a, "GET", "/api/users");
     assert.equal(users.body.users.find((u: { user: { email: string } }) => u.user.email === alice).user.status, "suspended");
+    const tasks = await call(h, a, "GET", `/api/tasks?userId=${aliceId}`);
+    assert.equal(tasks.body.tasks.length, 2);
     s.ws.close();
   }));
 
-test("offboarding destroys the machine even if its snapshot fails", () =>
+test("offboarding destroys a running machine even if its final snapshot fails, archiving the last pause snapshot instead", () =>
   run(async (h) => {
     const { alice } = await seedUsers(h);
+    const c = await asEmail(h, alice);
     const task = await createTask(h, alice);
+    await call(h, c, "POST", `/api/tasks/${task}/pause`);
+    await h.jarvis.settle();
+    await call(h, c, "POST", `/api/tasks/${task}/resume`);
+    await h.jarvis.settle();
+    const fresh = await createTask(h, alice, "never paused");
     h.machines.failSnapshot = "broken";
     h.directory.set(alice, { suspended: true });
     await h.jarvis.syncDirectory();
     await h.jarvis.settle();
     assert.equal(h.machines.machines.size, 0);
-    const t = await call(h, await asEmail(h, "admin@example.org"), "GET", `/api/tasks/${task}`);
-    assert.equal(t.body.state, "paused");
-    assert.match(t.body.error, /snapshot failed/);
+    const a = await asEmail(h, "admin@example.org");
+    const t = (await call(h, a, "GET", `/api/tasks/${task}`)).body;
+    assert.equal(t.state, "archived");
+    assert.match(t.error, /last pause snapshot was archived instead/);
+    assert.ok(h.blobs.objects.has(`archives/${t.userId}/${task}/state.tar.gz`));
+    const f = (await call(h, a, "GET", `/api/tasks/${fresh}`)).body;
+    assert.equal(f.state, "archived");
+    assert.match(f.error, /destroyed without an archive: snapshot failed/);
+    assert.equal((await call(h, a, "GET", `/api/tasks/${fresh}/archive`)).status, 409);
+  }));
+
+test("offboarding: a paused task whose archive fails stays paused (no machine) and is archived by a later tick", () =>
+  run(async (h) => {
+    const { alice } = await seedUsers(h);
+    const c = await asEmail(h, alice);
+    const task = await createTask(h, alice);
+    await call(h, c, "POST", `/api/tasks/${task}/pause`);
+    await h.jarvis.settle();
+    const copy = h.blobs.copy.bind(h.blobs);
+    h.blobs.copy = async () => {
+      throw new Error("S3 down");
+    };
+    h.directory.set(alice, { suspended: true });
+    await h.jarvis.syncDirectory();
+    await h.jarvis.settle();
+    const a = await asEmail(h, "admin@example.org");
+    let t = (await call(h, a, "GET", `/api/tasks/${task}`)).body;
+    assert.equal(t.state, "paused");
+    assert.match(t.error, /retried shortly: S3 down/);
+    assert.ok(h.blobs.objects.has(`snapshots/${task}/state.tar.gz`), "the snapshot is kept");
+    h.blobs.copy = copy;
+    await h.jarvis.tick();
+    await h.jarvis.settle();
+    t = (await call(h, await asEmail(h, "admin@example.org"), "GET", `/api/tasks/${task}`)).body;
+    assert.equal(t.state, "archived");
+    assert.ok(h.blobs.objects.has(`archives/${t.userId}/${task}/state.tar.gz`));
+  }));
+
+test("offboarding waits for a task mid-operation and archives it on the next tick", () =>
+  run(async (h) => {
+    const { alice } = await seedUsers(h);
+    const c = await asEmail(h, alice);
+    const task = await createTask(h, alice);
+    let release!: () => void;
+    h.machines.hold = new Promise<void>((r) => (release = r));
+    await call(h, c, "POST", `/api/tasks/${task}/pause`);
+    h.directory.set(alice, { suspended: true });
+    await h.jarvis.syncDirectory();
+    h.machines.hold = null;
+    release();
+    await h.jarvis.settle();
+    const a = await asEmail(h, "admin@example.org");
+    assert.equal((await call(h, a, "GET", `/api/tasks/${task}`)).body.state, "paused");
+    await h.jarvis.tick();
+    await h.jarvis.settle();
+    assert.equal((await call(h, await asEmail(h, "admin@example.org"), "GET", `/api/tasks/${task}`)).body.state, "archived");
   }));
 
 test("leaving every mapped group, or the directory, offboards as removed; coming back reactivates", () =>
@@ -160,6 +255,26 @@ test("admin can trigger a sync through the API", () =>
     const r = await call(h, await asEmail(h, admin), "POST", "/api/admin/directory/sync");
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.added, ["new@example.org"]);
+  }));
+
+test("static directory: a user marked suspended, or dropped from the list, is offboarded the same way", () =>
+  run(async (h) => {
+    const list = [
+      { email: "owner@example.org", role: "admin" },
+      { email: "staff@example.org", role: "staff" },
+      { email: "temp@example.org", role: "staff" },
+    ];
+    h.directory.users = await new StaticDirectory(list).listUsers();
+    await h.jarvis.syncDirectory();
+    const t1 = await createTask(h, "staff@example.org");
+    await createTask(h, "temp@example.org");
+    h.directory.users = await new StaticDirectory([list[0]!, { ...list[1]!, suspended: true }]).listUsers();
+    const r = await h.jarvis.syncDirectory();
+    assert.deepEqual(r.offboarded.sort(), ["staff@example.org", "temp@example.org"]);
+    await h.jarvis.settle();
+    assert.equal(h.machines.machines.size, 0);
+    assert.equal(h.keys.keys.size, 0);
+    assert.equal((await call(h, await asEmail(h, "owner@example.org"), "GET", `/api/tasks/${t1}`)).body.state, "archived");
   }));
 
 test("static directory: the config's member list", async () => {

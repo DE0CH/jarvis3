@@ -54,6 +54,7 @@ export interface LimitsView {
 export interface UsageView {
   month: string; // "YYYY-MM" (UTC)
   machineHours: number; // machine hours used this month, all tasks
+  /** At the cap: the user's tasks are paused and new tasks/resumes are refused until next month or a higher limit. */
   machineHoursCapReached: boolean;
   /** Whether the user has an OpenRouter key yet (minted on the first task). */
   openrouterKey: boolean;
@@ -70,6 +71,13 @@ export interface UserDetail {
 export interface MeView extends UserDetail {
   /** Notices the caller has not marked read yet (POST /api/notices/read). */
   unreadNotices: number;
+  /** What this instance has switched on. */
+  features?: InstanceFeatures;
+}
+
+export interface InstanceFeatures {
+  /** "Suggest for everyone" (POST /api/users/:id/layer/suggest) is set up. */
+  suggestions: boolean;
 }
 
 /** GET /api/users (admin) */
@@ -229,6 +237,42 @@ export interface ResetResult {
   layer: PersonalLayerView;
 }
 
+// ---- "Suggest for everyone" ---------------------------------------------------------------
+
+/** POST /api/users/:id/layer/suggest: propose part of a personal layer for the org-env repo. */
+export type SuggestRequest =
+  | { kind: "skill"; name: string; message?: string }
+  | { kind: "instructions"; message?: string }
+  | { kind: "note"; noteId: string; message?: string };
+
+export type SuggestionState = "open" | "merged" | "closed";
+
+export interface SuggestionView {
+  id: string;
+  /** Whose personal layer it came from. */
+  userId: string;
+  userEmail: string;
+  /** Who pressed the button (the owner, or an admin on the owner's layer). */
+  byUserId: string;
+  kind: "skill" | "instructions" | "note";
+  /** The skill name, the note id, or "" for instructions. */
+  name: string;
+  title: string;
+  /** The pull request on the org-env repo. */
+  number: number;
+  url: string;
+  /** As last checked on the forge (checkedAt). */
+  state: SuggestionState;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+  checkedAt: IsoTime;
+}
+
+/** GET /api/suggestions */
+export interface SuggestionList {
+  suggestions: SuggestionView[];
+}
+
 // ---- assembled layers (what a session loads) ----------------------------------------------
 
 export type LayerName = "org" | "role" | "personal" | "policy";
@@ -280,7 +324,7 @@ export interface SessionStatusRequest {
 
 export interface NoticeView {
   id: string;
-  kind: "machine_hours_cap" | "instance_budget" | "task_failed" | "offboarded";
+  kind: "machine_hours_cap" | "instance_budget" | "task_failed" | "offboarded" | "suggestion";
   text: string;
   taskId: string | null;
   createdAt: IsoTime;

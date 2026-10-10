@@ -10,6 +10,7 @@ import { GoogleDirectory, StaticDirectory } from "./directory-google.ts";
 import { CloudflareDeviceTokens } from "./cloudflare-devices.ts";
 import { GitOrgEnv } from "./orgenv-git.ts";
 import { WebApp } from "./web.ts";
+import { GitHubForge } from "./github.ts";
 
 const config = loadConfig();
 const secrets = loadSecrets();
@@ -25,6 +26,21 @@ const directory =
         groups: Object.keys(config.directory.groupRoles),
       })
     : new StaticDirectory(config.directory.users);
+
+const sg = config.suggestions;
+if (sg?.auth.kind === "token" && !secrets.githubSuggestToken) throw new Error("missing secret env GITHUB_SUGGEST_TOKEN (suggestions.auth.kind = token)");
+if (sg?.auth.kind === "app" && !secrets.githubAppPrivateKey) throw new Error("missing secret env GITHUB_APP_PRIVATE_KEY (suggestions.auth.kind = app)");
+const forge = sg
+  ? new GitHubForge({
+      repo: sg.repo,
+      ...(sg.baseBranch ? { baseBranch: sg.baseBranch } : {}),
+      ...(sg.apiUrl ? { apiUrl: sg.apiUrl } : {}),
+      auth:
+        sg.auth.kind === "token"
+          ? { kind: "token", token: secrets.githubSuggestToken }
+          : { kind: "app", appId: String(sg.auth.appId), installationId: String(sg.auth.installationId), privateKeyPem: secrets.githubAppPrivateKey },
+    })
+  : null;
 
 const webDir = process.env.JARVIS_WEB_DIR;
 const jarvis = createJarvis({
@@ -49,6 +65,7 @@ const jarvis = createJarvis({
     directory,
     deviceTokens: new CloudflareDeviceTokens(secrets.cloudflareDeviceTokensApi, config.devices.cloudflareAccountId),
     orgEnv: new GitOrgEnv(config.orgEnv.mirrorPath, config.orgEnv.commit),
+    forge,
   },
 });
 

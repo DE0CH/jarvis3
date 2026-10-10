@@ -87,7 +87,7 @@ Status: draft of 2026-10-08, kept up to date with what was built (v0.1: `server/
 - Cloudflare Access sits in front of the instance hostname, with Google Workspace as its only login. The server checks Access's JWT itself (team domain and audience from config) and takes the email, or, for a paired device, the service token's client ID.
 - **Directory sync.** A read-only Google Directory API poll every few minutes maps Workspace groups to roles (`admin`, `staff`) and detects suspended users.
   - An unknown or suspended email gets a 403 from the server, even if Access let it through.
-  - Suspension also pauses that user's sessions and revokes their OpenRouter key and devices. This is the minimal part of offboarding.
+  - Suspension (or leaving the mapped groups, or the static list) offboards the person: their OpenRouter key and devices are revoked, their sessions archived to the bucket and destroyed, and their personal layer and archives kept for the organisation, visible to admins (docs/API.md section 6).
 - **Device pairing** works as in Jarvis 1 (identity login, then a per-device Access service token). The server records which user each token belongs to. Web uses the Access cookie.
 - **Every API route and the daemon proxy go through one authorisation function:** owner or admin may act on a resource, nobody else.
   - Responses for another user's resource are a uniform 404, so they don't reveal that the resource exists.
@@ -110,7 +110,7 @@ Status: draft of 2026-10-08, kept up to date with what was built (v0.1: `server/
 - **Idle auto-pause:** snapshot to archive storage, then destroy the machine. **Resume** creates a new machine from the snapshot, as in Jarvis 1. **Destroy** archives first, then deletes.
 - **Spend:**
   - per-user model spend is capped by the OpenRouter key limit;
-  - per-user machine hours per month are counted, and the user's sessions pause at the cap with a message in the app;
+  - per-user machine hours per month are counted against a cap per role, with an admin override per person; at the cap the user's sessions pause and the user and the admins get a notice; the admin's Users page shows each person's use and cap;
   - an instance-wide machine budget guard is ported from `budget.js`.
 
 **Per-user OpenRouter keys**
@@ -137,6 +137,9 @@ OpenCode gets all of this through generated `instructions` and skill folders, as
 - The app has a "My instructions & skills" screen to read, edit and delete entries.
 - **Reset to company default** archives the current personal layer as a numbered version and starts empty. **Undo** restores the latest archived version. Running sessions keep what they booted with; the screen says the change applies from the next task.
 
+**Suggest for everyone** (built after v0.1)
+- On a personal skill, the instructions or a note, the user (or an admin) taps Suggest for everyone; the server opens a pull request on the org-env repo with a repo-scoped token or a GitHub App installation token it holds (docs/API.md section 7a). The admin sees it in the app with its link and state.
+
 **App**
 - Web is served by the instance server. The iOS build is made only by `DE0CH/jarvis3-app`'s CI, for testing (see deferrals).
 
@@ -146,9 +149,8 @@ OpenCode gets all of this through generated `instructions` and skill folders, as
 - The approvals queue: self-confirm, admin approval, asking for access, "ask the boss", and notifications. v1 has no pause points: OpenCode runs with allow, and outward actions are limited only by what the machine holds (only Tier 0 plus the user's own key).
 - Face ID approval for Tier 3. In v1, Tier 3 is enforced only by never putting infrastructure credentials into any session, which is a hard rule in the server and the image.
 - iOS distribution: the organisation's Apple organisation account, the Apple Business custom app, and TestFlight for staff. Staff use the web page.
-- Tier 1 OAuth (staff Gmail, Drive and Calendar), "Suggest for everyone" PRs, the user files tab, first-prompt attachments, transcript search, scheduled tasks, wakeups and channels.
+- Tier 1 OAuth (staff Gmail, Drive and Calendar), the user files tab, first-prompt attachments, transcript search, scheduled tasks, wakeups and channels.
 - Tier 0 tools other than OpenRouter (search, scraping, proxies). In v1, org-level Tier 0 keys can be put in a role-scoped secret set by the admin, but per-user sub-keys come later.
-- Full offboarding (archiving the person's sessions for the organisation is done; nothing beyond that).
 - Reusing the Jarvis 2 secrets-controller core (DESIGN "Open").
 
 ## 3. Per-instance deployment

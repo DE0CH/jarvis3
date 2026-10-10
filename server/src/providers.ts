@@ -108,3 +108,32 @@ export interface OrgEnvSource {
   /** The tree at the pinned commit as an uncompressed tar. */
   archive(): Promise<Uint8Array>;
 }
+
+// ---- org-env pull requests ("Suggest for everyone") ---------------------------------------------------
+
+/** Read access to the base branch's tree while a change is being built. */
+export interface ForgeBase {
+  /** A file's text at the base, or null when it doesn't exist. */
+  read(path: string): Promise<string | null>;
+  /** Every file path at the base under `prefix` (e.g. "skills/invoices/"). */
+  list(prefix: string): Promise<string[]>;
+}
+
+export interface PullRequestSpec {
+  /** New branch name (must not exist). */
+  branch: string;
+  title: string;
+  body: string;
+  /** Commit message. */
+  message: string;
+  /** Build the change from the base: path -> new text, or null to delete the file. */
+  edit(base: ForgeBase): Promise<Record<string, string | null>>;
+}
+
+export type PullRequestState = "open" | "merged" | "closed";
+
+export interface OrgEnvForge {
+  /** Branch from the base branch, commit the edit, open a pull request. Throws on an empty change. */
+  openPullRequest(spec: PullRequestSpec): Promise<{ number: number; url: string }>;
+  pullRequestState(number: number): Promise<PullRequestState>;
+}
