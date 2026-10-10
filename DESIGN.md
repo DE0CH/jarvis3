@@ -28,16 +28,32 @@ contacts, skills that name its business) goes into another's instance, env repo 
 
 Instances share code only. Each has its own:
 
-- server box and cluster, its own session-machine provider org, its own Cloudflare account/Access, its own
-  GitHub org for its env repo, its own OpenRouter account, and billing;
+- server box and cluster, its own session-machine provider org, its own Cloudflare Access apps, its own
+  GitHub org for its env repo and its own OpenRouter organisation (as its own accounts, or for now as
+  separate spaces inside Deyao's accounts, below);
 - identity provider (KAMYEE: Google Workspace on `kamyeegroup.com`);
 - org-env repo, secrets and archive storage.
 
 A compromise of one instance never reaches another.
 
-Current exceptions (Deyao, 2026-10-08): KAMYEE's accounts bill to Deyao's personal card for now, and
-`kamyeegroup.com` stays registered in Deyao's own Cloudflare account. The first KAMYEE account created is
-Google Workspace; the other provider accounts come later.
+**For now, inside Deyao's accounts (Deyao, 2026-10-10).** KAMYEE's infrastructure is hosted under Deyao's own
+provider accounts and bills to his card, each piece in a space of its own: a KAMYEE GitHub org owned by Deyao, a
+separate Hetzner project, a separate Fly org (never the org of Deyao's own sessions: Jarvis 1's budget cap and the
+machine cap act per org), a separate OpenRouter organisation (a provisioning key can list and delete every key on
+its account), and Access apps for a `kamyeegroup.com` subdomain in Deyao's Cloudflare account. The instance server
+only ever gets keys scoped to those spaces, never Deyao's account-wide keys. KAMYEE moves to accounts of its own
+later; what that costs:
+
+- GitHub: add owners to the org. Hetzner: rebuild the box from git and copy the bucket and SQLite file. Fly: nothing
+  to move (machines are disposable).
+- Cloudflare: every staff device signs in and pairs again once (service tokens belong to the account).
+- OpenRouter: staff keys are re-minted by the server; credit doesn't move.
+- iOS: builds ship through TestFlight on Deyao's individual developer account; after the app moves to a KAMYEE
+  organisation account, staff install it once more (TestFlight builds don't transfer).
+
+Not under Deyao's personal accounts, even for now: the Google Cloud project for staff OAuth (Tier 1) lives inside
+KAMYEE's Workspace, so the app is "internal". Under a personal account it would be "external": Gmail scopes need
+Google's verification and a paid security assessment, and in testing mode the logins expire every 7 days.
 
 ## Harness and models
 
@@ -56,9 +72,9 @@ in: one Expo app that is both the instance's web page and the iOS app. It holds 
 session list and chat, the user's files, "My instructions & skills", Reset to company default, and the
 approval queue.
 
-**iOS distribution, KAMYEE:** only through KAMYEE's own Apple **organisation** developer account
-(D-U-N-S number + public website), distributed privately as an **Apple Business custom app**. Staff use the
-web page until that is in place. Not available: the Enterprise Program (Apple requires 100+ employees).
+**iOS distribution, KAMYEE:** for now TestFlight on Deyao's individual developer account (see "Instance
+isolation"). Later, KAMYEE's own Apple **organisation** developer account (D-U-N-S number + public website),
+distributed privately as an **Apple Business custom app**. Not available: the Enterprise Program (Apple requires 100+ employees).
 
 ## Identity
 
@@ -139,7 +155,7 @@ archives and destroys their sessions, and keeps their personal layer and archive
 
 ## Open
 
-- Machine provider and server host for each instance (KAMYEE's own accounts, created after Workspace).
+- When KAMYEE moves to accounts of its own.
 - Role definitions and the first Tier 2 actions KAMYEE needs.
 - Archive storage per instance.
 - Whether the Jarvis 2 secrets-controller core is reused once it exists.
@@ -148,7 +164,7 @@ archives and destroys their sessions, and keeps their personal layer and archive
 
 - Server: TypeScript on Node.
 - Each instance's server: single-node k3s + Flux + SOPS.
-- Session machines: Fly Machines, one Fly org per instance (behind a small provider interface, local Docker in CI).
+- Session machines: Fly Machines, one Fly org per instance (KAMYEE's inside Deyao's account for now) (behind a small provider interface, local Docker in CI).
 - The app reaches a session's agent through the instance server: the session dials out, the server checks
   ownership on every connection and forwards the chat. No Paseo relay, no per-session web addresses.
 - Instance state: one SQLite file on the server's volume, continuously replicated to the instance's bucket.
@@ -156,10 +172,10 @@ archives and destroys their sessions, and keeps their personal layer and archive
   person, deleted at offboarding.
 - Code and container images are public; no organisation's data lives in this repo (instance config and
   org-env live in each organisation's own GitHub org).
-- App: a new repo DE0CH/jarvis3-app made from upstream getpaseo/paseo (kept rebasable); Deyao's existing fork DE0CH/paseo stays as it is. Jarvis screens use Paseo's own components.
+- App: a new repo DE0CH/jarvis3-app made from upstream getpaseo/paseo (upstream comes in by merge, by hand, when wanted; no automatic updates, never a force-push); Deyao's existing fork DE0CH/paseo stays as it is. Jarvis screens use Paseo's own components.
 - Roles: a read-only Google service account polls the Workspace directory every few minutes (groups →
   roles, suspended users cut off within minutes).
-- KAMYEE's Cloudflare Access and tunnel: a new KAMYEE Cloudflare account with a delegated subdomain of
-  kamyeegroup.com (the zone stays in Deyao's account).
-- Storage: Hetzner Object Storage in the instance's own Hetzner project.
+- KAMYEE's Cloudflare Access and tunnel: in Deyao's Cloudflare account for now, on a subdomain of
+  kamyeegroup.com.
+- Storage: Hetzner Object Storage in the instance's own Hetzner project (KAMYEE's inside Deyao's account for now).
 - Models: a curated list per instance with one default, each checked against OpenCode tool calling.
