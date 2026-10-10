@@ -36,6 +36,7 @@ interface Ids {
   alice: string; // alice's user id
   device: string; // alice's active device
   note: string; // a note in alice's layer
+  approval: string; // a question from alice's task
 }
 
 // Destructive routes come last so the earlier ones see the resources intact.
@@ -65,6 +66,9 @@ const ROUTES: R[] = [
   { kind: "owned", method: "DELETE", path: (i) => `/api/users/${i.alice}/layer/skills/my-skill` },
   { kind: "owned", method: "POST", path: (i) => `/api/users/${i.alice}/layer/reset` },
   { kind: "owned", method: "POST", path: (i) => `/api/users/${i.alice}/layer/undo` },
+  { kind: "member", method: "GET", path: () => "/api/approvals" },
+  { kind: "owned", method: "GET", path: (i) => `/api/approvals/${i.approval}` },
+  { kind: "owned", method: "GET", path: (i) => `/api/approvals?taskId=${i.task}` },
   { kind: "admin", method: "GET", path: () => "/api/users" },
   { kind: "admin", method: "GET", path: () => "/api/suggestions?all=1" },
   { kind: "admin", method: "GET", path: () => "/api/tasks?all=1" },
@@ -76,6 +80,9 @@ const ROUTES: R[] = [
   { kind: "session", method: "GET", path: () => "/api/session/org-env.tar" },
   { kind: "session", method: "POST", path: () => "/api/session/notes", body: { text: "remember this" } },
   { kind: "session", method: "POST", path: () => "/api/session/status", body: { activity: "busy" } },
+  { kind: "session", method: "GET", path: () => "/api/session/actions" },
+  { kind: "session", method: "POST", path: () => "/api/session/approvals", body: { kind: "question", question: "matrix?" } },
+  { kind: "session", method: "GET", path: (i) => `/api/session/approvals/${i.approval}` },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/pause` },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/resume` },
   { kind: "owned", method: "DELETE", path: (i) => `/api/tasks/${i.task}` },
@@ -129,7 +136,8 @@ async function setup(): Promise<{ h: Harness; ids: Ids; creds: Record<Who, Cred 
     gate: await asService(h, GATE),
     none: null,
   };
-  return { h, ids: { task, alice: aliceId, device: dev.id, note: note.body.id }, creds };
+  const q = await call(h, creds.session, "POST", "/api/session/approvals", { kind: "question", question: "Which client first?" });
+  return { h, ids: { task, alice: aliceId, device: dev.id, note: note.body.id, approval: q.body.id }, creds };
 }
 
 for (const who of WHO) {

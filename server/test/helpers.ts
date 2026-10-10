@@ -119,7 +119,7 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export async function harness(o: { config?: Partial<Config>; orgFiles?: Record<string, string>; webDir?: string; forge?: OrgEnvForge } = {}): Promise<Harness> {
+export async function harness(o: { config?: Partial<Config>; orgFiles?: Record<string, string>; webDir?: string; forge?: OrgEnvForge; actionSecrets?: Record<string, Record<string, string>> } = {}): Promise<Harness> {
   const clock = new TestClock();
   const signer = await makeSigner(clock);
   const machines = new FakeMachines();
@@ -141,6 +141,7 @@ export async function harness(o: { config?: Partial<Config>; orgFiles?: Record<s
     snapshotPollMs: 1,
     snapshotTimeoutMs: 60_000,
     web: o.webDir ? new WebApp(o.webDir) : null,
+    actionSecrets: o.actionSecrets ?? {},
   });
   await new Promise<void>((r) => jarvis.server.listen(0, "127.0.0.1", () => r()));
   const port = (jarvis.server.address() as AddressInfo).port;
