@@ -59,7 +59,7 @@ Status: draft, 2026-10-08. It follows `DESIGN.md` and does not reopen anything d
 ### One Expo app (web and iOS)
 
 - **The Paseo fork is the base.**
-  - Chat is the product's core, and it is Paseo's. It is the biggest and fastest-moving code, so it is the part that must stay rebasable.
+  - Chat is the product's core, and it is Paseo's. It is the biggest and fastest-moving code, so it is the part that must stay easy to merge from upstream.
   - The Jarvis dashboard's useful surface for staff is small (task list, New task, instructions, Reset, later the approvals queue). It is cheaper to rewrite those screens on Expo 54 than to move Paseo onto Expo 57.
   - Jarvis 1's Radix kit is not ported. The Jarvis screens use Paseo's components, so the app looks like one app.
 - **A build variant gates all Jarvis behaviour.** A new variant (`APP_VARIANT=jarvis3`, with bundle ID, scheme and an `extra.jarvis` instance URL) turns on the Jarvis code for both iOS and web.
@@ -70,11 +70,11 @@ Status: draft, 2026-10-08. It follows `DESIGN.md` and does not reopen anything d
   - Hosts come only from the instance, never from manual pairing or QR codes.
   - Staff don't see provider/model internals (only the curated model list), the git and review panels, the terminal, host settings or daemon pairing.
   - The WebSocket factory sends the device's credentials. On web, the browser's Access cookie on the same origin does this.
-- **Keeping upstream rebasable:**
+- **Keeping upstream easy to merge:**
   - All new code goes in `packages/app/src/jarvis/` and new route files under `src/app/(jarvis)/`. Upstream files get only one-line hooks or gated imports.
   - Each hook is listed in `de0ch/README.md` with the reason for it.
   - Upstream's Expo SDK is never upgraded in the fork; upgrades come only with upstream.
-  - A weekly CI job on the fork rebases onto upstream, runs typecheck, unit tests and the web end-to-end tests, and opens a PR (or reports a conflict) rather than pushing.
+  - Upstream comes in by hand, when wanted: merge it on a new branch, run the checks, open a PR. No automatic updates, and never a force-push (Deyao, 2026-10-09).
 - **How the app reaches a session's daemon.**
   - Each task is a Paseo "host" with a direct WebSocket endpoint at `wss://<instance>/api/tasks/<id>/daemon`.
   - The server checks that the caller owns the task (or is an admin), then forwards the connection to that session's daemon over the session's reverse tunnel. It adds the daemon password on the way, so the client never holds it.
@@ -172,16 +172,12 @@ OpenCode gets all of this through generated `instructions` and skill folders, as
 - **Secrets:** an age key for SOPS (kept in the admin's password manager), the server's database encryption key and the k8s admin token. Infrastructure credentials (Tier 3) are never readable by any session.
 
 **Where KAMYEE stands**
-- **Decided:** Google Workspace on `kamyeegroup.com` (the first account to be created) and `test-staff@kamyeegroup.com` as a Business Starter seat. Billing goes to Deyao's personal card for now. `kamyeegroup.com` stays in Deyao's own Cloudflare account.
+- **Decided:** Google Workspace on `kamyeegroup.com` (the first account to be created) and `test-staff@kamyeegroup.com` as a Business Starter seat. For now everything else is hosted inside Deyao's own accounts, each in a separate org/project (DESIGN, "Instance isolation"; Deyao, 2026-10-10).
 - **Still open, from DESIGN "Open":**
-  - the machine provider and server host (KAMYEE's own accounts, created after Workspace);
   - role definitions and the first Tier 2 actions (only the role definitions matter for v1: `admin` and `staff` are enough to start);
   - archive storage;
   - whether the Jarvis 2 core is reused.
-- **Also not created yet, so effectively open:**
-  - the GitHub org;
-  - the OpenRouter account;
-  - the Cloudflare side. The zone stays in Deyao's account by the stated exception, so Access and the tunnel for KAMYEE either live in Deyao's account (simplest; follows the exception) or in a new KAMYEE Cloudflare account on a different domain or subdomain. See decision 9.
+- **Not created yet:** the KAMYEE GitHub org, Hetzner project, Fly org and OpenRouter organisation (all inside Deyao's accounts), and the Access apps on a `kamyeegroup.com` subdomain in Deyao's Cloudflare account.
 
 ## 4. Decisions Deyao must make before coding
 
@@ -225,10 +221,7 @@ OpenCode gets all of this through generated `instructions` and skill folders, as
    - (b) The groups claim from Access's identity (Google Workspace identity provider with groups).
    - (c) An email-to-role list in instance config.
    - **Recommendation: (a).** It also detects suspension (offboarding) within minutes, which (b) only sees at the next login. Keep (c) as an admin bootstrap override.
-9. **Cloudflare account for KAMYEE now.**
-   - (a) Run KAMYEE's Access and tunnel in Deyao's Cloudflare account on `jarvis.kamyeegroup.com` (where the zone is), and move it when KAMYEE gets its own account.
-   - (b) Create a KAMYEE Cloudflare account now and delegate a subdomain to it.
-   - **Recommendation: (b)** if it is cheap to do. DESIGN's isolation rule names a separate Cloudflare account and Access per instance, and a delegated subdomain gives that without moving the zone. Otherwise (a), written down as a third exception.
+9. **Cloudflare account for KAMYEE now.** Decided (Deyao, 2026-10-10): Deyao's Cloudflare account, on a `kamyeegroup.com` subdomain, until KAMYEE moves to accounts of its own.
 10. **Archive storage.**
     - (a) Hetzner Object Storage in the instance's Hetzner project.
     - (b) Cloudflare R2 in the instance's Cloudflare account.
