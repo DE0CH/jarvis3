@@ -45,6 +45,7 @@ export function taskView(ctx: Ctx, t: TaskRow): TaskView {
     createdAt: iso(t.created_at),
     updatedAt: iso(t.updated_at),
     connected: ctx.hub.isConnected(t.id),
+    agentId: t.agent_id ?? null,
   };
 }
 
@@ -309,11 +310,15 @@ export function onSessionConnected(ctx: Ctx, taskId: string): void {
   if (t && t.state === "starting") update(ctx, taskId, { state: "running", idle_since: null });
 }
 
-export function reportStatus(ctx: Ctx, task: TaskRow, body: { activity?: unknown; title?: unknown }): TaskView {
+export function reportStatus(ctx: Ctx, task: TaskRow, body: { activity?: unknown; title?: unknown; agentId?: unknown }): TaskView {
   if (body.activity !== "busy" && body.activity !== "idle") throw httpError("bad_request", "activity must be busy or idle");
   if (body.title !== undefined && (typeof body.title !== "string" || body.title.length > 120)) throw httpError("bad_request", "title must be ≤ 120 characters");
+  if (body.agentId !== undefined && (typeof body.agentId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(body.agentId))) {
+    throw httpError("bad_request", "agentId must match [A-Za-z0-9._:-]{1,128}");
+  }
   const patch: Partial<TaskRow> = {};
   if (typeof body.title === "string" && body.title.trim()) patch.title = body.title.trim();
+  if (typeof body.agentId === "string" && body.agentId !== task.agent_id) patch.agent_id = body.agentId;
   if (task.state === "starting" || task.state === "running" || task.state === "idle") {
     if (body.activity === "idle") {
       patch.state = "idle";

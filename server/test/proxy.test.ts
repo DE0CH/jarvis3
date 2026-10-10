@@ -124,3 +124,74 @@ test("cross-origin: a foreign Origin can't open the daemon or change state; the 
     assert.equal(get.status, 200, "reads are harmless (CORS keeps the answer from the foreign page)");
     s.ws.close();
   }));
+
+// ---- the HTTP relay -------------------------------------------------------------------------------
+
+const raw = async (h: Harness, jwt: string, method: string, path: string, body?: string, headers: Record<string, string> = {}) =>
+  fetch(h.base + path, { method, headers: { "cf-access-jwt-assertion": jwt, ...headers }, body });
+
+test("HTTP relay: path and query reach the daemon with the server's bearer; only safe headers come back, always as a sandboxed download", () =>
+  withTask(async (h, alice, task) => {
+    const s = await fakeSession(h, task);
+    const jwt = (await asEmail(h, alice)).jwt!;
+    const r = await raw(h, jwt, "GET", `/api/tasks/${task}/daemon/http/api/files/download?token=abc&x=1`, undefined, {
+      authorization: "Bearer client-guess",
+      range: "bytes=0-10",
+      cookie: "foo=bar",
+    });
+    assert.equal(r.status, 200);
+    assert.equal(await r.text(), "GET /api/files/download?token=abc&x=1 auth-ok=true body=");
+    const req = s.http[0]!;
+    assert.equal(req.headers.range, "bytes=0-10");
+    assert.equal(req.headers.cookie, undefined, "the Access cookie never reaches the daemon");
+    assert.equal(r.headers.get("x-daemon-secret"), null);
+    assert.equal(r.headers.get("set-cookie"), null);
+    assert.equal(r.headers.get("content-disposition"), 'attachment; filename="a.html"');
+    assert.equal(r.headers.get("content-security-policy"), "sandbox; default-src 'none'");
+    assert.equal(r.headers.get("x-content-type-options"), "nosniff");
+    s.ws.close();
+  }));
+
+test("HTTP relay: a POST body is relayed; a foreign Origin, another user and a disconnected session are refused", () =>
+  withTask(async (h, alice, task) => {
+    const jwt = (await asEmail(h, alice)).jwt!;
+    assert.equal((await raw(h, jwt, "GET", `/api/tasks/${task}/daemon/http/x`)).status, 503, "not connected");
+    const s = await fakeSession(h, task);
+    const post = await raw(h, jwt, "POST", `/api/tasks/${task}/daemon/http/api/thing`, '{"a":1}', { "content-type": "application/json" });
+    assert.equal(await post.text(), 'POST /api/thing auth-ok=true body={"a":1}');
+    assert.equal(s.http[0]!.headers["content-type"], "application/json");
+    const cross = await raw(h, jwt, "POST", `/api/tasks/${task}/daemon/http/api/thing`, "{}", { origin: "https://evil.example.net" });
+    assert.equal(cross.status, 403);
+    const bob = (await asEmail(h, "bob@example.org")).jwt!;
+    const theirs = await raw(h, bob, "GET", `/api/tasks/${task}/daemon/http/x`);
+    const missing = await raw(h, bob, "GET", `/api/tasks/ffffffffffffffff/daemon/http/x`);
+    assert.equal(theirs.status, 404);
+    assert.deepEqual(await theirs.json(), await missing.json());
+    assert.equal(s.http.length, 1, "refused requests never reach the session");
+    s.ws.close();
+  }));
+
+test("HTTP relay: the session going away mid-request answers 502; the app going away cancels the request", () =>
+  withTask(async (h, alice, task) => {
+    const jwt = (await asEmail(h, alice)).jwt!;
+    const s = await fakeSession(h, task);
+    const pending = raw(h, jwt, "GET", `/api/tasks/${task}/daemon/http/hang/1`);
+    for (let i = 0; i < 100 && !s.http.length; i++) await new Promise((r) => setTimeout(r, 5));
+    s.ws.close();
+    const r = await pending;
+    assert.equal(r.status, 502);
+    assert.equal(((await r.json()) as { error: { code: string } }).error.code, "upstream");
+
+    const s2 = await fakeSession(h, task);
+    const ac = new AbortController();
+    const p2 = raw(h, jwt, "GET", `/api/tasks/${task}/daemon/http/hang/2`).catch(() => null);
+    void p2;
+    const p3 = fetch(h.base + `/api/tasks/${task}/daemon/http/hang/3`, { headers: { "cf-access-jwt-assertion": jwt }, signal: ac.signal }).catch(() => null);
+    for (let i = 0; i < 100 && s2.http.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+    ac.abort();
+    await p3;
+    for (let i = 0; i < 100 && !s2.cancelled.length; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(s2.cancelled.length, 1, "the session is told to stop");
+    s2.ws.close();
+    await p2;
+  }));

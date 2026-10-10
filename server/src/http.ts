@@ -7,12 +7,12 @@ import type * as A from "./api-types.ts";
 import type { Ctx } from "./ctx.ts";
 import { authorize, resolvePrincipal, userOf, type Principal, type ResolveDeps, type Target } from "./auth.ts";
 import { asHttpError, httpError, HttpError } from "./errors.ts";
-import { pickClientProtocol } from "./channel.ts";
+import { MAX_RELAY_BODY, pickClientProtocol, relayRequestHeaders } from "./channel.ts";
 import * as tasks from "./tasks.ts";
 import * as users from "./users.ts";
 import * as layers from "./layers.ts";
+import * as notices from "./notices.ts";
 import { budgetView } from "./spend.ts";
-import { iso } from "./clock.ts";
 
 export const VERSION = "0.1.0";
 
@@ -84,7 +84,8 @@ export function defineRoutes(ctx: Ctx): Routes {
   // ---- identity -------------------------------------------------------------------------------
   route("GET", "/api/me", (r) => {
     authorize(r.principal, { kind: "member" });
-    return ok(users.userDetail(ctx, userOf(r.principal).user) satisfies A.UserDetail);
+    const { user } = userOf(r.principal);
+    return ok({ ...users.userDetail(ctx, user), unreadNotices: notices.unreadCount(ctx, user.id) } satisfies A.MeView);
   });
 
   route("GET", "/api/devices/pair", async (r) => {
@@ -241,14 +242,13 @@ export function defineRoutes(ctx: Ctx): Routes {
   // ---- notices ------------------------------------------------------------------------------------
   route("GET", "/api/notices", (r) => {
     authorize(r.principal, { kind: "member" });
-    const rows = ctx.db.prepare("SELECT * FROM notices WHERE user_id = ? ORDER BY created_at DESC LIMIT 100").all(userOf(r.principal).user.id) as {
-      id: string;
-      kind: A.NoticeView["kind"];
-      text: string;
-      task_id: string | null;
-      created_at: number;
-    }[];
-    return ok({ notices: rows.map((n) => ({ id: n.id, kind: n.kind, text: n.text, taskId: n.task_id, createdAt: iso(n.created_at) })) } satisfies A.NoticeList);
+    return ok({ notices: notices.listNotices(ctx, userOf(r.principal).user.id) } satisfies A.NoticeList);
+  });
+
+  route("POST", "/api/notices/read", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const unreadNotices = notices.markRead(ctx, userOf(r.principal).user.id, (await r.body()) as A.MarkNoticesReadRequest);
+    return ok({ unreadNotices } satisfies A.MarkNoticesReadResult);
   });
 
   // ---- admin ----------------------------------------------------------------------------------------
@@ -339,10 +339,52 @@ function sendError(res: ServerResponse, e: unknown): void {
   sendJson(res, he.status, { error: { code: he.code, message: he.message } } satisfies A.ApiError);
 }
 
+function readRaw(req: IncomingMessage, max: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      if (size > max) {
+        reject(httpError("bad_request", "body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+const RELAY_RE = /^\/api\/tasks\/([^/]+)\/daemon\/http(\/.*)$/;
+const RELAY_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]);
+
+/** The HTTP relay to a task's daemon: same checks as the daemon WebSocket, then streamed through the channel. */
+async function relayHttp(ctx: Ctx, resolveDeps: ResolveDeps, req: IncomingMessage, res: ServerResponse, url: URL, m: RegExpExecArray): Promise<void> {
+  if (!RELAY_METHODS.has(req.method || "")) throw httpError("bad_request", "method not relayed");
+  if (req.method !== "GET" && req.method !== "HEAD") checkOrigin(ctx, req);
+  const principal = await resolvePrincipal(req, resolveDeps);
+  authorize(principal, { kind: "member" });
+  const t = tasks.getTask(ctx, decodeURIComponent(m[1]!));
+  authorize(principal, { kind: "owned", ownerId: t ? t.user_id : "\0none", what: "task" });
+  if (!t) throw httpError("not_found", "no such task");
+  if (!ctx.hub.isConnected(t.id)) throw httpError("unavailable", `the task's session is not connected (state ${t.state})`);
+  const body = req.method === "GET" || req.method === "HEAD" ? null : await readRaw(req, MAX_RELAY_BODY);
+  ctx.hub.openHttp(t.id, userOf(principal).user.id, res, {
+    method: req.method!,
+    path: m[2]! + url.search,
+    headers: relayRequestHeaders(req.headers, tasks.daemonPassword(ctx, t)),
+    body,
+  });
+}
+
 export function makeHandler(ctx: Ctx, resolveDeps: ResolveDeps, routes: Routes) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     try {
       const url = new URL(req.url || "/", "http://local");
+      const relay = RELAY_RE.exec(url.pathname);
+      if (relay) return await relayHttp(ctx, resolveDeps, req, res, url, relay);
       const matches = routes.filter((r) => r.re.test(url.pathname));
       if (!matches.length) throw httpError("not_found", "no such route");
       const rt = matches.find((r) => r.method === req.method);

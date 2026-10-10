@@ -80,6 +80,33 @@ test("status reports: busy/idle and title; idle auto-pause after idleMinutes", (
     assert.equal(t.pausedReason, "idle");
   }));
 
+test("the session reports the task's agent id; it is in TaskView and survives pause/resume", () =>
+  withAlice(async (h, alice) => {
+    const c = await asEmail(h, alice);
+    const id = await createTask(h, alice);
+    assert.equal((await get(h, alice, id)).agentId, null, "null until the session reports it");
+    const s = await fakeSession(h, id);
+    const sess = await asService(h, GATE, s.token);
+    for (const bad of ["", "has space", "x".repeat(129), 42]) {
+      assert.equal((await call(h, sess, "POST", "/api/session/status", { activity: "busy", agentId: bad })).status, 400, String(bad));
+    }
+    const r = await call(h, sess, "POST", "/api/session/status", { activity: "busy", agentId: "agent_01J9:main" });
+    assert.equal(r.body.agentId, "agent_01J9:main");
+    // a report without it keeps it
+    await call(h, sess, "POST", "/api/session/status", { activity: "idle" });
+    assert.equal((await get(h, alice, id)).agentId, "agent_01J9:main");
+    assert.equal((await call(h, c, "GET", "/api/tasks")).body.tasks[0].agentId, "agent_01J9:main");
+    await call(h, c, "POST", `/api/tasks/${id}/pause`);
+    await h.jarvis.settle();
+    assert.equal((await get(h, alice, id)).agentId, "agent_01J9:main", "kept while paused");
+    await call(h, c, "POST", `/api/tasks/${id}/resume`);
+    await h.jarvis.settle();
+    const s2 = await fakeSession(h, id);
+    assert.equal((await get(h, alice, id)).agentId, "agent_01J9:main", "kept after resume");
+    s.ws.close();
+    s2.ws.close();
+  }));
+
 test("pause snapshots then destroys; the session token dies; resume restores on a new machine; destroy archives", () =>
   withAlice(async (h, alice) => {
     const c = await asEmail(h, alice);

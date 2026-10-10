@@ -267,9 +267,23 @@ export async function fakeSession(h: Harness, taskId: string) {
   const token = sessionTokenOf(h, taskId);
   const ws = await openWs(h, await asService(h, GATE, token), "/api/session/channel");
   const opened: { path: string; protocols: string[] }[] = [];
+  const http: { method: string; path: string; headers: Record<string, string>; body: string }[] = [];
+  const cancelled: string[] = [];
+  const pw = machineOf(h, taskId)?.env.PASEO_PASSWORD;
   ws.on("message", (raw) => {
     const f = JSON.parse(raw.toString());
-    if (f.type === "ws-open") {
+    if (f.type === "http-req") {
+      const body = f.body_b64 ? Buffer.from(f.body_b64, "base64").toString() : "";
+      http.push({ method: f.method, path: f.path, headers: f.headers, body });
+      if (f.path.startsWith("/hang")) return; // never answers
+      const send = (o: object) => ws.send(JSON.stringify({ id: f.id, ...o }));
+      send({ type: "http-res", status: 200, headers: { "Content-Type": "text/html", "X-Daemon-Secret": "leak", "Content-Disposition": 'inline; filename="a.html"', "Set-Cookie": "x=1" } });
+      send({ type: "http-data", data_b64: Buffer.from(`${f.method} ${f.path} auth-ok=${f.headers.authorization === `Bearer ${pw}`}`).toString("base64") });
+      send({ type: "http-data", data_b64: Buffer.from(` body=${body}`).toString("base64") });
+      send({ type: "http-end" });
+    } else if (f.type === "http-cancel") {
+      cancelled.push(f.id);
+    } else if (f.type === "ws-open") {
       opened.push({ path: f.path, protocols: f.protocols });
     } else if (f.type === "ws-msg") {
       if (f.data_b64) ws.send(JSON.stringify({ type: "ws-msg", id: f.id, data_b64: f.data_b64 }));
@@ -278,5 +292,5 @@ export async function fakeSession(h: Harness, taskId: string) {
   });
   // wait until the server has registered the channel
   for (let i = 0; i < 100 && !h.jarvis.ctx.hub.isConnected(taskId); i++) await new Promise((r) => setTimeout(r, 5));
-  return { ws, token, opened };
+  return { ws, token, opened, http, cancelled };
 }

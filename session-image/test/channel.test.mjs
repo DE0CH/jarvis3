@@ -125,3 +125,67 @@ test("reconnects after the server drops the channel, and says hello again", asyn
     server.close();
   }
 });
+
+test("relays HTTP requests to the daemon: method, path, headers, body; chunked answer; cancel aborts", async () => {
+  const { createServer } = await import("node:http");
+  const seen = [];
+  let hung = null;
+  const daemon = createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body: Buffer.concat(chunks).toString() });
+      if (req.url.startsWith("/hang")) {
+        hung = res;
+        res.on("close", () => (hung = "closed"));
+        return;
+      }
+      res.writeHead(201, { "content-type": "application/octet-stream" });
+      res.end(Buffer.alloc(600 * 1024, 7)); // bigger than one chunk
+    });
+  });
+  await new Promise((r) => daemon.listen(0, "127.0.0.1", r));
+  const server = await listen();
+  const ch = startChannel({
+    url: `ws://127.0.0.1:${server.address().port}/api/session/channel`,
+    headers: {},
+    daemonBase: `ws://127.0.0.1:${daemon.address().port}`,
+  });
+  try {
+    const [sws] = await next(server, "connection");
+    const recv = frames(sws);
+    await recv((f) => f.type === "hello");
+    sws.send(JSON.stringify({ type: "http-req", id: "h1", method: "POST", path: "/api/x?y=1", headers: { authorization: "Bearer pw" }, body_b64: Buffer.from("hi").toString("base64") }));
+    const head = await recv((f) => f.type === "http-res" && f.id === "h1");
+    assert.equal(head.status, 201);
+    assert.equal(head.headers["content-type"], "application/octet-stream");
+    let total = 0;
+    let parts = 0;
+    for (;;) {
+      const f = await recv((x) => (x.type === "http-data" || x.type === "http-end") && x.id === "h1");
+      if (f.type === "http-end") {
+        assert.equal(f.error, undefined);
+        break;
+      }
+      total += Buffer.from(f.data_b64, "base64").length;
+      parts++;
+    }
+    assert.equal(total, 600 * 1024);
+    assert.ok(parts >= 3, "sent in ≤ 256 KiB chunks");
+    assert.deepEqual(seen[0], { method: "POST", url: "/api/x?y=1", auth: "Bearer pw", body: "hi" });
+
+    sws.send(JSON.stringify({ type: "http-req", id: "h2", method: "GET", path: "/hang", headers: {} }));
+    for (let i = 0; i < 200 && !hung; i++) await new Promise((r) => setTimeout(r, 5));
+    sws.send(JSON.stringify({ type: "http-cancel", id: "h2" }));
+    for (let i = 0; i < 200 && hung !== "closed"; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(hung, "closed", "the daemon request is aborted");
+
+    sws.send(JSON.stringify({ type: "http-req", id: "h3", method: "GET", path: "no-slash", headers: {} }));
+    assert.equal((await recv((f) => f.type === "http-end" && f.id === "h3")).error, "bad path");
+  } finally {
+    ch.stop();
+    server.close();
+    daemon.close();
+    daemon.closeAllConnections();
+  }
+});

@@ -45,6 +45,7 @@ export interface TaskRow {
   created_at: number;
   updated_at: number;
   idle_since: number | null;
+  agent_id: string | null;
 }
 
 export interface KeyRow {

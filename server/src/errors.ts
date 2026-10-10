@@ -3,6 +3,7 @@ import type { ErrorCode } from "./api-types.ts";
 const STATUS: Record<ErrorCode, number> = {
   unauthenticated: 401,
   forbidden: 403,
+  device_revoked: 403,
   not_found: 404,
   bad_request: 400,
   conflict: 409,

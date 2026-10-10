@@ -122,9 +122,11 @@ export async function resolvePrincipal(req: IncomingMessage, d: ResolveDeps): Pr
   const dev = d.db.prepare("SELECT * FROM devices WHERE client_id = ?").get(id.clientId) as
     | { id: string; user_id: string; revoked_at: number | null; last_seen_at: number }
     | undefined;
-  if (!dev || dev.revoked_at !== null) throw httpError("forbidden", "unknown or revoked device");
+  if (!dev) throw httpError("forbidden", "unknown device");
   const user = d.db.prepare("SELECT * FROM users WHERE id = ?").get(dev.user_id) as UserRow | undefined;
+  // a suspended or removed user's devices are revoked too; say the more useful thing
   if (!user || user.status !== "active") throw httpError("forbidden", "not an active member of this instance");
+  if (dev.revoked_at !== null) throw httpError("device_revoked", "this device was signed out; pair it again");
   const now = d.clock.now();
   if (now - dev.last_seen_at > 60_000) d.db.prepare("UPDATE devices SET last_seen_at = ? WHERE id = ?").run(now, dev.id);
   return { kind: "user", user, isAdmin: d.isAdminRole(user.role), via: "device", deviceId: dev.id };

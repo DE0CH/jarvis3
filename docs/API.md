@@ -52,7 +52,8 @@ daemon proxy. Targets:
 | status / code | when |
 |---|---|
 | 401 `unauthenticated` | no Access JWT, an invalid one, or (on `/api/session/*` and the channel) no valid session token |
-| 403 `forbidden` | valid JWT but: unknown email, suspended or removed user, unknown or revoked device, a session credential on a non-session route, a foreign `Origin` |
+| 403 `forbidden` | valid JWT but: unknown email, suspended or removed user, unknown device, a session credential on a non-session route, a foreign `Origin` |
+| 403 `device_revoked` | a paired device whose token was revoked (`DELETE /api/devices/:id`) while its user is still active: the app forgets the token and pairs again |
 | 404 `not_found` | the resource does not exist **or belongs to someone else**, or an admin-only route called by a non-admin. The body is identical in all these cases, so a 404 never reveals that something exists |
 | 400 `bad_request` | malformed body or parameters |
 | 409 `busy` | another lifecycle operation is running on the task |
@@ -87,6 +88,7 @@ Error body (every non-2xx JSON answer):
 | POST | `/api/tasks/:id/resume` | O, A |
 | DELETE | `/api/tasks/:id` | O, A |
 | WS | `/api/tasks/:id/daemon` | O, A |
+| any¹ | `/api/tasks/:id/daemon/http/*` | O, A |
 | GET | `/api/users` | A |
 | GET | `/api/users/:id` | O, A |
 | PATCH | `/api/users/:id/limits` | A |
@@ -100,6 +102,7 @@ Error body (every non-2xx JSON answer):
 | POST | `/api/users/:id/layer/reset` | O, A |
 | POST | `/api/users/:id/layer/undo` | O, A |
 | GET | `/api/notices` | M (own notices) |
+| POST | `/api/notices/read` | M (own notices) |
 | GET | `/api/admin/budget` | A |
 | POST | `/api/admin/directory/sync` | A |
 | GET | `/api/session/bundle` | S |
@@ -108,6 +111,8 @@ Error body (every non-2xx JSON answer):
 | POST | `/api/session/status` | S |
 | WS | `/api/session/channel` | S |
 
+¹ `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`.
+
 `server/test/authz.test.ts` checks this whole table for ten kinds of caller.
 
 ## 3. Identity and devices
@@ -115,14 +120,18 @@ Error body (every non-2xx JSON answer):
 ### `GET /api/health` → `Health`
 `{ "ok": true, "version": "0.1.0" }`
 
-### `GET /api/me` → `UserDetail`
+### `GET /api/me` → `MeView`
+
+A `UserDetail` plus `unreadNotices`, the number of the caller's notices not yet marked read
+(section 6).
 
 ```json
 {
   "user": { "id": "1bb0e5661a4b5508", "email": "alice@example.org", "name": "Alice", "role": "staff",
             "status": "active", "isAdmin": false, "createdAt": "2026-10-08T12:00:00.000Z" },
   "limits": { "openrouterMonthlyUsd": 20, "openrouterOverride": false, "machineHoursPerMonth": 10, "machineHoursOverride": false },
-  "usage": { "month": "2026-10", "machineHours": 1.5, "machineHoursCapReached": false, "openrouterKey": true }
+  "usage": { "month": "2026-10", "machineHours": 1.5, "machineHoursCapReached": false, "openrouterKey": true },
+  "unreadNotices": 0
 }
 ```
 
@@ -188,13 +197,16 @@ and destroy answer **202** at once with the task in its transitional state; poll
 {
   "id": "7ce0326a5435ab61", "userId": "1bb0e5661a4b5508", "title": "Write the weekly report",
   "model": "anthropic/claude-…", "state": "running", "busy": null, "error": null, "pausedReason": null,
-  "createdAt": "…", "updatedAt": "…", "connected": true
+  "createdAt": "…", "updatedAt": "…", "connected": true, "agentId": "a3f1…"
 }
 ```
 
 - `connected`: the session's reverse channel is up, so the daemon proxy can be opened.
 - `error`: why the last operation failed (e.g. `pause failed, the task keeps running: …`), or null.
 - `pausedReason`: `user`, `idle`, `machine_hours_cap`, `instance_budget` or `offboarded` while paused.
+- `agentId`: the Paseo agent on the task's daemon that is the task itself (the one the first prompt
+  went to), as the session reports it; null until then. It stays the same across pause and resume,
+  because a resumed daemon keeps its agents. The app opens this agent's chat.
 
 ### `POST /api/tasks` (`CreateTaskRequest`) → 201 `TaskView`
 
@@ -248,6 +260,27 @@ needs the session connected (else HTTP 503). It then asks the session's channel 
   **4403** when the user's access is revoked (suspension, removal).
 - Browsers use the Access cookie (same origin); the iOS app sends its device credentials as headers.
 
+### `/api/tasks/:id/daemon/http/<path>` — HTTP to the daemon
+
+The same relay for the daemon's HTTP routes, mainly file downloads (`GET
+/api/tasks/:id/daemon/http/api/files/download?token=…`). Same checks as the WebSocket (404 for
+someone else's task, 503 while the session is not connected, the `Origin` guard on anything but
+`GET`/`HEAD`). `<path>` and the query go to the daemon unchanged.
+
+- Towards the daemon: only `content-type`, `accept`, `range`, `if-none-match`, `if-modified-since`
+  and `if-range` are passed, plus `authorization: Bearer <daemon password>` added by the server.
+  Cookies and the client's own `authorization` never reach the daemon. Request bodies ≤ 1 MiB.
+- Back to the app: only `content-type`, `content-length`, `content-disposition`, `content-range`,
+  `accept-ranges`, `etag` and `last-modified`. Every answer is forced to be a download:
+  `content-disposition: attachment` (an `inline` one is turned into `attachment`),
+  `content-security-policy: sandbox; default-src 'none'`, `x-content-type-options: nosniff`,
+  `cache-control: no-store`. What a daemon serves is the agent's output; on the instance's origin
+  it must never run as a page with the user's Access cookie.
+- No answer from the session within 60 s, or the session disconnecting before the answer started:
+  502 `upstream`. A cut-off after the answer started ends the response early. When the app goes
+  away, the session is told to abort the request (`http-cancel`). Revoking the user ends their
+  requests too.
+
 ## 6. Users, limits and spend
 
 ### `GET /api/users` (admin) → `UserList`
@@ -283,8 +316,12 @@ A field left out is unchanged; a number (≥ 0) sets a per-user override; `null`
 `{ month, spentUsd, capUsd, warnUsd, capped, ratePerHour, lastSampleAt }`
 
 ### `GET /api/notices` → `NoticeList`
-The caller's last 100 notices, newest first: `{ id, kind, text, taskId, createdAt }`, `kind` one of
-`machine_hours_cap`, `instance_budget`, `task_failed`, `offboarded`.
+The caller's last 100 notices, newest first: `{ id, kind, text, taskId, createdAt, read }`, `kind`
+one of `machine_hours_cap`, `instance_budget`, `task_failed`, `offboarded`.
+
+### `POST /api/notices/read` (`MarkNoticesReadRequest`) → `MarkNoticesReadResult`
+`{}` marks all the caller's notices read; `{ "upTo": "<notice id>" }` marks that notice and every
+older one. Answers `{ "unreadNotices": n }`. A notice id that isn't the caller's is a 404.
 
 ### `POST /api/admin/directory/sync` (admin) → `SyncResult`
 Runs the directory sync now (it also runs every `directory.intervalSeconds`, default 300):
@@ -373,7 +410,7 @@ owner's personal layer; it can do nothing else.
 | `GET /api/session/bundle` → `LayerBundle` | the assembled layers for the task's owner and role |
 | `GET /api/session/org-env.tar` → `application/x-tar` | the org-env tree at the pinned commit (the "bundle"; no Git credential in the machine) |
 | `POST /api/session/notes` `{ "text" }` → 201 `PersonalNote` | "remember …": a note in the owner's personal layer (`source: "session"`, `taskId`) |
-| `POST /api/session/status` `{ "activity": "busy" \| "idle", "title"? }` → `TaskView` | `idle` starts the auto-pause countdown (`idleMinutes`), `busy` stops it; `title` (≤ 120) renames the task |
+| `POST /api/session/status` `{ "activity": "busy" \| "idle", "title"?, "agentId"? }` → `TaskView` | `idle` starts the auto-pause countdown (`idleMinutes`), `busy` stops it; `title` (≤ 120) renames the task; `agentId` (`[A-Za-z0-9._:-]{1,128}`) records the task's main agent |
 | `WS /api/session/channel` | the reverse channel (below) |
 
 ### The reverse channel
@@ -388,6 +425,9 @@ The session's channel agent keeps one WebSocket open to `wss://<instance>/api/se
 | server → session | `{ "type": "ws-open", "id", "path", "protocols": [...], "headers": {} }` | open `ws://127.0.0.1:<daemon port><path>` with these subprotocols (the first is `paseo.bearer.<password>`); queue frames until it is open |
 | both | `{ "type": "ws-msg", "id", "text" }` or `{ "type": "ws-msg", "id", "data_b64" }` | one frame of stream `id` (binary as base64) |
 | both | `{ "type": "ws-close", "id", "code"?, "reason"? }` | stream `id` ended |
+| server → session | `{ "type": "http-req", "id", "method", "path", "headers": {}, "body_b64"? }` | make this HTTP request to `http://127.0.0.1:<daemon port><path>` with exactly these headers |
+| session → server | `{ "type": "http-res", "id", "status", "headers": {} }`, then `{ "type": "http-data", "id", "data_b64" }`…, then `{ "type": "http-end", "id", "error"? }` | the daemon's answer, body in chunks of ≤ 256 KiB; `error` when the request failed |
+| server → session | `{ "type": "http-cancel", "id" }` | the app went away: abort request `id` |
 | session → server | `{ "type": "hello", "agent": "<version>" }`, `{ "type": "ping" }` | `ping` is answered with `{ "type": "pong" }`; send one every 30 s |
 
 ## 10. Session machine contract

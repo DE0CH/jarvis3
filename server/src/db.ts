@@ -95,6 +95,11 @@ const MIGRATIONS: string[] = [
     value TEXT NOT NULL
   );
   `,
+  // 2: the task's main agent (reported by the session), and read marks on notices
+  `
+  ALTER TABLE tasks ADD COLUMN agent_id TEXT;
+  ALTER TABLE notices ADD COLUMN read_at INTEGER;
+  `,
 ];
 
 export type Db = DatabaseSync;

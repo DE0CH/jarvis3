@@ -6,6 +6,13 @@
 // (after authorize) sends `ws-open` down the task's channel; the session's agent opens the same
 // path on its local Paseo daemon and frames are relayed both ways (text as-is, binary as base64).
 // The server puts the daemon password into the forwarded subprotocols; the client never sees it.
+//
+// The HTTP relay (/api/tasks/:id/daemon/http/*) travels the same channel: `http-req` down, then
+// `http-res` (status + headers), `http-data` chunks and `http-end` back. The server adds the
+// daemon password as a bearer, passes through only a short list of response headers, and makes
+// every response a sandboxed download (see relayResponseHeaders): what a daemon serves is the
+// agent's output and must never run as a page on the instance's origin.
+import type { ServerResponse } from "node:http";
 import type { WebSocket, RawData } from "ws";
 import type { ServerToSessionFrame, SessionToServerFrame } from "./api-types.ts";
 import { randomId } from "./crypto.ts";
@@ -19,10 +26,59 @@ interface Stream {
   client: WebSocket;
 }
 
+interface HttpStream {
+  id: string;
+  userId: string;
+  res: ServerResponse;
+  timer: NodeJS.Timeout | null;
+}
+
 interface SessionConn {
   ws: WebSocket;
   streams: Map<string, Stream>;
+  http: Map<string, HttpStream>;
 }
+
+export interface HttpRelayRequest {
+  method: string;
+  /** Path and query on the daemon, starting with "/". */
+  path: string;
+  headers: Record<string, string>;
+  body: Buffer | null;
+}
+
+/** Request headers the relay passes to the daemon (the server adds authorization itself). */
+const FORWARD_REQUEST_HEADERS = ["content-type", "accept", "range", "if-none-match", "if-modified-since", "if-range"];
+/** Response headers the relay passes back to the app. */
+const FORWARD_RESPONSE_HEADERS = ["content-type", "content-length", "content-disposition", "content-range", "accept-ranges", "etag", "last-modified"];
+
+export function relayRequestHeaders(incoming: Record<string, string | string[] | undefined>, daemonPassword: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of FORWARD_REQUEST_HEADERS) {
+    const v = incoming[k];
+    if (typeof v === "string") out[k] = v;
+  }
+  out.authorization = `Bearer ${daemonPassword}`;
+  return out;
+}
+
+/** Only known headers, always a download, never a page that runs on the instance's origin. */
+export function relayResponseHeaders(fromDaemon: Record<string, string>): Record<string, string> {
+  const lower: Record<string, string> = {};
+  for (const [k, v] of Object.entries(fromDaemon || {})) if (typeof v === "string") lower[k.toLowerCase()] = v;
+  const out: Record<string, string> = {};
+  for (const k of FORWARD_RESPONSE_HEADERS) if (lower[k] !== undefined) out[k] = lower[k]!;
+  const cd = out["content-disposition"];
+  out["content-disposition"] = cd ? cd.replace(/^\s*inline\b/i, "attachment").replace(/^(?!\s*attachment)/i, "attachment; ") : "attachment";
+  out["content-security-policy"] = "sandbox; default-src 'none'";
+  out["x-content-type-options"] = "nosniff";
+  out["cache-control"] = "no-store";
+  return out;
+}
+
+const HTTP_START_TIMEOUT_MS = 60_000;
+const MAX_RELAY_BODY = 1024 * 1024;
+export { MAX_RELAY_BODY };
 
 export interface HubEvents {
   onConnect?: (taskId: string) => void;
@@ -44,7 +100,7 @@ export class ChannelHub {
   attachSession(taskId: string, ws: WebSocket): void {
     const old = this.#sessions.get(taskId);
     if (old) this.#drop(taskId, old, 1012, "replaced by a newer connection");
-    const conn: SessionConn = { ws, streams: new Map() };
+    const conn: SessionConn = { ws, streams: new Map(), http: new Map() };
     this.#sessions.set(taskId, conn);
     ws.on("message", (raw: RawData) => this.#fromSession(conn, raw));
     ws.on("close", () => {
@@ -85,7 +141,73 @@ export class ChannelHub {
       if (!s) return;
       conn.streams.delete(f.id);
       closeQuietly(s.client, safeCode(f.code), f.reason || "");
+      return;
     }
+    if (f.type === "http-res") {
+      const h = conn.http.get(f.id);
+      if (!h || h.res.headersSent) return;
+      if (h.timer) clearTimeout(h.timer);
+      h.timer = null;
+      const status = Number.isInteger(f.status) && f.status >= 200 && f.status <= 599 ? f.status : 502;
+      h.res.writeHead(status, relayResponseHeaders(f.headers));
+      return;
+    }
+    if (f.type === "http-data") {
+      const h = conn.http.get(f.id);
+      if (!h || !h.res.headersSent) return;
+      h.res.write(Buffer.from(String(f.data_b64 || ""), "base64"));
+      return;
+    }
+    if (f.type === "http-end") {
+      const h = conn.http.get(f.id);
+      if (!h) return;
+      this.#endHttp(conn, h, f.error ? `the daemon request failed: ${f.error}` : null);
+    }
+  }
+
+  /** Finish an HTTP relay: a clean end, or an error (a 502 if nothing was sent yet, else a cut-off). */
+  #endHttp(conn: SessionConn, h: HttpStream, error: string | null): void {
+    if (conn.http.get(h.id) !== h) return;
+    conn.http.delete(h.id);
+    if (h.timer) clearTimeout(h.timer);
+    if (!error) {
+      if (!h.res.headersSent) h.res.writeHead(502, { "content-type": "application/json" });
+      h.res.end();
+      return;
+    }
+    if (!h.res.headersSent) {
+      const body = JSON.stringify({ error: { code: "upstream", message: error.slice(0, 300) } });
+      h.res.writeHead(502, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
+      h.res.end(body);
+    } else h.res.destroy();
+  }
+
+  /**
+   * Relay one HTTP request to the task's daemon. Caller has authorised the user and checked
+   * isConnected(). The response is streamed into `res`.
+   */
+  openHttp(taskId: string, userId: string, res: ServerResponse, r: HttpRelayRequest): void {
+    const conn = this.#sessions.get(taskId);
+    if (!conn) throw new Error("session not connected");
+    const id = randomId(8);
+    const h: HttpStream = { id, userId, res, timer: null };
+    conn.http.set(id, h);
+    h.timer = setTimeout(() => this.#endHttp(conn, h, "no answer from the session"), HTTP_START_TIMEOUT_MS);
+    res.on("close", () => {
+      if (conn.http.get(id) === h) {
+        conn.http.delete(id);
+        if (h.timer) clearTimeout(h.timer);
+        this.#send(conn, { type: "http-cancel", id });
+      }
+    });
+    this.#send(conn, {
+      type: "http-req",
+      id,
+      method: r.method,
+      path: r.path,
+      headers: r.headers,
+      ...(r.body && r.body.length ? { body_b64: r.body.toString("base64") } : {}),
+    });
   }
 
   /**
@@ -124,6 +246,12 @@ export class ChannelHub {
         closeQuietly(s.client, 4403, reason);
         n++;
       }
+      for (const h of [...conn.http.values()]) {
+        if (h.userId !== userId) continue;
+        this.#send(conn, { type: "http-cancel", id: h.id });
+        this.#endHttp(conn, h, reason);
+        n++;
+      }
     }
     return n;
   }
@@ -138,6 +266,7 @@ export class ChannelHub {
     if (this.#sessions.get(taskId) === conn) this.#sessions.delete(taskId);
     for (const s of conn.streams.values()) closeQuietly(s.client, 1001, reason);
     conn.streams.clear();
+    for (const h of [...conn.http.values()]) this.#endHttp(conn, h, reason);
     closeQuietly(conn.ws, code, reason);
   }
 

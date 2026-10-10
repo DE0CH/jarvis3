@@ -45,9 +45,12 @@ const ROUTES: R[] = [
   { kind: "member", method: "GET", path: () => "/api/tasks" },
   { kind: "member", method: "GET", path: () => "/api/devices" },
   { kind: "member", method: "GET", path: () => "/api/notices" },
+  { kind: "member", method: "POST", path: () => "/api/notices/read" },
   { kind: "member", method: "POST", path: () => "/api/tasks", body: { prompt: "matrix" } },
   { kind: "owned", method: "GET", path: (i) => `/api/tasks/${i.task}` },
   { kind: "owned", method: "GET", path: (i) => `/api/tasks?userId=${i.alice}` },
+  { kind: "owned", method: "GET", path: (i) => `/api/tasks/${i.task}/daemon/http/api/files/download?token=t` },
+  { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/daemon/http/api/x`, body: { a: 1 } },
   { kind: "owned", method: "GET", path: (i) => `/api/users/${i.alice}` },
   { kind: "owned", method: "GET", path: (i) => `/api/users/${i.alice}/layer` },
   { kind: "owned", method: "GET", path: (i) => `/api/users/${i.alice}/layers` },
@@ -163,6 +166,19 @@ test("authorisation matrix: daemon proxy for every caller", async () => {
         await assert.rejects(openWs(h, creds[who], path), (e: { status?: number }) => e.status === want, `${who} should get ${want}`);
       }
     }
+  } finally {
+    await h.close();
+  }
+});
+
+test("a revoked device gets its own error code; a suspended user's device gets forbidden", async () => {
+  const { h, creds } = await setup();
+  try {
+    const r = await call(h, creds.revokedDevice, "GET", "/api/me");
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error.code, "device_revoked");
+    const unknown = await call(h, await asService(h, "no-such-device.access"), "GET", "/api/me");
+    assert.equal(unknown.body.error.code, "forbidden");
   } finally {
     await h.close();
   }

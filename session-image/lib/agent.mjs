@@ -6,7 +6,7 @@
 //               what it needs in its env (no session token, no gate secret)
 //   3. channel  the reverse channel to the server, relaying the app's sockets to the daemon
 //   4. prompt   the first prompt (create only) becomes the task's main agent
-//   5. status   busy / idle (+ the main agent's title) to POST /api/session/status on change
+//   5. status   busy / idle (+ the main agent's id and title) to POST /api/session/status on change
 //   6. local    a unix socket for in-machine helpers: jarvis-remember posts notes through it, so
 //               the session token never enters the agent's shell
 //
@@ -233,7 +233,7 @@ async function sendFirstPrompt() {
   log("first prompt NOT sent");
 }
 
-let reported = { activity: "", title: "" };
+let reported = { activity: "", title: "", agentId: "" };
 let firstPromptPending = !!env.JARVIS_FIRST_PROMPT;
 async function statusTick(force = false) {
   let agents;
@@ -247,12 +247,17 @@ async function statusTick(force = false) {
   const busy = firstPromptPending || list.some((a) => a.status === "running" || a.status === "initializing");
   const main = list.find((a) => a.id === mainAgent());
   const title = (main?.title || "").slice(0, 120);
+  const agentId = mainAgent();
   const activity = busy ? "busy" : "idle";
-  if (!force && activity === reported.activity && title === reported.title) return;
+  if (!force && activity === reported.activity && title === reported.title && agentId === reported.agentId) return;
   try {
-    await server("POST", "/api/session/status", { activity, ...(title && title !== reported.title ? { title } : {}) });
-    reported = { activity, title };
-    log("status reported", { activity, title });
+    await server("POST", "/api/session/status", {
+      activity,
+      ...(title && title !== reported.title ? { title } : {}),
+      ...(agentId && (force || agentId !== reported.agentId) ? { agentId } : {}),
+    });
+    reported = { activity, title, agentId };
+    log("status reported", { activity, title, agentId });
   } catch (e) {
     log("status report failed", { error: e.message });
   }

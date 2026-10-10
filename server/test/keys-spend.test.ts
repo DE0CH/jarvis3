@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { harness, seedUsers, call, asEmail, createTask, fakeSession, type Harness } from "./helpers.ts";
 import { OpenRouterKeys } from "../src/openrouter.ts";
 import { applySample, hourlyMachineCostUSD, MAX_DELTA_H } from "../src/spend.ts";
+import { addNotice } from "../src/ctx.ts";
 
 async function run(fn: (h: Harness, u: Awaited<ReturnType<typeof seedUsers>>) => Promise<void>, o?: Parameters<typeof harness>[0]) {
   const h = await harness(o);
@@ -214,3 +215,34 @@ test("instance budget: at the cap every task pauses, creates are refused, admins
     },
     { config: { budget: { monthlyUsd: 0.02 } } },
   ));
+
+// ---- notices ---------------------------------------------------------------------------------
+
+test("notices: unread count in /api/me, read flags, mark read up to a notice or all; only the caller's own", () =>
+  run(async (h, u) => {
+    const c = await asEmail(h, u.alice);
+    const me = async () => (await call(h, c, "GET", "/api/me")).body;
+    const aliceId = (await me()).user.id;
+    const bobId = (await call(h, await asEmail(h, u.bob), "GET", "/api/me")).body.user.id;
+    assert.equal((await me()).unreadNotices, 0);
+    for (const text of ["one", "two", "three"]) {
+      addNotice(h.jarvis.ctx, aliceId, "task_failed", text);
+      h.clock.advance(1000);
+    }
+    addNotice(h.jarvis.ctx, bobId, "task_failed", "bob's");
+    assert.equal((await me()).unreadNotices, 3);
+    const list = (await call(h, c, "GET", "/api/notices")).body.notices;
+    assert.deepEqual(list.map((n: { text: string }) => n.text), ["three", "two", "one"]);
+    assert.ok(list.every((n: { read: boolean }) => n.read === false));
+    // up to "two": one and two are read
+    const r = await call(h, c, "POST", "/api/notices/read", { upTo: list[1].id });
+    assert.equal(r.body.unreadNotices, 1);
+    const after = (await call(h, c, "GET", "/api/notices")).body.notices;
+    assert.deepEqual(after.map((n: { read: boolean }) => n.read), [false, true, true]);
+    // bob's notice id is not alice's to mark
+    const bobNotice = (await call(h, await asEmail(h, u.bob), "GET", "/api/notices")).body.notices[0].id;
+    assert.equal((await call(h, c, "POST", "/api/notices/read", { upTo: bobNotice })).status, 404);
+    assert.equal((await call(h, c, "POST", "/api/notices/read", {})).body.unreadNotices, 0);
+    assert.equal((await me()).unreadNotices, 0);
+    assert.equal((await call(h, await asEmail(h, u.bob), "GET", "/api/me")).body.unreadNotices, 1, "bob's stays unread");
+  }));

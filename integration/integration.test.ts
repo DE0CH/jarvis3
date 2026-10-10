@@ -3,7 +3,8 @@
 //   New task -> machine boots -> layers in the right order -> daemon dials in -> chat over the
 //   proxied WebSocket (Paseo's own client SDK) -> "remember" lands in the personal layer ->
 //   pause (snapshot in MinIO, machine gone) -> resume (same conversation) -> destroy (archive in
-//   MinIO). Another user gets 404 on the task and on the daemon socket.
+//   MinIO). Another user gets 404 on the task and on the daemon socket. The task carries its main
+//   agent's id, and the HTTP relay reaches the daemon.
 //
 // Needs Docker and the session image: SESSION_IMAGE (default jarvis3-session:test), built from
 // session-image/. Run: npm test (in integration/).
@@ -220,6 +221,20 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     } finally {
       await client.close();
     }
+  });
+
+  await step("the session reports the main agent's id in the task", async () => {
+    await waitFor("agentId in TaskView", async () => (await taskOf(ALICE, taskId)).agentId === agentId, 30_000);
+  });
+
+  await step("the HTTP relay reaches the daemon with the server's bearer; another user gets 404", async () => {
+    const relay = async (email: string) =>
+      fetch(`${s.base}/api/tasks/${taskId}/daemon/http/api/status`, { headers: { "cf-access-jwt-assertion": await s.jwt(email) } });
+    const r = await relay(ALICE);
+    assert.equal(r.status, 200, "the daemon's /api/status needs its password, which only the server adds");
+    assert.equal(((await r.json()) as { status: string }).status, "server_info");
+    assert.equal(r.headers.get("content-disposition"), "attachment");
+    assert.equal((await relay(BOB)).status, 404);
   });
 
   await step("'remember' runs jarvis-remember and lands in alice's personal layer", async () => {

@@ -113,3 +113,14 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
 31. **The session image is pushed to GHCR only after the integration test passes on it**, tagged
     with the commit (12 hex) and `main`. The package is private until the repo goes public, so an
     instance needs a pull credential until then (Fly: a registry auth on the app).
+
+## HTTP relay (v0.2)
+
+32. **No backpressure on relayed downloads.** The session sends a file in base64 chunks as fast as
+    the daemon reads it, and the server writes each to the app's response without waiting for it
+    to drain, so a slow client makes the server buffer the rest in memory. Fine for documents; a
+    multi-GB download through a slow phone link would need flow control (a `http-more` credit
+    frame) first.
+33. **Revoked versus suspended.** A revoked device of an active user answers 403 `device_revoked`;
+    once the user is suspended or removed, their devices (revoked too) answer 403 `forbidden`, so
+    the app can tell "pair again" from "no access".

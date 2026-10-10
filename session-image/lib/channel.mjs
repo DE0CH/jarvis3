@@ -2,7 +2,8 @@
 // server/src/channel.ts). One WebSocket out to wss://<instance>/api/session/channel; the server
 // sends ws-open for every app connection to the task's daemon, and this relays the stream to the
 // local Paseo daemon: text frames as text, binary as base64. Ported from Jarvis 1's
-// cf-tunnel/agent.js, WebSocket streams only (no HTTP requests travel over this channel).
+// cf-tunnel/agent.js. HTTP requests to the daemon (the server's HTTP relay, e.g. file downloads)
+// come as `http-req`; the answer goes back as `http-res`, `http-data` chunks and `http-end`.
 import WebSocket from "ws";
 
 export const VERSION = "jarvis3-session/0.1.0";
@@ -11,7 +12,7 @@ export const VERSION = "jarvis3-session/0.1.0";
  * @param {object} o
  * @param {string} o.url            wss://… or ws://…/api/session/channel
  * @param {Record<string,string>} o.headers  gate token + session bearer
- * @param {string} o.daemonBase     ws://127.0.0.1:6767
+ * @param {string} o.daemonBase     ws://127.0.0.1:6767 (HTTP requests go to the same host as http://)
  * @param {(m: string, e?: object) => void} [o.log]
  * @param {() => void} [o.onConnect]
  * @param {number} [o.pingMs]       default 30 s (the contract)
@@ -25,6 +26,9 @@ export function startChannel(o) {
   let pinger = null;
   /** stream id -> { local: WebSocket, queue: (string|Buffer)[] } */
   const streams = new Map();
+  /** http request id -> AbortController */
+  const requests = new Map();
+  const httpBase = o.daemonBase.replace(/^ws/, "http");
 
   const send = (f) => {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(f));
@@ -84,6 +88,36 @@ export function startChannel(o) {
     });
   };
 
+  const HTTP_CHUNK = 256 * 1024;
+  const httpRequest = async (f) => {
+    const ac = new AbortController();
+    requests.set(f.id, ac);
+    try {
+      if (typeof f.path !== "string" || !f.path.startsWith("/")) throw new Error("bad path");
+      const res = await fetch(httpBase + f.path, {
+        method: f.method,
+        headers: f.headers || {},
+        body: typeof f.body_b64 === "string" ? Buffer.from(f.body_b64, "base64") : undefined,
+        signal: ac.signal,
+        redirect: "manual",
+      });
+      const headers = {};
+      res.headers.forEach((v, k) => (headers[k] = v));
+      send({ type: "http-res", id: f.id, status: res.status, headers });
+      if (res.body) {
+        for await (const chunk of res.body) {
+          const buf = Buffer.from(chunk);
+          for (let i = 0; i < buf.length; i += HTTP_CHUNK) send({ type: "http-data", id: f.id, data_b64: buf.subarray(i, i + HTTP_CHUNK).toString("base64") });
+        }
+      }
+      send({ type: "http-end", id: f.id });
+    } catch (e) {
+      if (!ac.signal.aborted) send({ type: "http-end", id: f.id, error: String(e?.message || e).slice(0, 200) });
+    } finally {
+      requests.delete(f.id);
+    }
+  };
+
   const onFrame = (raw) => {
     let f;
     try {
@@ -101,6 +135,8 @@ export function startChannel(o) {
       return;
     }
     if (f.type === "ws-close") return closeStream(f.id, f.code, f.reason);
+    if (f.type === "http-req") return void httpRequest(f);
+    if (f.type === "http-cancel") return requests.get(f.id)?.abort();
     // pong: nothing to do
   };
 
@@ -124,6 +160,7 @@ export function startChannel(o) {
     sock.on("close", (code) => {
       clearInterval(pinger);
       for (const id of [...streams.keys()]) closeStream(id, 1001, "channel closed");
+      for (const ac of requests.values()) ac.abort();
       if (ws === sock) ws = null;
       if (stopped) return;
       log("channel closed; reconnecting", { code, inMs: backoff });

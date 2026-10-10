@@ -56,15 +56,18 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
 4. **Channel**: one WebSocket to `$JARVIS_URL/api/session/channel` (`ws-open` / `ws-msg` / `ws-close`,
    `hello`, `ping` every 30 s; reconnects with backoff 1 s → 30 s). Each `ws-open` becomes a local
    socket to `ws://127.0.0.1:6767<path>` with the server's subprotocols (the first is
-   `paseo.bearer.<password>`); frames are queued until it opens.
+   `paseo.bearer.<password>`); frames are queued until it opens. Each `http-req` becomes a `fetch`
+  to `http://127.0.0.1:6767<path>` with the server's headers (the server has added the daemon's
+  bearer); the answer goes back as `http-res`, `http-data` chunks of ≤ 256 KiB and `http-end`, and
+  `http-cancel` aborts it.
 5. **First prompt** (create only, once per task — marker `~/.jarvis/first-prompt-sent`, kept in
    the snapshot): Paseo's client SDK creates the task's main agent
    (`provider: opencode/openrouter/<model>`, cwd `~/workspace`) with `JARVIS_FIRST_PROMPT`; its id is
    kept in `~/.jarvis/main-agent`.
 6. **Status**: every 3 s jarvis-agent lists the daemon's agents over one local client connection;
    `busy` while any agent is `running`/`initializing` (or the first prompt is still being sent),
-   else `idle`. A change (or a reconnect) → `POST /api/session/status`, with the main agent's title
-   when it changed.
+   else `idle`. A change (or a reconnect) → `POST /api/session/status`, with the main agent's id
+   (on a reconnect, and when it first exists) and its title when it changed.
 
 ## Remember
 
