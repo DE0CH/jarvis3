@@ -1,6 +1,7 @@
 # Jarvis 3 session machine: OpenCode (the agent, on OpenRouter) driven by a Paseo daemon, plus
 # jarvis-agent (layers, reverse channel to the instance server, status, "remember"). One machine
-# per task; nothing in it but the task owner's capped OpenRouter key and its own session token.
+# per task; nothing in it but the task owner's capped OpenRouter key (and capped proxy sub-account,
+# when the instance's proxy provider has them) and its own session token.
 # docs/SESSION-IMAGE.md describes the boot sequence and the contract with the server.
 #
 # Size matters: Fly refuses images over ~8 GB unpacked, so every trim happens in the same RUN that
@@ -32,8 +33,8 @@ WORKDIR /usr/local/lib/jarvis
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY lib ./lib
-COPY bin/jarvis-boot bin/jarvis-snapshot bin/jarvis-remember /usr/local/bin/
-RUN chmod 755 /usr/local/bin/jarvis-boot /usr/local/bin/jarvis-snapshot /usr/local/bin/jarvis-remember
+COPY bin/jarvis-boot bin/jarvis-snapshot bin/jarvis-remember bin/jarvis-web /usr/local/bin/
+RUN chmod 755 /usr/local/bin/jarvis-boot /usr/local/bin/jarvis-snapshot /usr/local/bin/jarvis-remember /usr/local/bin/jarvis-web
 
 WORKDIR /home/jarvis
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/jarvis-boot"]

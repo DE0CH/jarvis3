@@ -21,6 +21,8 @@ Published by CI (`.github/workflows/session.yml`) as `ghcr.io/de0ch/jarvis3-sess
 | `bin/jarvis-remember` | the agent's "remember" command |
 | `lib/opencode-plugin.mjs` | the locked-policy OpenCode plugin: guards and the `jarvis_*` tools ([ACTIONS.md](ACTIONS.md)) |
 | `lib/policy.mjs` | the plugin's logic (guard matching, the agent-socket client, waiting, outcome texts; unit-tested) |
+| `lib/web.mjs`, `bin/jarvis-web` | the Tier 0 web tools: what `web_search` / `web_fetch` and the `jarvis-web` command send, and how answers are written for the model |
+| `lib/proxy.mjs` | the local proxy on `127.0.0.1:3128` (subuser chaining or the server relay) |
 
 Size: ~870 MB unpacked (CI, 2026-10-08) (CI prints it on every run and fails above 3 GB; Fly refuses ~8 GB). The
 biggest parts are OpenCode's binary (~180 MB) and the Paseo daemon with its dependencies (~300 MB).
@@ -55,7 +57,7 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
    `paseo.pid` is removed first: the old machine's pid can belong to another process here), listening on
    `127.0.0.1:6767` with `PASEO_PASSWORD`, relay, web UI, dictation and voice off. Its env holds only
    HOME/PATH, the Paseo settings, the password and `OPENROUTER_API_KEY` (and `OPENROUTER_BASE_URL`
-   when set): **not** the session token or the gate secret, so nothing the agent runs can read them.
+   when set, and `JARVIS_PROXY_URL` with a Tier 0 proxy): **not** the session token or the gate secret, so nothing the agent runs can read them.
    The daemon answers `/api/health` before it accepts WebSockets (it restores its agents first
    and answers 503 meanwhile), so jarvis-agent waits until its own client gets through before it
    dials in: a task is `running` only once the app's socket can reach the daemon.
@@ -102,6 +104,16 @@ waits have no time limit (people take their time); stopping the agent aborts the
 task cancels its pending requests on the server. `@opencode-ai/plugin` (for its `tool` helper and
 zod) is pinned to the image's OpenCode version.
 
+## Web tools and the proxy
+
+Tier 0 ([TOOLS.md](TOOLS.md)). At boot jarvis-agent reads `GET /api/session/tools`; when the
+instance has a tool, the preamble gets a paragraph on it and `~/.jarvis/skills/jarvis-web/` the
+built-in skill. The socket forwards `GET /tools`, `POST /tools/search` and `POST /tools/fetch` to the
+server's metered routes (100 s timeout: a rendered fetch is slow, and Cloudflare cuts a proxied
+request at 100 s). With a proxy, jarvis-agent listens on `127.0.0.1:3128` and the daemon's env gets
+`JARVIS_PROXY_URL`; the proxy's upstream login (`JARVIS_PROXY`, subuser providers) stays in
+jarvis-agent's own environment.
+
 ## Snapshot
 
 `jarvis-snapshot start <run> <url>` writes `running` to `/run/jarvis/snapshots/<run>.status`,
@@ -120,8 +132,8 @@ provider sets it from `envOverrides`), `JARVIS_STATUS_MS`, `JARVIS_DAEMON_PORT`.
 
 ## Testing
 
-- `cd session-image && npm test`: assembly, the channel relay and the policy plugin against a
-  stand-in agent socket (node:test, no Docker).
+- `cd session-image && npm test`: assembly, the channel relay, the policy plugin and the web tools
+  against a stand-in agent socket, and the local proxy (node:test, no Docker).
 - `integration/`: the image end to end (the header of `integration.test.ts` lists the checks):
   `docker build -t jarvis3-session:test session-image`, then `cd server && npm ci`, then
   `cd integration && npm ci && npm test` (needs Docker; `SESSION_IMAGE` picks another tag).

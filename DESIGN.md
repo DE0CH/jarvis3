@@ -1,7 +1,7 @@
 # Jarvis 3 — design
 
 Status: design agreed 2026-10-08; v0.1 of the server, session image, app variant and deployment is
-built (docs/), and actions and approvals (docs/ACTIONS.md). Jarvis 1 and Jarvis 2 (`DE0CH/jarvis2`) are separate projects and stay as they are;
+built (docs/), actions and approvals (docs/ACTIONS.md), and the Tier 0 web tools (docs/TOOLS.md). Jarvis 1 and Jarvis 2 (`DE0CH/jarvis2`) are separate projects and stay as they are;
 Jarvis 3 is a new codebase.
 
 ## What Jarvis 3 is
@@ -133,7 +133,8 @@ Principle: **raw secrets never enter a staff session; capabilities do.** Users n
 user's role determines what their machines hold.
 
 - **Tier 0 — always on, never asked about.** Search, scraping, proxies, OpenRouter, document tools. Per-user
-  sub-keys with hard spend caps wherever the provider supports them.
+  sub-keys with hard spend caps wherever the provider supports them; otherwise the server meters the calls with
+  the organisation's key, which never enters a machine (search, fetch and proxies: docs/TOOLS.md).
 - **Tier 1 — the user's own accounts.** Their Workspace mail, Drive, Calendar via OAuth consent they give
   once. Theirs, so they act freely (outward actions still confirm, below).
 - **Tier 2 — shared company assets.** Bank, company card, registrar, admin consoles, customer-data exports.

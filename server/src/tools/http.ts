@@ -12,7 +12,8 @@ export interface AdapterOptions {
   settings?: Record<string, unknown>;
 }
 
-export const TIMEOUT_MS = 90_000;
+// under the 100 s Cloudflare gives a proxied request (the session waits for the answer through it)
+export const TIMEOUT_MS = 80_000;
 
 /** A provider error (no key in the message; the body is cut short). */
 export function providerError(provider: string, status: number, text: string) {

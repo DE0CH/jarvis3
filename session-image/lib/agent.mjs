@@ -7,9 +7,11 @@
 //   3. channel  the reverse channel to the server, relaying the app's sockets to the daemon
 //   4. prompt   the first prompt (create only) becomes the task's main agent
 //   5. status   busy / idle (+ the main agent's id and title) to POST /api/session/status on change
-//   6. local    a unix socket for in-machine helpers: jarvis-remember posts notes through it, and
-//               the OpenCode policy plugin (lib/opencode-plugin.mjs) files approvals and waits on
-//               them, so the session token never enters the agent's shell
+//   6. local    a unix socket for in-machine helpers: jarvis-remember posts notes through it, the
+//               OpenCode policy plugin (lib/opencode-plugin.mjs) files approvals and waits on
+//               them, and the web tools (web_search, web_fetch, jarvis-web) go to the server's
+//               metered Tier 0 routes, so the session token never enters the agent's shell
+//   7. proxy    the Tier 0 local proxy on 127.0.0.1:3128 (lib/proxy.mjs), when the instance has one
 //
 // Config comes from the env the server sets (docs/API.md section 10).
 import { spawn, spawnSync } from "node:child_process";
@@ -20,6 +22,7 @@ import { createPaseoClient } from "@getpaseo/client";
 import WebSocket from "ws";
 import { writeLayers } from "./assemble.mjs";
 import { startChannel, VERSION } from "./channel.mjs";
+import { relayTunnel, startLocalProxy, subuserTunnel } from "./proxy.mjs";
 
 const env = process.env;
 const need = (k) => {
@@ -45,6 +48,8 @@ const P = {
   socket: join(RUN, "agent.sock"),
 };
 const DAEMON_PORT = Number(env.JARVIS_DAEMON_PORT || 6767);
+const PROXY_PORT = Number(env.JARVIS_PROXY_PORT || 3128);
+const PROXY_URL = `http://127.0.0.1:${PROXY_PORT}`;
 const DAEMON_HTTP = `http://127.0.0.1:${DAEMON_PORT}`;
 
 const SERVER = need("JARVIS_URL").replace(/\/$/, "");
@@ -69,14 +74,14 @@ const chownR = (p) => spawnSync("chown", ["-R", `${USER}:${USER}`, p]);
 
 // ---- server calls ------------------------------------------------------------------------------
 
-async function server(method, path, body, { retries = 0, raw = false } = {}) {
+async function server(method, path, body, { retries = 0, raw = false, timeoutMs = 60_000 } = {}) {
   for (let attempt = 0; ; attempt++) {
     try {
       const r = await fetch(SERVER + path, {
         method,
         headers: { ...serverHeaders, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (r.ok) return raw ? Buffer.from(await r.arrayBuffer()) : await r.json();
       const text = await r.text();
@@ -94,10 +99,23 @@ async function server(method, path, body, { retries = 0, raw = false } = {}) {
 // ---- 1. layers ---------------------------------------------------------------------------------
 
 let guards = [];
+/** The task's Tier 0 tools (GET /api/session/tools); null when the server has none (or is older). */
+let tools = null;
+
+async function loadTools() {
+  try {
+    const v = await server("GET", "/api/session/tools", undefined, { retries: 4 });
+    return v.search || v.fetch || v.proxy ? v : null;
+  } catch (e) {
+    log("no Tier 0 tools", { error: e.message });
+    return null;
+  }
+}
 
 async function loadLayers() {
   const bundle = await server("GET", "/api/session/bundle", undefined, { retries: 8 });
   guards = bundle.guards || [];
+  tools = await loadTools();
   const tar = await server("GET", "/api/session/org-env.tar", undefined, { retries: 8, raw: true });
   rmSync(P.org, { recursive: true, force: true });
   mkdirSync(P.org, { recursive: true });
@@ -112,6 +130,8 @@ async function loadLayers() {
     model: MODEL,
     baseUrl: env.OPENROUTER_BASE_URL || "",
     opencodeConfigPath: P.opencodeConfig,
+    tools,
+    proxyUrl: PROXY_URL,
   });
   chownR(P.jarvis);
   chownR(join(HOME, ".config"));
@@ -143,6 +163,8 @@ function daemonEnv() {
     OPENROUTER_API_KEY: env.OPENROUTER_API_KEY || "",
     OPENCODE_DISABLE_AUTOUPDATE: "true",
     ...(env.OPENROUTER_BASE_URL ? { OPENROUTER_BASE_URL: env.OPENROUTER_BASE_URL } : {}),
+    // the local proxy's address only; its upstream login (subuser) or the server's (relay) stays out
+    ...(tools?.proxy ? { JARVIS_PROXY_URL: PROXY_URL } : {}),
   };
 }
 /**
@@ -311,9 +333,9 @@ function localApi() {
       }
     }
     // the policy plugin: guards, the action catalogue, filing a request and waiting on it
-    const forward = async (method, path, body) => {
+    const forward = async (method, path, body, okStatus, timeoutMs) => {
       try {
-        return reply(method === "POST" ? 201 : 200, await server(method, path, body));
+        return reply(okStatus ?? (method === "POST" ? 201 : 200), await server(method, path, body, timeoutMs ? { timeoutMs } : {}));
       } catch (e) {
         if (!e.status) return reply(502, { error: { code: "upstream", message: `the Jarvis server is unreachable: ${e.message}` } });
         let b = e.body;
@@ -327,6 +349,20 @@ function localApi() {
     };
     const url = new URL(req.url, "http://local");
     if (req.method === "GET" && url.pathname === "/guards") return reply(200, { guards });
+    // Tier 0 web tools: metered by the server against the task owner's allowance
+    if (req.method === "GET" && url.pathname === "/tools") return forward("GET", "/api/session/tools");
+    if (req.method === "POST" && (url.pathname === "/tools/search" || url.pathname === "/tools/fetch")) {
+      let body;
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+      } catch {
+        return reply(400, { error: { code: "bad_request", message: "body must be JSON" } });
+      }
+      // a rendered fetch can take a while; Cloudflare cuts a proxied request at 100 s
+      const r = await forward("POST", `/api/session${url.pathname}`, body, 200, 100_000);
+      log(`web ${url.pathname.slice(7)}`, { status: res.statusCode });
+      return r;
+    }
     if (req.method === "GET" && url.pathname === "/actions") return forward("GET", "/api/session/actions");
     if (req.method === "POST" && url.pathname === "/approvals") {
       let body;
@@ -349,12 +385,40 @@ function localApi() {
   return srv;
 }
 
+// ---- 7. the Tier 0 local proxy ------------------------------------------------------------------
+
+async function startProxy() {
+  if (!tools?.proxy) return null;
+  let open;
+  if (tools.proxy === "subuser") {
+    let up;
+    try {
+      up = JSON.parse(env.JARVIS_PROXY || "");
+    } catch {
+      log("no proxy sub-account in this machine (JARVIS_PROXY); the local proxy stays off");
+      return null;
+    }
+    open = subuserTunnel(up);
+  } else {
+    open = relayTunnel({ serverWs: SERVER.replace(/^http/, "ws"), headers: serverHeaders });
+  }
+  try {
+    const srv = await startLocalProxy({ open, port: PROXY_PORT, log });
+    log("local proxy listening", { url: PROXY_URL, mode: tools.proxy });
+    return srv;
+  } catch (e) {
+    log("local proxy failed to start", { error: e.message });
+    return null;
+  }
+}
+
 // ---- main ---------------------------------------------------------------------------------------
 
 async function main() {
   log("jarvis-agent starting", { version: VERSION, task: env.JARVIS_TASK_ID, model: MODEL });
   await loadLayers();
   const local = localApi();
+  const proxy = await startProxy();
   warmOpencode();
   runDaemon();
   if (!(await waitDaemon())) log("the Paseo daemon did not come up in time; carrying on");
@@ -381,6 +445,7 @@ async function main() {
     clearInterval(timer);
     channel.stop();
     local.close();
+    proxy?.close();
     dropClient();
     daemon?.kill("SIGTERM");
     setTimeout(() => process.exit(0), 3000).unref();

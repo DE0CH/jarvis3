@@ -26,6 +26,7 @@ import { StaticDirectory } from "../server/src/directory-google.ts";
 import { GitOrgEnv } from "../server/src/orgenv-git.ts";
 import { FakeDeviceTokens } from "../server/src/fakes/devices.ts";
 import { FakeOpenRouter } from "./fake-openrouter.ts";
+import { buildToolProviders } from "../server/src/tools/registry.ts";
 
 export const INSTANCE = "itest";
 export const TEAM = "itest.cloudflareaccess.example.org";
@@ -106,6 +107,8 @@ export interface StackOptions {
   config?: Partial<Config>;
   /** The actions' credentials (what loadActionSecrets reads from the env in production). */
   actionSecrets?: Record<string, Record<string, string>>;
+  /** Tier 0 provider credentials (what loadToolSecrets reads from the env in production). */
+  toolSecrets?: Partial<Record<"search" | "fetch" | "proxy", string>>;
 }
 
 export async function startStack(o: StackOptions): Promise<Stack> {
@@ -182,6 +185,7 @@ export async function startStack(o: StackOptions): Promise<Stack> {
       directory: new StaticDirectory(config.directory.kind === "static" ? config.directory.users : []),
       deviceTokens: new FakeDeviceTokens(),
       orgEnv: new GitOrgEnv(org.mirror, org.commit),
+      tools: buildToolProviders(config, o.toolSecrets ?? {}),
     },
   });
 

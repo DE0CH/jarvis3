@@ -8,14 +8,20 @@
 //   jarvis_action         run one; the policy approves it, or the task's owner / an admin / the owner
 //   jarvis_request_access ask an admin for an action this task's role lacks
 //   jarvis_ask_boss       ask an admin a judgement question and wait for the answer
+//   web_search, web_fetch Tier 0 web tools (lib/web.mjs): metered by the server against the task
+//                         owner's monthly allowance, with the organisation's keys (never in here)
 //
 // There are no harness permission prompts: OpenCode runs with `allow`, and only these stop.
 // OpenCode treats every export of a plugin file as a plugin, so this file exports only the plugin.
 import { tool } from "@opencode-ai/plugin";
 import { LocalClient, errorText, matchGuard, outcome, waitSettled, waitingText } from "./policy.mjs";
+import { DEFAULT_INLINE_CHARS, fetchOutput, formatSearch, webCall } from "./web.mjs";
+import { join } from "node:path";
 
 const z = tool.schema;
+// the web tools are NOT exempt: a guard rule may name web_fetch (or "*") like any other tool
 const OWN_TOOLS = new Set(["jarvis_actions", "jarvis_action", "jarvis_request_access", "jarvis_ask_boss"]);
+const PAGES_DIR = () => join(process.env.HOME || "/home/jarvis", "workspace", ".web");
 
 export const JarvisPolicyPlugin = async () => {
   const client = new LocalClient();
@@ -91,6 +97,40 @@ export const JarvisPolicyPlugin = async () => {
         },
         async execute(args, ctx) {
           return outcome(await ask({ kind: "access", action: args.action, reason: args.reason }, ctx));
+        },
+      }),
+
+      web_search: tool({
+        description:
+          "Search the web (a real search engine, current results). Returns titles, URLs and snippets; set textChars to also get each page's extracted text. Each search costs a little of the user's monthly web-tools allowance, so prefer one well-phrased query over many. Then read pages with web_fetch.",
+        args: {
+          query: z.string().describe("what to search for, as you would type it into a search engine"),
+          numResults: z.number().int().min(1).max(20).optional().describe("how many results, default 10"),
+          textChars: z.number().int().min(0).max(20000).optional().describe("include up to this many characters of each page's text (dearer); default 0"),
+          since: z.string().optional().describe("only pages published on or after this date, YYYY-MM-DD"),
+          includeDomains: z.array(z.string()).max(20).optional().describe("only these domains, e.g. [\"gov.uk\"]"),
+          country: z.string().length(2).optional().describe("two-letter country for localised results"),
+        },
+        async execute(args) {
+          return formatSearch(await webCall(client, "/tools/search", args));
+        },
+      }),
+
+      web_fetch: tool({
+        description:
+          "Fetch a web page through the organisation's scraping service: works on sites that block plain downloads, can run the page's JavaScript (render) and use residential IPs (premium, dearest) for bot-walled sites. Returns the raw HTML by default (format text for extracted text); the whole page is saved to a file under ~/workspace/.web and the start of it is returned. Costs a little of the user's monthly allowance (render and premium cost more): try a plain fetch first.",
+        args: {
+          url: z.string().describe("the page's absolute http(s) URL"),
+          render: z.boolean().optional().describe("run the page's JavaScript first (pages that build their content in the browser)"),
+          premium: z.boolean().optional().describe("residential IPs, for sites that block the plain fetch"),
+          country: z.string().length(2).optional().describe("two-letter exit country (with premium)"),
+          format: z.enum(["html", "text"]).optional().describe("html (default) or text"),
+          inlineChars: z.number().int().min(1000).max(200000).optional().describe(`how much of the page to return inline, default ${DEFAULT_INLINE_CHARS}`),
+        },
+        async execute(args) {
+          const { inlineChars, ...body } = args;
+          const r = await webCall(client, "/tools/fetch", body);
+          return fetchOutput(r, { url: args.url, dir: PAGES_DIR(), ...(inlineChars ? { inlineChars } : {}) });
         },
       }),
 

@@ -167,3 +167,25 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
 46. **One mailbox per `smtp.send` action.** Sending as each user from their own mailbox is Tier 1
     (their own OAuth) and comes with Tier 1; until then a `self` guard on the user's own mail CLI
     covers it.
+
+## Tier 0 tools ([TOOLS.md](TOOLS.md))
+
+47. **Search and fetch are server-metered, even where a provider could mint per-user keys** (Exa's
+    Team Management API, Tavily Enterprise). A reservation against the cap before each call makes
+    the cap as hard as a provider's, and the key never leaves the server. A provider's own per-user
+    key could be added behind the server as a second guard (the server would hold the user's key and
+    call with it), once an account has the feature enabled.
+48. **One allowance for search and fetch together** (`toolsMonthlyUsd`, USD), and a separate GB cap
+    for proxies (`proxyMonthlyGb`), because proxy sub-accounts are capped in GB by the provider.
+49. **A proxy provider outage doesn't stop a task**: it starts without a proxy (logged), and the next
+    task tries the sub-account again.
+50. **The relay limits tunnel ports to 80, 443, 8080 and 8443**; SSH, SMTP and the like through the
+    organisation's proxy would need a deliberate change.
+51. **Relayed traffic passes through the instance server** (and its Cloudflare tunnel). Fine for
+    page-sized traffic; bulk downloads through a relay provider cost the server's bandwidth. A
+    subuser provider keeps that traffic off the server.
+52. **The ledger keeps no query text or URL**, only tool, provider, cost, bytes and month, so usage
+    views can't leak what someone looked up.
+53. **Sub-account use is read every 15 minutes**, so the shown GB lag; the provider's own allocation
+    is what stops traffic, not the shown figure.
+

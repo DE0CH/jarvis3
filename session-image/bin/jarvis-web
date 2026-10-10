@@ -1,0 +1,82 @@
+#!/usr/bin/env node
+// jarvis-web: the Tier 0 web tools from the shell (scripts, pipelines). Same calls as the agent's
+// web_search / web_fetch tools: through jarvis-agent's local socket to the server, which meters
+// them against the task owner's monthly allowance. docs/TOOLS.md.
+//
+//   jarvis-web search "query" [--n 10] [--text 2000] [--since YYYY-MM-DD] [--domain d]... [--country cc] [--json]
+//   jarvis-web fetch URL [--render] [--premium] [--country cc] [--text] [-o FILE] [--json]
+//   jarvis-web proxy            the local proxy's address and this month's traffic
+//   jarvis-web usage            this month's web-tools spend
+import { writeFileSync } from "node:fs";
+import { LocalClient } from "/usr/local/lib/jarvis/lib/policy.mjs";
+import { allowanceLine, formatSearch, proxyHelp, webCall } from "/usr/local/lib/jarvis/lib/web.mjs";
+
+const USAGE = `usage:
+  jarvis-web search "query" [--n 10] [--text CHARS] [--since YYYY-MM-DD] [--domain DOMAIN]... [--country CC] [--json]
+  jarvis-web fetch URL [--render] [--premium] [--country CC] [--text] [-o FILE] [--json]
+  jarvis-web proxy
+  jarvis-web usage`;
+
+const die = (msg, code = 1) => {
+  console.error(msg);
+  process.exit(code);
+};
+
+function parse(argv) {
+  const pos = [];
+  const o = { domain: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const val = () => (i + 1 < argv.length ? argv[++i] : die(`${a} needs a value\n${USAGE}`, 2));
+    if (a === "--n") o.n = Number(val());
+    else if (a === "--text" && o.cmd === "search") o.text = Number(val());
+    else if (a === "--text") o.textFormat = true;
+    else if (a === "--since") o.since = val();
+    else if (a === "--domain") o.domain.push(val());
+    else if (a === "--country") o.country = val();
+    else if (a === "--render") o.render = true;
+    else if (a === "--premium") o.premium = true;
+    else if (a === "-o" || a === "--out") o.out = val();
+    else if (a === "--json") o.json = true;
+    else if (a === "-h" || a === "--help") die(USAGE, 0);
+    else if (!o.cmd) o.cmd = a;
+    else pos.push(a);
+  }
+  return { o, pos };
+}
+
+const { o, pos } = parse(process.argv.slice(2));
+const client = new LocalClient();
+try {
+  if (o.cmd === "search") {
+    if (!pos.length) die(USAGE, 2);
+    const body = { query: pos.join(" ") };
+    if (o.n) body.numResults = o.n;
+    if (o.text) body.textChars = o.text;
+    if (o.since) body.since = o.since;
+    if (o.domain.length) body.includeDomains = o.domain;
+    if (o.country) body.country = o.country;
+    const r = await webCall(client, "/tools/search", body);
+    console.log(o.json ? JSON.stringify(r, null, 1) : formatSearch(r));
+  } else if (o.cmd === "fetch") {
+    if (pos.length !== 1) die(USAGE, 2);
+    const body = { url: pos[0], render: !!o.render, premium: !!o.premium, format: o.textFormat ? "text" : "html" };
+    if (o.country) body.country = o.country;
+    const r = await webCall(client, "/tools/fetch", body);
+    if (o.json) console.log(JSON.stringify(r));
+    else if (o.out) {
+      writeFileSync(o.out, r.body);
+      console.error(`HTTP ${r.status}, ${r.body.length} characters saved to ${o.out}${r.truncated ? " (cut to the server's limit)" : ""}. ${allowanceLine(r)}`);
+    } else {
+      process.stdout.write(r.body);
+      console.error(`\n[HTTP ${r.status}; ${allowanceLine(r)}]`);
+    }
+  } else if (o.cmd === "proxy" || o.cmd === "usage") {
+    const r = await client.get("/tools");
+    if (r.status !== 200) die(`jarvis-web: ${JSON.stringify(r.body)}`);
+    if (o.cmd === "proxy") console.log(proxyHelp(r.body, process.env.JARVIS_PROXY_URL || "http://127.0.0.1:3128"));
+    else console.log(r.body.web ? allowanceLine(r.body.web) : "No web tools on this instance.");
+  } else die(USAGE, 2);
+} catch (e) {
+  die(`jarvis-web: ${e.message}`);
+}

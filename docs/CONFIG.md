@@ -21,7 +21,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `directory.users` | (static) `[{email, name?, role, suspended?}]` — for a one-person instance |
 | `directory.intervalSeconds` | poll interval, default 300 |
 | `bootstrapAdmins` | emails that get the first admin role whatever their groups say (suspension still wins) |
-| `roles` | role → `{openrouterMonthlyUsd, machineHoursPerMonth, admin?}`. `null` = no limit. Key order is the precedence when a user is in several mapped groups. At least one role has `admin: true` |
+| `roles` | role → `{openrouterMonthlyUsd, machineHoursPerMonth, admin?, toolsMonthlyUsd?, proxyMonthlyGb?}`. `null` = no limit. `toolsMonthlyUsd` (search + fetch, USD) is required once `tools.search` or `tools.fetch` is set, `proxyMonthlyGb` once `tools.proxy` is (a number, or an explicit `null`; a `subuser` proxy needs a number). Key order is the precedence when a user is in several mapped groups. At least one role has `admin: true` |
 | `models`, `defaultModel` | the curated OpenRouter model list (`{id, label}`) and its default |
 | `machines` | `kind: "fly"`: `app` (one per instance, made by the operator and kept; the server never creates or deletes it, so `FLY_API_TOKEN` can be scoped to that app), `org`, `region`, session `image`, `guest` size, `rootfsGb`. `kind: "docker"` (CI and local runs only): `image`, `guest`, `socketPath`, `network`, `envOverrides`, `extraHosts` |
 | `storage` | S3 endpoint, region, bucket (Hetzner Object Storage in the instance's own project) |
@@ -35,6 +35,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `presignSeconds` | lifetime of snapshot upload/restore URLs, default 3600 |
 | `suggestions` | optional; turns on "Suggest for everyone": `kind: "github"`, `repo` (`owner/name` of the org-env repo), `baseBranch` (default `main`), `apiUrl` (default `https://api.github.com`; a GitHub Enterprise Server's `https://<host>/api/v3`), `auth`: `{kind: "token"}` or `{kind: "app", appId, installationId}`. Absent: the app hides the button and the route answers 409 |
 | `owner` | an admin's email: the only person who approves Tier 3 changes, with a passkey ([ACTIONS.md](ACTIONS.md)) |
+| `tools` | optional; Tier 0 tools ([TOOLS.md](TOOLS.md)): `search`, `fetch`, `proxy`, each `{provider, credential?, baseUrl?, pricing?, settings?}` (`credential` names the environment variable with the organisation's key; `pricing`: `perCallUsd`, `perCreditUsd`, `perGbUsd`), and `monthlyUsd`, an instance-wide cap on search + fetch. A kind left out is off |
 | `actions` | the broker's named actions, their policies and the environment variables holding their credentials ([ACTIONS.md](ACTIONS.md)) |
 
 ## Secrets (environment)
@@ -50,6 +51,10 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `SESSION_GATE_CLIENT_SECRET` | secret of the session gate service token (handed to session machines) | — |
 | `GITHUB_SUGGEST_TOKEN` | (`suggestions.auth.kind: "token"`) a fine-grained token | the org-env repo only: Contents (read and write), Pull requests (read and write) |
 | `GITHUB_APP_PRIVATE_KEY` | (`suggestions.auth.kind: "app"`) the GitHub App's private key, PEM | an App installed on the org-env repo only, with Contents and Pull requests (write); the server asks GitHub for installation tokens narrowed to that repo and those two permissions |
+
+Tier 0 provider keys: the environment variables `tools.<kind>.credential` names (the server refuses
+to start when one is missing). They stay on the server; scope each to the instance (a dedicated key
+or sub-account of the provider where it has them).
 
 Each action's credentials: the environment variables its `credentials` names (Tier 2 secrets; the
 server refuses to start when one is missing).

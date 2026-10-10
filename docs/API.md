@@ -58,8 +58,8 @@ daemon proxy. Targets:
 | 400 `bad_request` | malformed body or parameters |
 | 409 `busy` | another lifecycle operation is running on the task |
 | 409 `conflict` | the task's state does not allow this, or nothing to undo |
-| 429 `machine_hours_cap`, `instance_budget`, `too_many_requests` | caps (section 6), pairing rate limit |
-| 502 `upstream` | Fly, OpenRouter, Cloudflare, Google or S3 failed |
+| 429 `machine_hours_cap`, `instance_budget`, `tools_cap`, `too_many_requests` | caps (sections 6 and 12), pairing rate limit |
+| 502 `upstream` | Fly, OpenRouter, Cloudflare, Google, S3 or a Tier 0 provider failed |
 | 503 `unavailable` | the daemon proxy was opened while the task's session is not connected |
 
 Error body (every non-2xx JSON answer):
@@ -115,6 +115,7 @@ Error body (every non-2xx JSON answer):
 | GET | `/api/pages/passkeys`, `/api/pages/approvals/:id` | the instance owner |
 | GET | `/api/admin/budget` | A |
 | POST | `/api/admin/directory/sync` | A |
+| GET | `/api/admin/tools` | A |
 | GET | `/api/session/bundle` | S |
 | GET | `/api/session/org-env.tar` | S |
 | POST | `/api/session/notes` | S |
@@ -123,6 +124,9 @@ Error body (every non-2xx JSON answer):
 | POST | `/api/session/approvals` | S |
 | GET | `/api/session/approvals/:id` | S (its own task's requests) |
 | WS | `/api/session/channel` | S |
+| GET | `/api/session/tools` | S |
+| POST | `/api/session/tools/search`, `/api/session/tools/fetch` | S (spends its own task owner's allowance) |
+| WS | `/api/session/proxy` | S (likewise) |
 
 ¹ `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`.
 
@@ -315,11 +319,12 @@ someone else's task, 503 while the session is not connected, the `Origin` guard 
 ### `PATCH /api/users/:id/limits` (admin, `SetLimitsRequest`) → `UserDetail`
 
 ```json
-{ "openrouterMonthlyUsd": 50, "machineHoursPerMonth": null }
+{ "openrouterMonthlyUsd": 50, "machineHoursPerMonth": null, "toolsMonthlyUsd": 10, "proxyMonthlyGb": 2 }
 ```
 
 A field left out is unchanged; a number (≥ 0) sets a per-user override; `null` removes the override
-(the role default applies again). A changed OpenRouter limit is pushed to the user's key at once.
+(the role default applies again). A changed OpenRouter limit is pushed to the user's key at once, a
+changed proxy cap to the user's proxy sub-account (section 12).
 
 **Spend rules.**
 
@@ -339,12 +344,14 @@ A field left out is unchanged; a number (≥ 0) sets a per-user override; `null`
   owners) get a notice; a warning notice goes to admins at `budget.warnUsd` (default 80 %). Resets on
   the 1st.
 
+- **Web tools and proxy traffic:** section 12.
+
 ### `GET /api/admin/budget` (admin) → `BudgetView`
 `{ month, spentUsd, capUsd, warnUsd, capped, ratePerHour, lastSampleAt }`
 
 ### `GET /api/notices` → `NoticeList`
 The caller's last 100 notices, newest first: `{ id, kind, text, taskId, createdAt, read }`, `kind`
-one of `machine_hours_cap`, `instance_budget`, `task_failed`, `offboarded`, `suggestion`.
+one of `machine_hours_cap`, `tools_cap`, `instance_budget`, `task_failed`, `offboarded`, `suggestion`.
 
 ### `POST /api/notices/read` (`MarkNoticesReadRequest`) → `MarkNoticesReadResult`
 `{}` marks all the caller's notices read; `{ "upTo": "<notice id>" }` marks that notice and every
@@ -530,8 +537,9 @@ What the server gives a machine (env) and expects from the session image (built 
 | `JARVIS_DAEMON_PATH` | where the channel agent opens proxied sockets |
 | `JARVIS_FIRST_PROMPT` | first create only |
 | `JARVIS_RESTORE_URL` | resume only: presigned GET of the snapshot (valid `presignSeconds`, default 1 h) |
+| `JARVIS_PROXY` | only with a `subuser` proxy provider and a proxy cap above 0: JSON `{host, port, username, password, targeting}` of the owner's own capped sub-account (section 12); jarvis-agent keeps it out of the agent's environment |
 
-Nothing else: no provider tokens, no storage credentials, no Access identity of any person.
+Nothing else: no organisation provider tokens, no storage credentials, no Access identity of any person.
 
 The local-Docker provider (CI and local runs only) can set or replace env values per machine
 (`machines.envOverrides`): `JARVIS_URL` as the containers reach the server, and
@@ -628,3 +636,29 @@ The app doesn't call WebAuthn itself: it opens two small server pages on the ins
 
 `return` must be a path on the instance or the app's scheme (`devices.appScheme`); anything else is
 dropped. The pages send `frame-ancestors 'none'` and a script-only-inline CSP.
+
+## 12. Tier 0 tools
+
+Web search, page fetching and proxies, metered or capped per user ([TOOLS.md](TOOLS.md)).
+
+`UserDetail.tools` (`UserToolsView`, absent when the instance has no Tier 0 tool):
+`{ month, web: {capUsd, override, spentUsd, calls, capReached} | null, proxy: {mode, capGb, override, usedGb, capReached} | null }`.
+`MeView.features.tools` says which tools are on.
+
+### `GET /api/admin/tools` (admin) → `ToolsAdminView`
+The configured providers and this month's totals: `{ month, search, fetch, proxy, web: {spentUsd, calls, capUsd, capReached}, proxyUsedGb }`.
+
+### Session routes (session token)
+
+| route | does |
+|---|---|
+| `GET /api/session/tools` → `SessionToolsView` | which tools the task has, the owner's allowance and use |
+| `POST /api/session/tools/search` (`WebSearchRequest`) → `WebSearchResponse` | `{query, numResults? 1..20, textChars? 0..20000, since? YYYY-MM-DD, includeDomains?, country?}` |
+| `POST /api/session/tools/fetch` (`WebFetchRequest`) → `WebFetchResponse` | `{url, render?, premium?, country?, format? html\|text}`; the body is cut at 2 MiB (`truncated`) |
+| `WS /api/session/proxy?host&port[&country][&session]` | one proxy tunnel (relay providers): first a text frame `{"ok":true}` (or `{"ok":false,status,error}` and a close), then binary both ways; closed with 4029 at the GB cap |
+
+Errors: 429 `tools_cap` (the owner's or the instance's monthly cap; nothing was sent to the
+provider), 409 `conflict` (the tool isn't set up), 502 `upstream` (the provider failed; not charged),
+400 for a malformed request (before any spend). The first refusal per month and cap leaves a
+`tools_cap` notice for the user and the admins.
+

@@ -20,9 +20,64 @@ export const PLATFORM_PREAMBLE = (o) =>
     "There are no permission prompts: act, but stop and ask before anything outward-facing or irreversible the instructions below don't clearly allow.",
     'When the user asks you to remember something for future tasks, save it with the shell command: jarvis-remember "<the note>" (one short sentence per note).',
     "Outward-facing or irreversible steps go through Jarvis: jarvis_actions lists the organisation's named actions (company mail, payments, …) and jarvis_action runs one; the right person approves it in the Jarvis app while you wait. If your role lacks an action, ask with jarvis_request_access; for a judgement call, ask an admin with jarvis_ask_boss. Some tool calls are stopped by the locked policy until someone approves them; a denial is final, so tell the user rather than trying another way.",
+    ...webToolsLines(o.tools, o.proxyUrl),
     "",
     "The instructions below come in layers: the organisation's, then the user's role, then the user's own, and last the organisation's locked policy, which overrides everything before it.",
   ].join("\n");
+
+/** The preamble's lines on the Tier 0 web tools (none when the instance has none). */
+export function webToolsLines(tools, proxyUrl) {
+  if (!tools) return [];
+  const have = [];
+  if (tools.search) have.push("web_search (a real search engine, current results)");
+  if (tools.fetch) have.push("web_fetch (any page, also JavaScript-built and bot-walled ones; saved under ~/workspace/.web)");
+  const lines = [];
+  if (have.length) lines.push(`Web: use ${have.join(" and ")} for anything on the web, instead of guessing or relying on memory for current facts; from scripts, the same through the shell command jarvis-web (jarvis-web --help). They are always on and cost a little of the user's monthly allowance, so be purposeful: one good query, then fetch the pages that matter.`);
+  if (tools.proxy) lines.push(`A proxy is available at ${proxyUrl} ($JARVIS_PROXY_URL) for tools that need another IP or country (see the jarvis-web skill); use it only when the machine's own IP is blocked or a country matters.`);
+  if (lines.length) lines.push("If the allowance is used up, the tools say so: tell the user rather than working around it.");
+  return lines.length ? ["", ...lines] : [];
+}
+
+/** The built-in skill on the web tools (written next to the layers' skills, unless one has its name). */
+export const WEB_SKILL = "jarvis-web";
+export function webSkill(tools, proxyUrl) {
+  const parts = [
+    "---",
+    `name: ${WEB_SKILL}`,
+    "description: Search the web, fetch pages (also JavaScript-built and bot-walled ones) and use a proxy, from the agent or from scripts. Use whenever a task needs anything from the web.",
+    "---",
+    "# Web tools",
+    "",
+    "Every call is metered against the user's monthly web-tools allowance; the organisation's keys never enter this machine. A call refused for the allowance says so: tell the user, don't work around it.",
+    "",
+  ];
+  if (tools.search)
+    parts.push(
+      "## Search",
+      "- Tool `web_search` {query, numResults?, textChars?, since?, includeDomains?, country?}.",
+      '- Shell: `jarvis-web search "query" [--n 10] [--text 2000] [--since 2026-01-01] [--domain gov.uk] [--country de] [--json]`.',
+      "- One precise query beats several vague ones. `textChars` adds each page's extracted text (dearer): use it when you'd fetch every result anyway.",
+      "",
+    );
+  if (tools.fetch)
+    parts.push(
+      "## Fetch",
+      "- Tool `web_fetch` {url, render?, premium?, country?, format?}: raw HTML by default (keep it: tables, links and embedded JSON survive), `format: text` for prose.",
+      "- Shell: `jarvis-web fetch URL [--render] [--premium] [--country de] [--text] [-o file]` (prints the page, or saves it with -o).",
+      "- Order of escalation, cheapest first: plain → `render` (the page builds its content with JavaScript) → `premium` (the site blocks datacenter IPs).",
+      "- The whole page is saved under ~/workspace/.web/; read it from there instead of fetching again.",
+      "",
+    );
+  if (tools.proxy)
+    parts.push(
+      "## Proxy",
+      `- \`${proxyUrl}\` (also \`$JARVIS_PROXY_URL\`), an HTTP proxy (https via CONNECT): \`curl -x $JARVIS_PROXY_URL https://example.com\`, \`HTTPS_PROXY=$JARVIS_PROXY_URL python3 x.py\`, \`chromium --proxy-server=$JARVIS_PROXY_URL\`.`,
+      "- Exit country in the proxy user name: `http://country-de:x@127.0.0.1:3128`; a sticky IP for a while: `country-us-session-ab12cd34` (8 letters/digits).",
+      "- `jarvis-web proxy` shows this month's traffic. Only route what needs it through the proxy: every byte counts.",
+      "",
+    );
+  return parts.join("\n");
+}
 
 const LAYER_TITLE = { org: "Organisation", role: "Role", personal: "Personal", policy: "Locked policy" };
 
@@ -142,6 +197,11 @@ export function writeLayers(bundle, o) {
     const p = join(skillsDir, rel);
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, text);
+  }
+  // the built-in web-tools skill, unless a layer already has a skill of that name
+  if (o.tools && !bundle.skills.some((sk) => sk.name === WEB_SKILL)) {
+    mkdirSync(join(skillsDir, WEB_SKILL), { recursive: true });
+    writeFileSync(join(skillsDir, WEB_SKILL, "SKILL.md"), webSkill(o.tools, o.proxyUrl));
   }
   const cfg = opencodeConfig({ model: o.model, bundle, instructionsPath, skillsDir, baseUrl: o.baseUrl, pluginPath: o.pluginPath });
   mkdirSync(dirname(o.opencodeConfigPath), { recursive: true });

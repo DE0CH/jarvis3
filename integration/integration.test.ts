@@ -10,6 +10,11 @@
 // plugin: self-confirm, admin approval, denial (of an action and of a guarded tool call), and a
 // Tier 3 change signed by the owner with a software passkey.
 //
+// Then the Tier 0 tools (docs/TOOLS.md) through the real image against stand-in providers: the
+// agent's web_search / web_fetch tools and the jarvis-web command (metered by the server with the
+// organisation's keys, which never reach the machine), the local proxy relayed through the server,
+// the hard monthly cap, and who sees whose usage.
+//
 // Needs Docker and the session image: SESSION_IMAGE (default jarvis3-session:test), built from
 // session-image/. Run: npm test (in integration/).
 import { test, before, after } from "node:test";
@@ -21,6 +26,7 @@ import { SMTPServer } from "smtp-server";
 import type { AddressInfo } from "node:net";
 import { startStack, MODEL, type Stack } from "./stack.ts";
 import { SoftAuthenticator } from "../server/src/fakes/soft-authenticator.ts";
+import { StubProviders } from "./stub-providers.ts";
 
 const IMAGE = process.env.SESSION_IMAGE || "jarvis3-session:test";
 const BOOT_MS = Number(process.env.BOOT_TIMEOUT_MS || 240_000);
@@ -49,8 +55,11 @@ const smtp = new SMTPServer({
   },
 });
 
+const stubs = new StubProviders();
+
 before(async () => {
   await new Promise<void>((r) => smtp.listen(0, "127.0.0.1", () => r()));
+  await stubs.start();
   const smtpSettings = { host: "127.0.0.1", port: (smtp.server.address() as AddressInfo).port, security: "none", from: "support@example.org" };
   const creds = { user: "ITEST_SMTP_USER", password: "ITEST_SMTP_PASS" };
   s = await startStack({
@@ -63,12 +72,24 @@ before(async () => {
         company_email: { type: "smtp.send", label: "Email from the support mailbox", roles: ["*"], approval: "admin", auto: { allowList: ["*@example.org"] }, settings: smtpSettings, credentials: creds },
         set_budget: { type: "instance.set_budget", label: "Change the instance budget", roles: ["admin"] },
       },
+      roles: {
+        admin: { openrouterMonthlyUsd: 5, machineHoursPerMonth: null, admin: true, toolsMonthlyUsd: 1, proxyMonthlyGb: 1 },
+        // 0.02: two searches (0.007 each) and a rendered fetch fit, a third search does not
+        staff: { openrouterMonthlyUsd: 1, machineHoursPerMonth: 10, toolsMonthlyUsd: 0.02, proxyMonthlyGb: 1 },
+      },
+      tools: {
+        search: { provider: "exa", credential: "ITEST_EXA_KEY", baseUrl: `http://127.0.0.1:${stubs.apiPort}` },
+        fetch: { provider: "scrapingbee", credential: "ITEST_SB_KEY", baseUrl: `http://127.0.0.1:${stubs.apiPort}` },
+        proxy: { provider: "http", credential: "ITEST_PROXY_LOGIN", settings: { host: "127.0.0.1", port: stubs.proxyPort, targeting: { field: "password", country: "_country-{c}" } }, pricing: { perGbUsd: 1 } },
+      },
     },
+    toolSecrets: { search: stubs.searchKey, fetch: stubs.fetchKey, proxy: `${stubs.proxyLogin.username}:${stubs.proxyLogin.password}` },
     actionSecrets: { desk_email: { user: "support@example.org", password: SMTP_PASS }, company_email: { user: "support@example.org", password: SMTP_PASS }, set_budget: {} },
   });
 });
 after(async () => {
   await s?.close();
+  await stubs.close();
   await new Promise<void>((r) => smtp.close(() => r()));
 });
 
@@ -218,7 +239,7 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.ok(!ins.includes("admins run the instance"), "only alice's role");
 
     const skills = (await exec(m, "cd /home/jarvis/.jarvis/skills && ls -1")).split("\n").sort();
-    assert.deepEqual(skills, ["personal-search", "report", "role-report", "search"]);
+    assert.deepEqual(skills, ["jarvis-web", "personal-search", "report", "role-report", "search"]); // jarvis-web: the built-in web-tools skill
     assert.match(await exec(m, "head -3 /home/jarvis/.jarvis/skills/role-report/SKILL.md"), /name: role-report/);
 
     const cfg = JSON.parse(await exec(m, "cat /home/jarvis/.config/opencode/opencode.json"));
@@ -551,5 +572,119 @@ test("actions and approvals through the real policy plugin", { timeout: 20 * 60_
       for (const email of [ALICE, ADMIN]) if ((await taskOf(email, tasks[email]!.id)).state !== "archived") return false;
       return true;
     }, 5 * 60_000, 2000);
+  });
+});
+
+test("Tier 0 tools through the real session image", { timeout: 20 * 60_000 }, async (t) => {
+  let broken = false;
+  const step = (name: string, fn: () => Promise<void>) =>
+    t.test(name, { skip: broken ? "an earlier step failed" : false }, async () => {
+      try {
+        await fn();
+      } catch (e) {
+        broken = true;
+        diagnose();
+        throw e;
+      }
+    });
+  let taskId = "";
+  let agentId = "";
+  let machine = "";
+
+  /** One turn of alice's main agent; the model's reply text. */
+  const say = async (text: string): Promise<string> => {
+    const client = await paseoAs(ALICE, taskId);
+    try {
+      const r = await client.agents.ref(agentId).run(text, { timeoutMs: TURN_MS });
+      assert.equal(r.status, "idle", JSON.stringify(r));
+      return String(r.lastMessage);
+    } finally {
+      await client.close();
+    }
+  };
+
+  await step("a task for alice; the model is offered the web tools and told about them", async () => {
+    const r = await call(ALICE, "POST", "/api/tasks", { prompt: "Hello, tools", requestId: "itest-tools-alice" });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    taskId = r.body.id;
+    await waitFor("alice's tools task running", async () => {
+      const v = await taskOf(ALICE, taskId);
+      if (v.state === "failed") throw Object.assign(new Error(`task failed: ${v.error}`), { fatal: true });
+      return v.connected && (v.state === "running" || v.state === "idle") && v.agentId ? v : null;
+    }, BOOT_MS, 2000);
+    agentId = (await taskOf(ALICE, taskId)).agentId;
+    const client = await paseoAs(ALICE, taskId);
+    try {
+      await client.agents.ref(agentId).waitForFinish(TURN_MS);
+    } finally {
+      await client.close();
+    }
+    machine = await machineOf(taskId);
+    const chat = s.openrouter.chats.findLast((c) => c.tools.includes("web_search"));
+    assert.ok(chat, "the model is offered web_search");
+    assert.ok(chat!.tools.includes("web_fetch"));
+    assert.match(chat!.system, /use web_search \(a real search engine, current results\) and web_fetch/);
+    assert.match(chat!.system, /A proxy is available at http:\/\/127\.0\.0\.1:3128/);
+    assert.match(await exec(machine, "cat /home/jarvis/.jarvis/skills/jarvis-web/SKILL.md"), /## Search[\s\S]*## Fetch[\s\S]*## Proxy/);
+  });
+
+  await step("web_search: the server searches with the org key and charges alice", async () => {
+    const reply = await say('call: web_search {"query":"jarvis itest"}');
+    assert.match(reply, /TOOL RESULT: 1\. ITEST-RESULT for jarvis itest \(2026-10-09\)/);
+    const last = stubs.searches.at(-1)!;
+    assert.equal(last.key, stubs.searchKey);
+    assert.equal(last.body.query, "jarvis itest");
+  });
+
+  await step("web_fetch: rendered, saved in the workspace", async () => {
+    const reply = await say('call: web_fetch {"url":"https://news.example/one","render":true}');
+    assert.match(reply, /TOOL RESULT: HTTP 200 text\/html/);
+    assert.deepEqual(stubs.fetches.at(-1), { key: stubs.fetchKey, url: "https://news.example/one", render: "true" });
+    assert.match(await exec(machine, "cat /home/jarvis/workspace/.web/news.example-*.html"), /ITEST-PAGE/);
+  });
+
+  await step("jarvis-web from the shell", async () => {
+    const reply = await say('run: jarvis-web search "from a script" --n 3');
+    assert.match(reply, /TOOL RESULT: 1\. ITEST-RESULT for from a script/);
+    assert.equal(stubs.searches.at(-1)!.body.numResults, 3);
+  });
+
+  await step("the local proxy: plain http and a country, relayed and metered by the server", async () => {
+    const reply = await say('run: curl -s -x "$JARVIS_PROXY_URL" http://site.example/hello');
+    assert.match(reply, /TOOL RESULT: STUB-PAGE site\.example \/hello/);
+    assert.deepEqual(stubs.tunnels.at(-1), { target: "site.example:80", auth: `${stubs.proxyLogin.username}:${stubs.proxyLogin.password}` });
+    const de = await say("run: curl -s -x http://country-de:x@127.0.0.1:3128 http://site.example/de");
+    assert.match(de, /TOOL RESULT: STUB-PAGE site\.example \/de/);
+    assert.ok(stubs.tunnels.at(-1)!.auth.endsWith("_country-de"));
+  });
+
+  await step("usage: alice sees hers, the admin sees it, bob doesn't", async () => {
+    const me = (await call(ALICE, "GET", "/api/me")).body;
+    assert.equal(me.tools.web.calls, 3);
+    assert.ok(Math.abs(me.tools.web.spentUsd - (0.007 + 0.007 + 5 * (49 / 250_000))) < 1e-4, String(me.tools.web.spentUsd));
+    assert.equal(me.tools.proxy.mode, "relay");
+    assert.ok(me.tools.proxy.usedGb > 0);
+    assert.equal((await call(BOB, "GET", `/api/users/${me.user.id}`)).status, 404);
+    assert.equal((await call(BOB, "GET", "/api/admin/tools")).status, 404);
+    const adminView = (await call(ADMIN, "GET", `/api/users/${me.user.id}`)).body;
+    assert.equal(adminView.tools.web.calls, 3);
+    const totals = (await call(ADMIN, "GET", "/api/admin/tools")).body;
+    assert.deepEqual([totals.search.provider, totals.fetch.provider, totals.proxy.mode], ["exa", "scrapingbee", "relay"]);
+  });
+
+  await step("the cap is hard: the next search is refused and the agent is told", async () => {
+    const before = stubs.searches.length;
+    const reply = await say('call: web_search {"query":"one too many"}');
+    assert.match(reply, /allowance|used up|Not done/i);
+    assert.equal(stubs.searches.length, before, "the provider was never called");
+    const notices = (await call(ALICE, "GET", "/api/notices")).body.notices;
+    assert.ok(notices.some((n: { kind: string }) => n.kind === "tools_cap"));
+  });
+
+  await step("no organisation key or proxy login anywhere in the machine", async () => {
+    const secrets = [stubs.searchKey, stubs.fetchKey, stubs.proxyLogin.password];
+    const found = await exec(machine, `for f in /proc/[0-9]*/environ; do cat "$f" 2>/dev/null | tr '\\0' '\\n'; done | grep -c -e ${secrets.join(" -e ")} || true; grep -rl -e ${secrets.join(" -e ")} /home/jarvis /usr/local/lib/jarvis /tmp 2>/dev/null | head -3; true`);
+    assert.equal(found.split("\n")[0], "0", `found: ${found}`);
+    assert.equal(found.split("\n").length, 1, `files: ${found}`);
   });
 });
