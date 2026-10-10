@@ -335,7 +335,7 @@ export function userToolsView(ctx: Ctx, user: UserRow): A.UserToolsView | undefi
           }
         : null,
     proxy: pmode
-      ? { mode: pmode, capGb: caps.proxyCapGb, override: caps.proxyOverride, usedGb: round(usedGb, 4), capReached: caps.proxyCapGb !== null && usedGb >= caps.proxyCapGb }
+      ? { mode: pmode, capGb: caps.proxyCapGb, override: caps.proxyOverride, usedGb: round(usedGb, 9), capReached: caps.proxyCapGb !== null && usedGb >= caps.proxyCapGb }
       : null,
   };
 }
@@ -369,6 +369,6 @@ export function adminToolsView(ctx: Ctx): A.ToolsAdminView {
     fetch: ctx.tools.fetch ? { provider: ctx.tools.fetch.name } : null,
     proxy: p ? { provider: p.name, mode: p.mode } : null,
     web: { spentUsd: round(spent.usd, 4), calls: spent.calls, capUsd: cap, capReached: cap !== null && spent.usd >= cap - 1e-9 },
-    proxyUsedGb: round(proxyUsedGb, 4),
+    proxyUsedGb: round(proxyUsedGb, 9),
   };
 }
