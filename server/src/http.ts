@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import type * as A from "./api-types.ts";
+import type { WebApp } from "./web.ts";
 import type { Ctx } from "./ctx.ts";
 import { authorize, resolvePrincipal, userOf, type Principal, type ResolveDeps, type Target } from "./auth.ts";
 import { asHttpError, httpError, HttpError } from "./errors.ts";
@@ -379,10 +380,11 @@ async function relayHttp(ctx: Ctx, resolveDeps: ResolveDeps, req: IncomingMessag
   });
 }
 
-export function makeHandler(ctx: Ctx, resolveDeps: ResolveDeps, routes: Routes) {
+export function makeHandler(ctx: Ctx, resolveDeps: ResolveDeps, routes: Routes, web: WebApp | null = null) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     try {
       const url = new URL(req.url || "/", "http://local");
+      if (web && url.pathname !== "/api" && !url.pathname.startsWith("/api/")) return await web.serve(req, res, url, resolveDeps.verifier);
       const relay = RELAY_RE.exec(url.pathname);
       if (relay) return await relayHttp(ctx, resolveDeps, req, res, url, relay);
       const matches = routes.filter((r) => r.re.test(url.pathname));

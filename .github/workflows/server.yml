@@ -1,9 +1,21 @@
 name: server
+# The instance server: typecheck and tests; the app's web build (DE0CH/jarvis3-app at the commit
+# in APP_COMMIT); the server image with that build at its root, smoke-tested, then pushed to GHCR
+# on main as ghcr.io/de0ch/jarvis3-server:<commit> and :main.
 on:
   push:
-    paths: ["server/**", ".github/workflows/server.yml"]
+    paths: ["server/**", "APP_COMMIT", "scripts/build-web.sh", ".github/workflows/server.yml"]
   pull_request:
-    paths: ["server/**", ".github/workflows/server.yml"]
+    paths: ["server/**", "APP_COMMIT", "scripts/build-web.sh", ".github/workflows/server.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: server-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/de0ch/jarvis3-server
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -20,3 +32,119 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  web:
+    name: app web build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: pinned app commit
+        id: pin
+        run: |
+          c=$(tr -d '[:space:]' < APP_COMMIT)
+          [[ $c =~ ^[0-9a-f]{40}$ ]] || { echo "APP_COMMIT must be a full commit id"; exit 1; }
+          echo "commit=$c" >> "$GITHUB_OUTPUT"
+      # one build per app commit: the export only depends on it
+      - name: cached build
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: server/web-dist
+          key: jarvis3-web-${{ steps.pin.outputs.commit }}
+      # the deploy key is read-only on DE0CH/jarvis3-app; once that repo is public it isn't needed
+      - name: check out the app
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: DE0CH/jarvis3-app
+          ref: ${{ steps.pin.outputs.commit }}
+          path: app
+          ssh-key: ${{ secrets.JARVIS3_APP_DEPLOY_KEY }}
+      - uses: actions/setup-node@v4
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: build
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          APP_DIR: app
+          ONNXRUNTIME_NODE_INSTALL: skip
+        run: scripts/build-web.sh
+      - name: check the build
+        run: |
+          test -s server/web-dist/index.html
+          ls server/web-dist/_expo/static/js/web/*.js > /dev/null
+          test "$(cat server/web-dist/.app-commit)" = "${{ steps.pin.outputs.commit }}"
+          du -sh server/web-dist | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: server/web-dist
+          include-hidden-files: true
+          retention-days: 7
+
+  image:
+    runs-on: ubuntu-latest
+    needs: [test, web]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: server/web-dist
+      - name: app commit of the build
+        id: app
+        run: echo "commit=$(cat server/web-dist/.app-commit)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: build the server image
+        uses: docker/build-push-action@v6
+        with:
+          context: server
+          load: true
+          tags: jarvis3-server:test
+          build-args: |
+            APP_COMMIT=${{ steps.app.outputs.commit }}
+            SERVER_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=server-image
+          cache-to: type=gha,mode=max,scope=server-image
+      - name: smoke test
+        run: |
+          set -euo pipefail
+          docker image inspect jarvis3-server:test --format '{{.Size}}' | awk '{printf "unpacked image size: %.0f MB\n", $1/1e6}' | tee -a "$GITHUB_STEP_SUMMARY"
+          docker run --rm --entrypoint sh jarvis3-server:test -c 'test -s /app/web/index.html && git --version && id -u'
+          mkdir -p "$RUNNER_TEMP/cfg"
+          jq '.machines = {kind: "docker", image: "jarvis3-session:none", guest: {cpu_kind: "shared", cpus: 1, memory_mb: 512}}
+              | .directory = {kind: "static", users: [{email: "owner@example.org", role: "admin"}]}' \
+            deploy/example-config.json > "$RUNNER_TEMP/cfg/config.json"
+          docker run -d --name srv -p 8080:8080 -v "$RUNNER_TEMP/cfg:/etc/jarvis:ro" \
+            -e JARVIS_DB_KEY="$(openssl rand -base64 32)" -e OPENROUTER_MANAGEMENT_KEY=x -e S3_ACCESS_KEY_ID=x \
+            -e S3_SECRET_ACCESS_KEY=x -e CF_DEVICE_TOKENS_API=x -e SESSION_GATE_CLIENT_SECRET=x \
+            jarvis3-server:test
+          for i in $(seq 1 30); do curl -fsS localhost:8080/api/health && break; sleep 1; done
+          echo
+          curl -fsS localhost:8080/api/health | jq -e '.ok == true'
+          # the web app answers at the root (behind a valid Access JWT, so 401 here); /api keeps its JSON
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/tasks/abc)" = 401
+          curl -s localhost:8080/ | jq -e '.error.code == "unauthenticated"'
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/api/me)" = 401
+          docker logs srv
+      - name: server logs on failure
+        if: failure()
+        run: docker logs srv || true
+      - name: push to GHCR (main only, after the tests passed)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag jarvis3-server:test "$IMAGE:${GITHUB_SHA::12}"
+          docker tag jarvis3-server:test "$IMAGE:main"
+          docker push "$IMAGE:${GITHUB_SHA::12}"
+          docker push "$IMAGE:main"
+          echo "pushed $IMAGE:${GITHUB_SHA::12} (app $(cat server/web-dist/.app-commit))" >> "$GITHUB_STEP_SUMMARY"

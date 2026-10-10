@@ -13,6 +13,7 @@ import { FakeKeys } from "../src/fakes/keys.ts";
 import { FakeDirectory } from "../src/fakes/directory.ts";
 import { FakeDeviceTokens } from "../src/fakes/devices.ts";
 import { FakeOrgEnv } from "../src/fakes/orgenv.ts";
+import { WebApp } from "../src/web.ts";
 import type { Clock } from "../src/clock.ts";
 
 export const TEAM = "example.cloudflareaccess.com";
@@ -117,7 +118,7 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export async function harness(o: { config?: Partial<Config>; orgFiles?: Record<string, string> } = {}): Promise<Harness> {
+export async function harness(o: { config?: Partial<Config>; orgFiles?: Record<string, string>; webDir?: string } = {}): Promise<Harness> {
   const clock = new TestClock();
   const signer = await makeSigner(clock);
   const machines = new FakeMachines();
@@ -138,6 +139,7 @@ export async function harness(o: { config?: Partial<Config>; orgFiles?: Record<s
     accessJwks: signer.jwks,
     snapshotPollMs: 1,
     snapshotTimeoutMs: 60_000,
+    web: o.webDir ? new WebApp(o.webDir) : null,
   });
   await new Promise<void>((r) => jarvis.server.listen(0, "127.0.0.1", () => r()));
   const port = (jarvis.server.address() as AddressInfo).port;

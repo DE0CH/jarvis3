@@ -11,11 +11,20 @@ npm test          # typecheck + every test (node:test), all against in-memory fa
 npm start         # needs JARVIS_CONFIG and the secret env vars (docs/CONFIG.md)
 ```
 
+The image (`ghcr.io/de0ch/jarvis3-server:<commit>`, `Dockerfile`) also serves the app's web build
+at the root, from `JARVIS_WEB_DIR` (`/app/web` in the image). The build comes from
+[DE0CH/jarvis3-app](https://github.com/DE0CH/jarvis3-app) at the commit pinned in
+[`../APP_COMMIT`](../APP_COMMIT); CI builds it (`.github/workflows/server.yml`), and
+`../scripts/build-web.sh` does the same locally into `web-dist/` before a `docker build server`.
+To ship a newer app, change `APP_COMMIT` to a commit whose jarvis3-app CI is green.
+
 | file | what |
 |---|---|
 | `src/api-types.ts` | the API contract (types only; the app imports it) |
 | `src/auth.ts` | Access JWT verification, principals, the one `authorize()` |
-| `src/http.ts` | routes and WebSocket upgrades |
+| `src/http.ts` | routes, the HTTP relay to the daemon, and WebSocket upgrades |
+| `src/web.ts` | the app's web build at the root (`JARVIS_WEB_DIR`) |
+| `src/notices.ts` | in-app notices and their read marks |
 | `src/tasks.ts` | task lifecycle: create, pause (snapshot → destroy), resume, destroy (archive first) |
 | `src/channel.ts` | session reverse channel + daemon proxy |
 | `src/users.ts` | directory sync, offboarding, devices, limits |

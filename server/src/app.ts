@@ -10,6 +10,7 @@ import { ChannelHub } from "./channel.ts";
 import { OpTracker, isAdminRole, type Ctx, type Logger, type Providers } from "./ctx.ts";
 import { AccessVerifier, type ResolveDeps } from "./auth.ts";
 import { defineRoutes, makeHandler, makeUpgradeHandler } from "./http.ts";
+import type { WebApp } from "./web.ts";
 import { onSessionConnected } from "./tasks.ts";
 import { finishOffboarding, syncDirectory } from "./users.ts";
 import { budgetTick, capTick, idleTick } from "./ticks.ts";
@@ -27,6 +28,8 @@ export interface JarvisOptions {
   accessJwks?: JSONWebKeySet;
   snapshotPollMs?: number;
   snapshotTimeoutMs?: number;
+  /** The app's web build, served at the root (null: only /api). */
+  web?: WebApp | null;
 }
 
 export interface Jarvis {
@@ -71,7 +74,7 @@ export function createJarvis(o: JarvisOptions): Jarvis {
     isAdminRole: (role) => isAdminRole(o.config, role),
   };
   const routes = defineRoutes(ctx);
-  const server = createServer(makeHandler(ctx, resolveDeps, routes));
+  const server = createServer(makeHandler(ctx, resolveDeps, routes, o.web ?? null));
   const upgrade = makeUpgradeHandler(ctx, resolveDeps);
   server.on("upgrade", (req, socket, head) => void upgrade.handler(req, socket, head));
 

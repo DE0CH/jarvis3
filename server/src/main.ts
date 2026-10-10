@@ -9,6 +9,7 @@ import { OpenRouterKeys } from "./openrouter.ts";
 import { GoogleDirectory, StaticDirectory } from "./directory-google.ts";
 import { CloudflareDeviceTokens } from "./cloudflare-devices.ts";
 import { GitOrgEnv } from "./orgenv-git.ts";
+import { WebApp } from "./web.ts";
 
 const config = loadConfig();
 const secrets = loadSecrets();
@@ -25,8 +26,10 @@ const directory =
       })
     : new StaticDirectory(config.directory.users);
 
+const webDir = process.env.JARVIS_WEB_DIR;
 const jarvis = createJarvis({
   config,
+  web: webDir ? new WebApp(webDir) : null,
   db,
   dbKey: secrets.dbKey,
   sessionGateClientSecret: secrets.sessionGateClientSecret,
