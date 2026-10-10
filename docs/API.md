@@ -112,6 +112,9 @@ Error body (every non-2xx JSON answer):
 | GET | `/api/suggestions` | M (own); `?userId=U`: O of U, A; `?all=1`: A |
 | GET | `/api/notices` | M (own notices) |
 | POST | `/api/notices/read` | M (own notices) |
+| GET | `/api/push`, PUT `/api/push/kinds`, POST `/api/push/test` | M (own settings and subscriptions) |
+| POST | `/api/push/subscriptions` | M (owned by the caller; `apns` only from a paired device) |
+| DELETE | `/api/push/subscriptions/:id` | O, A |
 | GET | `/api/approvals` | M (requests of own tasks); A: everyone's |
 | GET | `/api/approvals/:id` | O (the task's owner), A |
 | POST | `/api/approvals/:id/decide` | whoever the request's `approver` names (section 11) |
@@ -394,6 +397,7 @@ The caller's last 100 notices, newest first: `{ id, kind, text, taskId, approval
 ### `POST /api/notices/read` (`MarkNoticesReadRequest`) → `MarkNoticesReadResult`
 `{}` marks all the caller's notices read; `{ "upTo": "<notice id>" }` marks that notice and every
 older one. Answers `{ "unreadNotices": n }`. A notice id that isn't the caller's is a 404.
+Every new notice is also pushed to the person's devices and browsers (section 16).
 
 ### `POST /api/admin/directory/sync` (admin) → `SyncResult`
 Runs the directory sync now (it also runs every `directory.intervalSeconds`, default 300):
@@ -868,3 +872,57 @@ outlives its machine: posts stay after the task is archived.
 | `GET /api/channels` → `ChannelList` | one entry per task with posts, most recent first: counts, unread, the last post |
 | `GET /api/tasks/:id/posts` → `ChannelPostList` | newest first, up to 200 |
 | `POST /api/tasks/:id/posts/read` → `{unreadPosts}` | the owner read the channel: its posts and their `channel_post` notices are marked read. An admin reading someone else's channel changes nothing |
+
+## 16. Push notifications
+
+Each new notice is pushed to the devices and browsers of the notice's own user: the iOS app through
+APNs (direct, with the instance's `.p8` key), and browsers or a web app added to the iPhone home
+screen through Web Push (VAPID). Configured with `push` (CONFIG.md); without it the routes answer 409
+and `features.push` is absent from `GET /api/me`.
+
+**A push carries no private content.** The title is fixed per kind ("Approval needed", "A question
+for you", "New channel post"…), the body is "Open Jarvis to see it.", the badge is the unread count,
+and the data holds ids only: `jarvis3: "notice"`, `noticeId`, `kind` (the notice kind), `pushKind`,
+and `taskId` / `approvalId` when the notice has them. The app fetches the notice itself (`GET
+/api/notices`) and opens its screen. APNs also gets the data under the payload's `body` key, where
+expo-notifications looks for a notification's data.
+
+**Kinds.** A person switches each kind off or on (default on): `approval_needed` (approvals waiting
+for them), `question` (an `approval_needed` notice about an "ask the boss" question), `approval_decided`,
+`channel_post`, `caps` (`machine_hours_cap`, `tools_cap`, `instance_budget`), `schedule_skipped`,
+`wakeup`, `task_failed`, `other` (`offboarded`, `suggestion`, `passkey_added`). Notices of one kind
+about one task make at most one push a minute (a burst of channel posts is one push).
+
+**Subscriptions.** A subscription is one APNs device token or one Web Push endpoint, and belongs to
+one person. Registering an address that exists moves it to the caller: the device or browser has
+changed hands, and the previous person's notices stop going there. An APNs token is accepted only
+from a paired device (the iOS app's device token) and is removed when that device is revoked.
+A Web Push endpoint must be `https` on a known push service (`push.webPush.allowedHosts`; default
+FCM, Mozilla, Apple, Windows), since the server POSTs to it. Offboarding removes all of a person's
+subscriptions. A push the service answers as gone (APNs 410 or a token bad in both environments,
+Web Push 404/410) removes its subscription; other failures are kept in `lastError`.
+
+**APNs environments.** TestFlight and App Store builds use production, a simulator or a development
+build sandbox. The app says which (`environment`); a token the server tries in the wrong one gets
+`BadDeviceToken`, so the server tries the other once and keeps the one that worked.
+
+### `GET /api/push` → `PushSettings`
+`{ apns, webPushPublicKey, kinds: [{ kind, label, enabled }], subscriptions: [PushSubscriptionView] }`,
+the caller's own. `PushSubscriptionView`: `{ id, kind: "apns" | "web", label, deviceId, createdAt,
+lastSentAt, lastOkAt, lastError }` (the address itself is never returned).
+
+### `PUT /api/push/kinds` (`SetPushKindsRequest`) → `PushSettings`
+`{ "kinds": { "channel_post": false } }`; kinds left out are unchanged. Unknown kind or non-boolean: 400.
+
+### `POST /api/push/subscriptions` (`CreatePushSubscriptionRequest`) → 201 `PushSubscriptionView`
+`{ "kind": "web", "endpoint", "keys": { "p256dh", "auth" }, "label"? }` (the browser's
+`PushSubscription.toJSON()`), or `{ "kind": "apns", "token": "<hex>", "environment"?: "production" |
+"sandbox", "label"? }`. 403 for `apns` without a paired device; 409 when the instance has no keys for
+that channel.
+
+### `DELETE /api/push/subscriptions/:id` → `{ ok: true }`
+The owner (or an admin). Someone else's id is a 404.
+
+### `POST /api/push/test` → `PushTestResult`
+Sends "Test notification" to each of the caller's subscriptions and answers once the push services
+have: `{ results: [{ id, ok, error }] }`.

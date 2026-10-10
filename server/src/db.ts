@@ -338,6 +338,33 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE notices ADD COLUMN approval_id TEXT;
   `,
+  // 9: push notifications (push.ts): where each person's pushes go, and the kinds they turned off
+  `
+  CREATE TABLE push_subscriptions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    device_id TEXT,                          -- the paired device (iOS); revoking it removes the row
+    kind TEXT NOT NULL CHECK (kind IN ('apns','web')),
+    address TEXT NOT NULL UNIQUE,            -- the APNs device token (hex) or the Web Push endpoint
+    p256dh TEXT,                             -- Web Push: the browser's keys
+    auth TEXT,
+    environment TEXT,                        -- APNs: production or sandbox (NULL = the configured default)
+    label TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    last_sent_at INTEGER,
+    last_ok_at INTEGER,
+    last_error TEXT,
+    failures INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX push_subscriptions_user ON push_subscriptions(user_id);
+  CREATE INDEX push_subscriptions_device ON push_subscriptions(device_id);
+  CREATE TABLE push_prefs (
+    user_id TEXT NOT NULL REFERENCES users(id),
+    kind TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    PRIMARY KEY (user_id, kind)
+  );
+  `,
 ];
 
 export type Db = DatabaseSync;

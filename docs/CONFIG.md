@@ -39,6 +39,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `files` | optional: `maxFileBytes` (one file, default 50 MiB; Cloudflare's free plan refuses request bodies over 100 MB), `quotaBytes` (per person, default 1 GiB), `sessionSyncBytes` (how much of a person's files a session copies at boot, default 256 MiB; the rest on demand) — docs/API.md section 13 |
 | `actions` | the broker's named actions, their policies and the environment variables holding their credentials ([ACTIONS.md](ACTIONS.md)) |
 | `schedules` | optional limits on scheduled tasks ([API.md](API.md) section 15): `maxPerUser` (default 20), `minIntervalMinutes` (the shortest gap between two firings of one schedule, default 60), `missedGraceMinutes` (a firing the server missed while down still runs if at most this late, default 60) |
+| `push` | optional; push notifications for notices ([API.md](API.md) section 16): `apns` `{teamId, keyId, bundleId, environment?}` (the iOS app; `environment` is the default for a token that doesn't say, `production`) and/or `webPush` `{subject, publicKey, allowedHosts?}` (`subject` a `mailto:` or `https:` URL, `publicKey` the VAPID public key, base64url). A channel left out is off |
 | `wakeups` | optional limits on wakeups: `maxPerTask` (armed at once, default 20), `minCheckSeconds` (shortest check interval, default 60), `minIntervalMinutes` (shortest gap of a recurring wakeup, default 15) |
 
 ## Secrets (environment)
@@ -54,6 +55,8 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `SESSION_GATE_CLIENT_SECRET` | secret of the session gate service token (handed to session machines) | — |
 | `GITHUB_SUGGEST_TOKEN` | (`suggestions.auth.kind: "token"`) a fine-grained token | the org-env repo only: Contents (read and write), Pull requests (read and write) |
 | `GITHUB_APP_PRIVATE_KEY` | (`suggestions.auth.kind: "app"`) the GitHub App's private key, PEM | an App installed on the org-env repo only, with Contents and Pull requests (write); the server asks GitHub for installation tokens narrowed to that repo and those two permissions |
+| `APNS_KEY_P8` | (`push.apns`) the APNs auth key, the `.p8` file's contents | an Apple "Apple Push Notifications service" key of the team that owns the app; one key serves every app of the team |
+| `VAPID_PRIVATE_KEY` | (`push.webPush`) the VAPID private key, base64url (`npx web-push generate-vapid-keys`) | — |
 
 Tier 0 provider keys: the environment variables `tools.<kind>.credential` names (the server refuses
 to start when one is missing). They stay on the server; scope each to the instance (a dedicated key

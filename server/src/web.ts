@@ -80,11 +80,13 @@ export class WebApp {
     const isHtml = file.endsWith(".html");
     // Expo's export names bundles by content hash under /_expo/static: those never change
     const immutable = url.pathname.startsWith("/_expo/static/");
+    // a service worker script must be re-checked on every registration, or a fix reaches browsers a day late
+    const revalidate = isHtml || /^\/[^/]*-sw\.js$/.test(url.pathname) || url.pathname === "/manifest.json";
     res.writeHead(200, {
       ...SECURITY_HEADERS,
       "content-type": TYPES[extname(file).toLowerCase()] ?? "application/octet-stream",
       "content-length": st.size,
-      "cache-control": immutable ? "public, max-age=31536000, immutable" : isHtml ? "no-cache" : "public, max-age=300",
+      "cache-control": immutable ? "public, max-age=31536000, immutable" : revalidate ? "no-cache" : "public, max-age=300",
     });
     if (req.method === "HEAD") return void res.end();
     await new Promise<void>((done) => {
