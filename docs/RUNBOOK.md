@@ -13,7 +13,10 @@ repo (mode 700) for the files the steps write.
    credentials (Hetzner Console), the Cloudflare zone, the Google OAuth client for Access, the GitHub org
    with the private instance repo and the org-env repo, the Fly org, the OpenRouter organisation, the
    Workspace service account for the directory. Make the scoped `CF_DEVICE_TOKENS_API` token in the
-   Cloudflare dashboard.
+   Cloudflare dashboard. A new GitHub org refuses deploy keys (422 "Deploy keys are disabled for this
+   repository") until an owner allows them: `PATCH /orgs/<org>` with `deploy_keys_enabled_for_repositories=true`.
+   Create the Fly app named in `machines.app` in the instance's Fly org (`POST /v1/apps` on the Machines
+   API); the server doesn't.
 2. **`instance.json` and `deploy/config.json`** in `REPO`, starting from
    `deploy/example-instance/`. Pin `jarvis3.ref` to a commit of DE0CH/jarvis3 and
    `jarvis3.serverImageTag` to the server image built from it (`ghcr.io/de0ch/jarvis3-server:<12 hex>`).
@@ -22,10 +25,15 @@ repo (mode 700) for the files the steps write.
 4. `infra/instance.py scaffold REPO` — `deploy/kustomization.yaml`, `deploy/instance.env`,
    `flux/sync.yaml`, `.sops.yaml`.
 5. `infra/instance.py deploy-keys REPO --out-dir KEYS --apply` — read-only deploy keys on the instance
-   repo (for Flux) and the org-env repo (for the server's mirror).
+   repo (for Flux) and the org-env repo (for the server's mirror). If it fails after writing a key file, delete
+   `KEYS/*-deploy-key*` before running it again.
 6. `infra/instance.py cloudflare REPO --out KEYS/cloudflare.env --apply` — the Google Workspace login, the
    Access app (made before any DNS points at the tunnel), the session gate token, the tunnel and its DNS
    name. Copy the printed `access.audience` and `access.sessionGateClientId` into `deploy/config.json`.
+   Without a Workspace yet (no `cloudflare.identityProvider`), the Access app takes the login methods the
+   Cloudflare account already has, such as one-time PIN, and admits `cloudflare.allowedEmails`; pair it
+   with `directory.kind: "static"` in `deploy/config.json`. With `cloudflare.accessScope: "zone"` the
+   Access apps are made at the zone, for a token that has Access rights on the instance's zone only.
 7. `infra/instance.py secrets REPO --apply KEY[=SRC]…` naming every key; for example:
 
    ```bash

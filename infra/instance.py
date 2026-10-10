@@ -101,11 +101,21 @@ def validate_instance(c: dict) -> list[str]:
     need("jarvis3.ref", lambda v: isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}|v[0-9][0-9A-Za-z.-]*", v), "a 40-hex commit or a v… tag")
     need("jarvis3.serverImageTag", lambda v: isinstance(v, str) and re.fullmatch(r"[0-9a-f]{12}|main", v), "the 12-hex commit tag of the server image")
     for k in ["hetzner.location", "hetzner.serverType", "hetzner.image", "cloudflare.accountId", "cloudflare.zoneId",
-              "cloudflare.teamDomain", "cloudflare.identityProvider.name", "cloudflare.identityProvider.appsDomain",
-              "storage.endpoint", "storage.region", "storage.bucket", "github.instanceRepo", "github.branch",
+              "cloudflare.teamDomain", "storage.endpoint", "storage.region", "storage.bucket", "github.instanceRepo", "github.branch",
               "github.orgEnvRepo", "versions.k3s", "versions.flux"]:
         need(k)
-    need("cloudflare.allowedEmailDomains", lambda v: isinstance(v, list) and v and all(isinstance(d, str) and d for d in v), "a non-empty list of domains")
+    cf = c.get("cloudflare", {}) if isinstance(c.get("cloudflare"), dict) else {}
+    if "identityProvider" in cf:
+        need("cloudflare.identityProvider.name")
+        need("cloudflare.identityProvider.appsDomain")
+    if cf.get("accessScope", "account") not in ("account", "zone"):
+        out.append("cloudflare.accessScope: account (default) or zone")
+    strs = lambda v: isinstance(v, list) and all(isinstance(d, str) and d for d in v)
+    for k in ["allowedEmailDomains", "allowedEmails"]:
+        if k in cf and not strs(cf[k]):
+            out.append(f"cloudflare.{k}: a list of non-empty strings")
+    if not cf.get("allowedEmailDomains") and not cf.get("allowedEmails"):
+        out.append("cloudflare.allowedEmailDomains / allowedEmails: at least one domain or email")
     apps = c.get("apps", [])
     if not isinstance(apps, list):
         out.append("apps: a list (optional)")
@@ -499,6 +509,9 @@ def cmd_cloudflare(a) -> None:
     dry = not a.apply
     http = Http("https://api.cloudflare.com/client/v4", "CLOUDFLARE_API_TOKEN", dry, stub=cloudflare_stub(c))
     acc = f"/accounts/{cf['accountId']}"
+    # where the Access apps live: account-level (default), or zone-level for a token limited to the instance's
+    # zone (it can't see or touch the account's other Access apps). Service tokens and tunnels are account-level.
+    aapps = f"/zones/{cf['zoneId']}" if cf.get("accessScope") == "zone" else acc
 
     def call(m, p, b=None):
         r = http(m, p, b)
@@ -515,13 +528,16 @@ def cmd_cloudflare(a) -> None:
     prev = read_env_file(out)
     vals: dict[str, str] = {}
 
-    # 1. the identity provider: the instance's Google Workspace (an OAuth client in its own Cloud project)
-    idp_body = {"name": cf["identityProvider"]["name"], "type": "google-apps",
-                "config": {"client_id": env("GOOGLE_IDP_CLIENT_ID"), "client_secret": env("GOOGLE_IDP_CLIENT_SECRET"),
-                           "apps_domain": cf["identityProvider"]["appsDomain"]}}
-    idps = call("GET", f"{acc}/access/identity_providers")
-    idp = next((i for i in idps if i.get("name") == idp_body["name"]), None)
-    idp = call("PUT", f"{acc}/access/identity_providers/{idp['id']}", idp_body) if idp else call("POST", f"{acc}/access/identity_providers", idp_body)
+    # 1. the identity provider: the instance's Google Workspace (an OAuth client in its own Cloud project).
+    # Without `identityProvider` the app uses the login methods the account already has (e.g. one-time PIN).
+    idp = None
+    if cf.get("identityProvider"):
+        idp_body = {"name": cf["identityProvider"]["name"], "type": "google-apps",
+                    "config": {"client_id": env("GOOGLE_IDP_CLIENT_ID"), "client_secret": env("GOOGLE_IDP_CLIENT_SECRET"),
+                               "apps_domain": cf["identityProvider"]["appsDomain"]}}
+        idps = call("GET", f"{aapps}/access/identity_providers")
+        idp = next((i for i in idps if i.get("name") == idp_body["name"]), None)
+        idp = call("PUT", f"{aapps}/access/identity_providers/{idp['id']}", idp_body) if idp else call("POST", f"{aapps}/access/identity_providers", idp_body)
 
     # 2. the session gate service token (kept unless ROTATE=1 or its secret is gone)
     toks = call("GET", f"{acc}/access/service_tokens")
@@ -536,20 +552,24 @@ def cmd_cloudflare(a) -> None:
         vals["SESSION_GATE_CLIENT_SECRET"], gate_client_id = t["client_secret"], t["client_id"]
 
     # 3. the Access app BEFORE any DNS, so the hostname is never reachable ungated
-    apps = call("GET", f"{acc}/access/apps")
+    apps = call("GET", f"{aapps}/access/apps")
     app = next((x for x in apps if x.get("domain") == c["hostname"]), None)
     app_body = {"name": n["access_app"], "domain": c["hostname"], "type": "self_hosted", "session_duration": "720h",
-                "allowed_idps": [idp["id"]], "auto_redirect_to_identity": True, "app_launcher_visible": False}
-    app = call("PUT", f"{acc}/access/apps/{app['id']}", app_body) if app else call("POST", f"{acc}/access/apps", app_body)
-    for p in call("GET", f"{acc}/access/apps/{app['id']}/policies"):
-        call("DELETE", f"{acc}/access/apps/{app['id']}/policies/{p['id']}")
-    call("POST", f"{acc}/access/apps/{app['id']}/policies", {
-        "name": "members", "decision": "allow", "precedence": 1,
-        "include": [{"email_domain": {"domain": d}} for d in cf["allowedEmailDomains"]],
-        "require": [{"login_method": {"id": idp["id"]}}]})
+                "app_launcher_visible": False}
+    if idp:
+        app_body.update(allowed_idps=[idp["id"]], auto_redirect_to_identity=True)
+    app = call("PUT", f"{aapps}/access/apps/{app['id']}", app_body) if app else call("POST", f"{aapps}/access/apps", app_body)
+    for p in call("GET", f"{aapps}/access/apps/{app['id']}/policies"):
+        call("DELETE", f"{aapps}/access/apps/{app['id']}/policies/{p['id']}")
+    members = {"name": "members", "decision": "allow", "precedence": 1,
+               "include": [{"email_domain": {"domain": d}} for d in cf.get("allowedEmailDomains", [])]
+                          + [{"email": {"email": e}} for e in cf.get("allowedEmails", [])]}
+    if idp:
+        members["require"] = [{"login_method": {"id": idp["id"]}}]
+    call("POST", f"{aapps}/access/apps/{app['id']}/policies", members)
     # paired devices and the session gate: per-device tokens are minted by the server at runtime, so the
     # policy admits any service token of the account; the server accepts only the ones it knows
-    call("POST", f"{acc}/access/apps/{app['id']}/policies", {
+    call("POST", f"{aapps}/access/apps/{app['id']}/policies", {
         "name": "service tokens", "decision": "non_identity", "precedence": 2,
         "include": [{"any_valid_service_token": {}}]})
 
@@ -575,10 +595,10 @@ def cmd_cloudflare(a) -> None:
         xapp = next((x for x in apps if x.get("domain") == xa["hostname"]), None)
         xbody = {"name": f"{xa['name']} ({c['name']})", "domain": xa["hostname"], "type": "self_hosted",
                  "session_duration": "720h", "app_launcher_visible": False}
-        xapp = call("PUT", f"{acc}/access/apps/{xapp['id']}", xbody) if xapp else call("POST", f"{acc}/access/apps", xbody)
-        for p in call("GET", f"{acc}/access/apps/{xapp['id']}/policies"):
-            call("DELETE", f"{acc}/access/apps/{xapp['id']}/policies/{p['id']}")
-        call("POST", f"{acc}/access/apps/{xapp['id']}/policies", {
+        xapp = call("PUT", f"{aapps}/access/apps/{xapp['id']}", xbody) if xapp else call("POST", f"{aapps}/access/apps", xbody)
+        for p in call("GET", f"{aapps}/access/apps/{xapp['id']}/policies"):
+            call("DELETE", f"{aapps}/access/apps/{xapp['id']}/policies/{p['id']}")
+        call("POST", f"{aapps}/access/apps/{xapp['id']}/policies", {
             "name": "users", "decision": "allow", "precedence": 1,
             "include": [{"email": {"email": e}} for e in xa["accessEmails"]]})
         ts = call("GET", f"{acc}/cfd_tunnel?name={an}&is_deleted=false")
@@ -642,8 +662,13 @@ def sops_encrypt(pub: Path, docs: list[dict]) -> bytes:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write("\n---\n".join(json.dumps(d) for d in docs))  # JSON is YAML
-        return subprocess.run(["sops", "--encrypt", "--age", pub.read_text().strip(), "--encrypted-regex", "^(data|stringData)$",
-                               "--input-type", "yaml", "--output-type", "yaml", str(tmp)], check=True, capture_output=True).stdout
+        # cwd = the temp dir: sops reads a .sops.yaml from the working directory up, and the instance repo's
+        # rules (deploy/… and apps/… paths) don't match the temp file ("no matching creation rules found")
+        r = subprocess.run(["sops", "--encrypt", "--age", pub.read_text().strip(), "--encrypted-regex", "^(data|stringData)$",
+                            "--input-type", "yaml", "--output-type", "yaml", str(tmp)], cwd=td, capture_output=True)
+        if r.returncode != 0:
+            die("sops --encrypt failed: " + r.stderr.decode(errors="replace").strip()[-300:])
+        return r.stdout
 
 
 def cmd_secrets(a) -> None:

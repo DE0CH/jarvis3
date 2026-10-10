@@ -103,7 +103,7 @@ instance's names, domains, emails or ids. The instance repo must contain exactly
 
 | Path | What | Written by |
 |---|---|---|
-| `instance.json` | infra parameters: name, hostname, the jarvis3 commit and server image tag, Hetzner location/type/image, Cloudflare account id, zone id, Access team domain, Google Workspace IdP name and domain, allowed email domains, bucket endpoint/region/name, the instance and org-env repos, k3s and Flux versions, and the extra apps (`apps`, optional) | the admin |
+| `instance.json` | infra parameters: name, hostname, the jarvis3 commit and server image tag, Hetzner location/type/image, Cloudflare account id, zone id, Access team domain, where the Access apps live (`accessScope`), the Google Workspace IdP name and domain (optional), the allowed email domains and/or emails, bucket endpoint/region/name, the instance and org-env repos, k3s and Flux versions, and the extra apps (`apps`, optional) | the admin |
 | `deploy/config.json` | the server config ([CONFIG.md](CONFIG.md)); `orgEnv.mirrorPath` must be `/data/org-env.git` and `publicUrl`, `access.teamDomain`, `storage` must match `instance.json` (`instance.py check`) | the admin |
 | `deploy/kustomization.yaml` | the remote base `github.com/DE0CH/jarvis3//deploy/base?ref=<commit>`, the two ConfigMaps, the server image tag | `instance.py scaffold` |
 | `deploy/instance.env` | ConfigMap `jarvis-instance`: Litestream's bucket settings and `ORG_ENV_URL` | `instance.py scaffold` |
@@ -128,6 +128,7 @@ the base.
 |---|---|---|
 | `instance.py box` | `HCLOUD_TOKEN` | read/write API token of the instance's own Hetzner project |
 | `instance.py cloudflare` | `CLOUDFLARE_API_TOKEN` | Account: Access: Apps and Policies, Service Tokens, Organizations/Identity Providers (edit), Cloudflare Tunnel (edit); Zone: DNS (edit) on the instance's zone |
+| | | with `cloudflare.accessScope: "zone"`: Access: Apps and Policies at the zone instead of the account, so the token can't touch the account's other Access apps |
 | `instance.py cloudflare` | `GOOGLE_IDP_CLIENT_ID`, `GOOGLE_IDP_CLIENT_SECRET` | an OAuth client (Web) in the organisation's own Google Workspace Cloud project, consent screen **internal**, redirect URI `https://<team domain>/cdn-cgi/access/callback` |
 | `instance.py deploy-keys` | `GITHUB_TOKEN` | fine-grained, Administration: write on the instance repo and the org-env repo (to add read-only deploy keys) |
 | the server (`CF_DEVICE_TOKENS_API`) | a Cloudflare API token made in the dashboard | Account: Access: Service Tokens (edit) only |

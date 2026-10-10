@@ -256,6 +256,36 @@ class Cloudflare(unittest.TestCase):
             self.assertEqual(len(fake.dns), 2)
             self.assertNotIn(("DELETE", f"/accounts/<Cloudflare account id>/access/service_tokens/{fake.tokens[0]['id']}"), fake.calls)
 
+    def test_zone_scope_with_the_accounts_login_methods(self):
+        # a token limited to the instance's zone: Access apps at the zone, no identity provider made, members by email
+        fake = FakeCloudflare()
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(instance.urllib.request, "urlopen", fake):
+            repo = Path(td) / "repo"
+            shutil.copytree(EXAMPLE, repo)
+            c = json.loads((repo / "instance.json").read_text())
+            del c["cloudflare"]["identityProvider"], c["cloudflare"]["allowedEmailDomains"]
+            c["cloudflare"].update(accessScope="zone", allowedEmails=["owner@example.org"])
+            (repo / "instance.json").write_text(json.dumps(c))
+            env = {k: v for k, v in SECRET_ENV.items() if not k.startswith("GOOGLE_IDP")}
+            with mock.patch.dict(os.environ, {}, clear=True):
+                run(["cloudflare", str(repo), "--out", f"{td}/cf.env", "--apply"], env)
+        self.assertFalse(fake.idps)
+        self.assertFalse([p for m, p in fake.calls if "/access/apps" in p and not p.startswith("/zones/<zone id of example.org>/")])
+        self.assertTrue([p for m, p in fake.calls if p.startswith("/accounts/") and "/access/service_tokens" in p])
+        app = fake.apps[0]
+        self.assertNotIn("allowed_idps", app)
+        pols = fake.policies[app["id"]]
+        self.assertEqual(pols[0]["include"], [{"email": {"email": "owner@example.org"}}])
+        self.assertNotIn("require", pols[0])
+        self.assertEqual(pols[1]["include"], [{"any_valid_service_token": {}}])
+
+    def test_members_need_a_domain_or_an_email(self):
+        c = json.loads((EXAMPLE / "instance.json").read_text())
+        del c["cloudflare"]["allowedEmailDomains"]
+        self.assertTrue(any("allowedEmails" in x for x in instance.validate_instance(c)))
+        c["cloudflare"]["accessScope"] = "everywhere"
+        self.assertTrue(any("accessScope" in x for x in instance.validate_instance(c)))
+
     def test_apply_needs_the_token(self):
         env = {k: v for k, v in SECRET_ENV.items() if k != "CLOUDFLARE_API_TOKEN"}
         with mock.patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit):
@@ -290,7 +320,13 @@ class Secrets(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(Path(f"{td}/age.key").stat().st_mode), 0o600)
             run(["scaffold", str(repo)])
             self.assertIn('jarvis3/secrets-rev: "none"', (repo / "deploy/kustomization.yaml").read_text())
-            out = run(["secrets", str(repo), *self.keys, "--apply"], SECRET_ENV)
+            # run from inside the repo, as an admin would: its .sops.yaml must not get in the way
+            cwd = os.getcwd()
+            os.chdir(repo)
+            try:
+                out = run(["secrets", str(repo), *self.keys, "--apply"], SECRET_ENV)
+            finally:
+                os.chdir(cwd)
             self.assertIn(f'jarvis3/secrets-rev: "{instance.secrets_rev(repo)}"', (repo / "deploy/kustomization.yaml").read_text())
             for s in SECRETS:
                 self.assertNotIn(s, out)
