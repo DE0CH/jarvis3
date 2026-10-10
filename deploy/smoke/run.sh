@@ -59,12 +59,16 @@ k exec deploy/server -c server -- git -C /data/org-env.git cat-file -e 7fd1a60b0
 step "network policies"
 # the probe that plays cloudflared would be adopted (and deleted) by cloudflared's ReplicaSet
 k delete deploy cloudflared --wait=true
-probe() { # $1 = pod label app value; prints the HTTP code or "blocked"
-  k run "probe-$1-$RANDOM" --rm -i --quiet --restart=Never --labels="app=$1" --image=ghcr.io/de0ch/jarvis3-server:smoke \
-    --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"p","image":"ghcr.io/de0ch/jarvis3-server:smoke","command":["node","-e","fetch(\"http://server:8080/api/health\",{signal:AbortSignal.timeout(5000)}).then(r=>console.log(r.status),()=>console.log(\"blocked\"))"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
+# A probe pod labelled app=$1 fetches the server's health. kube-router applies policies to a new pod a few
+# seconds after it starts, so: "allowed" retries until a 200; "blocked" waits 15 s, then must fail 3 times.
+PROBE_JS='const go=async()=>{const f=()=>fetch("http://server:8080/api/health",{signal:AbortSignal.timeout(3000)}).then(r=>String(r.status),()=>"blocked");const w=ms=>new Promise(r=>setTimeout(r,ms));if(process.env.MODE==="allowed"){let s="";for(let i=0;i<30;i++){s=await f();if(s==="200")break;await w(1000)}console.log(s)}else{await w(15000);let s="blocked";for(let i=0;i<3;i++){const x=await f();if(x!=="blocked")s=x;await w(1000)}console.log(s)}};go()'
+probe() { # $1 = the pod's app label, $2 = allowed|blocked; prints the last HTTP status or "blocked"
+  local o
+  o=$(python3 -c 'import json,sys; print(json.dumps({"spec":{"securityContext":{"runAsNonRoot":True,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"p","image":"ghcr.io/de0ch/jarvis3-server:smoke","command":["node","-e",sys.argv[1]],"env":[{"name":"MODE","value":sys.argv[2]}],"securityContext":{"allowPrivilegeEscalation":False,"capabilities":{"drop":["ALL"]}}}]}}))' "$PROBE_JS" "$2")
+  k run "probe-$1-$RANDOM" --rm -i --quiet --restart=Never --labels="app=$1" --image=ghcr.io/de0ch/jarvis3-server:smoke --overrides="$o" | tail -1
 }
-test "$(probe cloudflared | tail -1)" = 200
-test "$(probe intruder | tail -1)" = blocked
+r=$(probe cloudflared allowed); echo "from cloudflared: $r"; test "$r" = 200
+r=$(probe intruder blocked); echo "from another pod: $r"; test "$r" = blocked
 
 step "Litestream: replicate, then restore onto a new volume"
 uid() { k exec deploy/server -c server -- node --disable-warning=ExperimentalWarning -e 'const {DatabaseSync}=require("node:sqlite");console.log(new DatabaseSync("/data/jarvis.db",{readOnly:true}).prepare("SELECT group_concat(id) AS i FROM (SELECT id FROM users ORDER BY email)").get().i)'; }
