@@ -256,7 +256,8 @@ or a newer state, is in the archive.
 For an `archived` task whose state is in the bucket: a redirect to a presigned GET of
 `archives/<userId>/<taskId>/state.tar.gz`, valid 10 minutes. 409 `conflict` when the task isn't
 archived or was destroyed without an archive. This is how an admin reads an offboarded person's
-sessions.
+sessions. With `?link=1` the answer is 200 `ArchiveLink` `{ url, expiresAt }` instead of the
+redirect (the iOS app sends its device headers, which a browser opening the redirect would not).
 
 ### `WS /api/tasks/:id/daemon` — the chat
 

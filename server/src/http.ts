@@ -14,6 +14,7 @@ import * as users from "./users.ts";
 import * as layers from "./layers.ts";
 import * as notices from "./notices.ts";
 import { budgetView } from "./spend.ts";
+import { iso } from "./clock.ts";
 import * as suggestions from "./suggestions.ts";
 import { capTick } from "./ticks.ts";
 import { archiveKey } from "./tasks.ts";
@@ -179,7 +180,10 @@ export function defineRoutes(ctx: Ctx): Routes {
     const t = ownedTask(ctx, r);
     const key = archiveKey(t.user_id, t.id);
     if (t.state !== "archived" || !(await ctx.blobs.exists(key))) throw httpError("conflict", "this task has no archived state");
-    return { redirect: await ctx.blobs.presignGet(key, ARCHIVE_LINK_SECONDS) };
+    const url = await ctx.blobs.presignGet(key, ARCHIVE_LINK_SECONDS);
+    // ?link=1: the link as JSON, for a client that can't follow a redirect with its own headers (iOS)
+    if (r.url.searchParams.get("link") === "1") return ok({ url, expiresAt: iso(ctx.clock.now() + ARCHIVE_LINK_SECONDS * 1000) } satisfies A.ArchiveLink);
+    return { redirect: url };
   });
 
   route("DELETE", "/api/tasks/:id", (r) => {

@@ -237,6 +237,13 @@ export interface ResetResult {
   layer: PersonalLayerView;
 }
 
+/** GET /api/tasks/:id/archive?link=1 */
+export interface ArchiveLink {
+  /** A presigned GET of the archived state (state.tar.gz). */
+  url: string;
+  expiresAt: IsoTime;
+}
+
 // ---- "Suggest for everyone" ---------------------------------------------------------------
 
 /** POST /api/users/:id/layer/suggest: propose part of a personal layer for the org-env repo. */

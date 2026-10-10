@@ -93,6 +93,9 @@ test("suspension: 403 at once, sockets closed, key and devices revoked, sessions
       const dl = await call(h, a, "GET", `/api/tasks/${id}/archive`);
       assert.equal(dl.status, 302);
       assert.match(dl.headers.get("location")!, new RegExp(`^fake-s3://get/archives/${aliceId}/${id}/state\\.tar\\.gz`));
+      const link = await call(h, a, "GET", `/api/tasks/${id}/archive?link=1`);
+      assert.equal(link.status, 200);
+      assert.match(link.body.url, new RegExp(`^fake-s3://get/archives/${aliceId}/${id}/state\\.tar\\.gz`));
     }
     assert.ok(!h.blobs.objects.has(`snapshots/${paused}/state.tar.gz`), "pause snapshot moved, not copied");
 
