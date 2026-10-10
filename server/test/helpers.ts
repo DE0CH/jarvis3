@@ -299,3 +299,20 @@ export async function fakeSession(h: Harness, taskId: string) {
   for (let i = 0; i < 100 && !h.jarvis.ctx.hub.isConnected(taskId); i++) await new Promise((r) => setTimeout(r, 5));
   return { ws, token, opened, http, cancelled };
 }
+
+/** Upload raw bytes (a file) with PUT; `path` is a route path whose file part is already encoded. */
+export async function upload<T = any>(h: Harness, cred: Cred | null, path: string, data: string | Uint8Array, type?: string): Promise<Resp<T>> {
+  const headers: Record<string, string> = {};
+  if (cred?.jwt) headers["cf-access-jwt-assertion"] = cred.jwt;
+  if (cred?.bearer) headers.authorization = `Bearer ${cred.bearer}`;
+  if (type) headers["content-type"] = type;
+  const r = await fetch(h.base + path, { method: "PUT", headers, body: data, redirect: "manual" });
+  const text = await r.text();
+  let parsed: unknown = text;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    /* raw */
+  }
+  return { status: r.status, body: parsed as T, headers: r.headers };
+}

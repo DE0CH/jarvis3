@@ -19,6 +19,8 @@ export const PLATFORM_PREAMBLE = (o) =>
     `Your working directory is ${o.workspace}. The organisation's environment (its scripts and reference files) is at ${o.orgDir}, read-only.`,
     "There are no permission prompts: act, but stop and ask before anything outward-facing or irreversible the instructions below don't clearly allow.",
     'When the user asks you to remember something for future tasks, save it with the shell command: jarvis-remember "<the note>" (one short sentence per note).',
+    `The user's own files (the Files tab of the Jarvis app) are copied to ${o.filesDir ?? "~/files"} when the task starts; a change there is not saved back. To hand the user a file (a report, an export, a draft), save it to their files: jarvis-files save <file> [<path in their files>]. jarvis-files list shows all their files (a large collection is copied only in part); jarvis-files get <path> fetches one. Files the user attached to their first message are in ${o.workspace}/attachments/.`,
+    'To find what was said or done in the user\'s earlier tasks (and this one), run: jarvis-search "<words>"; then jarvis-search --read <task id> --around <seq> shows the conversation around a hit.',
     "Outward-facing or irreversible steps go through Jarvis: jarvis_actions lists the organisation's named actions (company mail, payments, …) and jarvis_action runs one; the right person approves it in the Jarvis app while you wait. If your role lacks an action, ask with jarvis_request_access; for a judgement call, ask an admin with jarvis_ask_boss. Some tool calls are stopped by the locked policy until someone approves them; a denial is final, so tell the user rather than trying another way.",
     ...webToolsLines(o.tools, o.proxyUrl),
     "",
@@ -176,7 +178,9 @@ export function opencodeConfig(o) {
           ...(o.baseUrl ? { baseURL: o.baseUrl } : {}),
         },
         // the curated model is always known to OpenCode, even when models.dev lacks it
-        models: { [o.model]: { tool_call: true } },
+        // images: the instance config says the model takes image input (models[].images), so
+        // OpenCode passes attached images to it instead of refusing them
+        models: { [o.model]: { tool_call: true, ...(o.images ? { attachment: true, modalities: { input: ["text", "image"], output: ["text"] } } : {}) } },
       },
     },
   };
@@ -203,7 +207,7 @@ export function writeLayers(bundle, o) {
     mkdirSync(join(skillsDir, WEB_SKILL), { recursive: true });
     writeFileSync(join(skillsDir, WEB_SKILL, "SKILL.md"), webSkill(o.tools, o.proxyUrl));
   }
-  const cfg = opencodeConfig({ model: o.model, bundle, instructionsPath, skillsDir, baseUrl: o.baseUrl, pluginPath: o.pluginPath });
+  const cfg = opencodeConfig({ model: o.model, bundle, instructionsPath, skillsDir, baseUrl: o.baseUrl, pluginPath: o.pluginPath, images: o.images });
   mkdirSync(dirname(o.opencodeConfigPath), { recursive: true });
   writeFileSync(o.opencodeConfigPath, JSON.stringify(cfg, null, 1));
   return { instructionsPath, skillsDir, config: cfg };

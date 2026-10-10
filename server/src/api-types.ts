@@ -24,6 +24,7 @@ export type ErrorCode =
   | "too_many_requests" // 429: rate limit (device pairing)
   | "capability_missing" // 403 (session routes): the task's role lacks this action; file an access request
   | "upstream" // 502: a provider (Fly, OpenRouter, Cloudflare, Google, S3) failed
+  | "too_large" // 413: a file over the instance's per-file limit, or over the user's storage quota (see message)
   | "unavailable" // 503: the session is not connected yet
   | "internal"; // 500
 
@@ -111,6 +112,10 @@ export interface InstanceFeatures {
   suggestions: boolean;
   /** Which Tier 0 tools this instance has switched on. */
   tools?: { search: boolean; fetch: boolean; proxy: boolean };
+  /** The user's files (GET /api/users/:id/files) and first-prompt attachments. Optional: absent on older servers. */
+  files?: boolean;
+  /** Transcript search (GET /api/search). Optional: absent on older servers. */
+  search?: boolean;
 }
 
 /** GET /api/users (admin) */
@@ -201,6 +206,11 @@ export interface TaskView {
    * as reported by the session. null until the session has created it. Kept across pause/resume.
    */
   agentId: string | null;
+  /**
+   * Paths (in the owner's files) attached to the first prompt; [] when none. Optional: absent on
+   * older servers.
+   */
+  attachments?: string[];
 }
 
 /** POST /api/tasks */
@@ -213,6 +223,13 @@ export interface CreateTaskRequest {
   title?: string;
   /** [A-Za-z0-9_-]{1,64}. A repeat with the same id returns the first create's task (idempotent). */
   requestId?: string;
+  /**
+   * Files attached to the first prompt: paths in the caller's files (upload them first with
+   * PUT /api/users/me/files/<path>), at most 20. The session copies them into
+   * ~/workspace/attachments/ and names them in the first message; images also go to the model
+   * inline.
+   */
+  attachments?: string[];
 }
 
 /** GET /api/tasks */
@@ -279,6 +296,106 @@ export interface ArchiveLink {
   /** A presigned GET of the archived state (state.tar.gz). */
   url: string;
   expiresAt: IsoTime;
+}
+
+// ---- the user's files ------------------------------------------------------------------------
+
+/**
+ * One file in a user's files. `path` is relative, "/"-separated (folders are implied by paths):
+ * 1..512 characters, segments of 1..255 characters, no "." or ".." segment, no control
+ * characters or backslashes.
+ */
+export interface FileView {
+  path: string;
+  size: number;
+  /** As uploaded (Content-Type), or guessed from the name. */
+  contentType: string;
+  updatedAt: IsoTime;
+  /** Who wrote the current version: the user (app) or a session (`jarvis-files save`). */
+  source: "user" | "session";
+  /** The task whose session wrote it (source "session"), else null. */
+  taskId: string | null;
+}
+
+/** GET /api/users/:id/files, GET /api/session/files */
+export interface FileList {
+  files: FileView[];
+  /** Bytes used by all the user's files. */
+  usedBytes: number;
+  /** The user's storage quota in bytes. */
+  quotaBytes: number;
+  /** The largest single file the instance accepts, in bytes. */
+  maxFileBytes: number;
+}
+
+/** GET /api/users/:id/files/<path>?link=1, GET /api/session/files/<path>: a short-lived download link. */
+export interface FileLink {
+  url: string;
+  expiresAt: IsoTime;
+}
+
+/** POST /api/users/:id/files/move */
+export interface MoveFileRequest {
+  from: string;
+  to: string;
+}
+
+// ---- transcript search --------------------------------------------------------------------------
+
+export type TranscriptRole = "user" | "assistant" | "tool";
+
+/** One indexed message of a task's conversation. */
+export interface TranscriptEntry {
+  /** The Paseo agent it belongs to (the task's main agent, or another agent on its daemon). */
+  agentId: string;
+  /** Position in that agent's timeline (Paseo's seq), ascending. */
+  seq: number;
+  role: TranscriptRole;
+  /** The text (a tool call: its name, input and output, trimmed). */
+  text: string;
+  at: IsoTime;
+}
+
+/** GET /api/search?q=… */
+export interface SearchHit extends TranscriptEntry {
+  taskId: string;
+  taskTitle: string;
+  taskState: TaskState;
+  /** The task's owner (admins searching everyone see other people's hits). */
+  userId: string;
+  /** A short excerpt around the match. */
+  snippet: string;
+  /** [start, end) character ranges in `snippet` that matched the query. */
+  matches: [number, number][];
+}
+
+export interface SearchResult {
+  query: string;
+  hits: SearchHit[];
+}
+
+/** GET /api/tasks/:id/transcript: a task's indexed conversation, oldest first. */
+export interface TranscriptPage {
+  taskId: string;
+  entries: TranscriptEntry[];
+  /** More entries before the first / after the last one returned. */
+  hasOlder: boolean;
+  hasNewer: boolean;
+}
+
+/** POST /api/session/transcript: the session reports part of an agent's timeline. */
+export interface SessionTranscriptRequest {
+  agentId: string;
+  /** Paseo's timeline epoch; a new epoch replaces what the server holds for this agent. */
+  epoch: string;
+  /** At most 500; an entry with a `seq` the server has (same agent) replaces it. */
+  entries: { seq: number; role: TranscriptRole; text: string; at: IsoTime }[];
+}
+
+/** GET /api/session/transcript, and the answer to POST /api/session/transcript */
+export interface SessionTranscriptCursors {
+  /** Per agent: the epoch the server holds and the highest seq it has. */
+  agents: { agentId: string; epoch: string; lastSeq: number }[];
 }
 
 // ---- "Suggest for everyone" ---------------------------------------------------------------

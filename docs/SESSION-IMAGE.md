@@ -19,6 +19,9 @@ Published by CI (`.github/workflows/session.yml`) as `ghcr.io/de0ch/jarvis3-sess
 | `lib/channel.mjs` | the session side of the reverse channel (unit-tested against a stand-in server and daemon) |
 | `bin/jarvis-snapshot` | the snapshot command the server execs (`start` / `status`) |
 | `bin/jarvis-remember` | the agent's "remember" command |
+| `bin/jarvis-files` | the owner's files: `list`, `get <path>`, `save <file> [<path>]` |
+| `bin/jarvis-search` | search the owner's tasks: `jarvis-search "<words>"`, `--read <task> --around <seq>` |
+| `lib/transcript.mjs` | timeline entries → transcript entries, batching, one agent's sync (unit-tested) |
 | `lib/opencode-plugin.mjs` | the locked-policy OpenCode plugin: guards and the `jarvis_*` tools ([ACTIONS.md](ACTIONS.md)) |
 | `lib/policy.mjs` | the plugin's logic (guard matching, the agent-socket client, waiting, outcome texts; unit-tested) |
 | `lib/web.mjs`, `bin/jarvis-web` | the Tier 0 web tools: what `web_search` / `web_fetch` and the `jarvis-web` command send, and how answers are written for the model |
@@ -53,7 +56,11 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
      `todowrite`, `question`, `doom_loop`), a deny rule denies the whole permission.
    Everything here is rebuilt on every boot, so a resumed task loads the layers as they are now
    (including notes remembered in the task before the pause).
-3. **Daemon**: `paseo daemon run --home ~/.paseo` as user `jarvis` in a restart loop (a restored
+3. **Files** (jarvis-agent): `GET /api/session/files`, then each file, newest first, up to
+   `JARVIS_FILES_SYNC_BYTES`, into `~/files/<path>` (owned by `jarvis`, modification time = the
+   file's `updatedAt`). A fresh copy every boot; not in the snapshot; a failure is logged and the
+   boot goes on.
+4. **Daemon**: `paseo daemon run --home ~/.paseo` as user `jarvis` in a restart loop (a restored
    `paseo.pid` is removed first: the old machine's pid can belong to another process here), listening on
    `127.0.0.1:6767` with `PASEO_PASSWORD`, relay, web UI, dictation and voice off. Its env holds only
    HOME/PATH, the Paseo settings, the password and `OPENROUTER_API_KEY` (and `OPENROUTER_BASE_URL`
@@ -61,21 +68,50 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
    The daemon answers `/api/health` before it accepts WebSockets (it restores its agents first
    and answers 503 meanwhile), so jarvis-agent waits until its own client gets through before it
    dials in: a task is `running` only once the app's socket can reach the daemon.
-4. **Channel**: one WebSocket to `$JARVIS_URL/api/session/channel` (`ws-open` / `ws-msg` / `ws-close`,
+5. **Channel**: one WebSocket to `$JARVIS_URL/api/session/channel` (`ws-open` / `ws-msg` / `ws-close`,
    `hello`, `ping` every 30 s; reconnects with backoff 1 s → 30 s). Each `ws-open` becomes a local
    socket to `ws://127.0.0.1:6767<path>` with the server's subprotocols (the first is
    `paseo.bearer.<password>`); frames are queued until it opens. Each `http-req` becomes a `fetch`
   to `http://127.0.0.1:6767<path>` with the server's headers (the server has added the daemon's
   bearer); the answer goes back as `http-res`, `http-data` chunks of ≤ 256 KiB and `http-end`, and
   `http-cancel` aborts it.
-5. **First prompt** (create only, once per task — marker `~/.jarvis/first-prompt-sent`, kept in
-   the snapshot): Paseo's client SDK creates the task's main agent
-   (`provider: opencode/openrouter/<model>`, cwd `~/workspace`) with `JARVIS_FIRST_PROMPT`; its id is
-   kept in `~/.jarvis/main-agent`.
-6. **Status**: every 3 s jarvis-agent lists the daemon's agents over one local client connection;
+6. **First prompt** (create only, once per task — marker `~/.jarvis/first-prompt-sent`, kept in
+   the snapshot): the attachments (`JARVIS_ATTACHMENTS`) are copied from `~/files` (or downloaded)
+   into `~/workspace/attachments/` (a clashing name gets `-2`, `-3`…), and a paragraph naming them
+   is appended to the prompt. Paseo's client SDK creates the task's main agent
+   (`provider: opencode/openrouter/<model>`, cwd `~/workspace`) with that text, and, when
+   `JARVIS_MODEL_IMAGES=1`, with the attached images (PNG, JPEG, GIF, WebP ≤ 5 MiB, at most 5)
+   inline for the first three attempts (`opencode.json` then declares the model's image input);
+   later attempts leave the images out (a model without image input). Its id is kept in
+   `~/.jarvis/main-agent`.
+7. **Status**: every 3 s jarvis-agent lists the daemon's agents over one local client connection;
    `busy` while any agent is `running`/`initializing` (or the first prompt is still being sent),
    else `idle`. A change (or a reconnect) → `POST /api/session/status`, with the main agent's id
    (on a reconnect, and when it first exists) and its title when it changed.
+
+## Transcript sync
+
+jarvis-agent sends its agents' timelines to `POST /api/session/transcript` (docs/API.md section 14):
+when the agents go idle, every 30 s (`JARVIS_TRANSCRIPT_MS`) while they work, and on
+`POST /transcript-sync` on its socket, which `jarvis-snapshot` calls (≤ 25 s) before it packs. Per
+agent it probes the tail of the timeline; when the last entry changed it reads from just before the
+last entry the server holds ("after" that cursor, projected, 200 per page) and posts in batches
+(≤ 200 entries, ≤ 600 kB). A new timeline epoch sends everything again. A failure is logged and
+retried at the next run.
+
+## Files and search from the shell
+
+`jarvis-files` and `jarvis-search` (run by the agent as `jarvis`) talk to jarvis-agent's socket, like
+`jarvis-remember`:
+
+| socket route | does |
+|---|---|
+| `GET /files` | `GET /api/session/files`, each marked `local` when `~/files/<path>` has it |
+| `POST /files/get` `{path}` | downloads it into `~/files/<path>` |
+| `PUT /files/<path>` | streams the body to `PUT /api/session/files/<path>`; `jarvis-files save` reads the file as `jarvis`, so it can only save what the agent's user can read |
+| `GET /search?q=…` | `GET /api/session/search` |
+| `GET /tasks/:id/transcript?…` | `GET /api/session/tasks/:id/transcript` |
+| `POST /transcript-sync` | sync the transcripts now (`jarvis-snapshot`) |
 
 ## Remember
 
@@ -117,9 +153,10 @@ jarvis-agent's own environment.
 ## Snapshot
 
 `jarvis-snapshot start <run> <url>` writes `running` to `/run/jarvis/snapshots/<run>.status`,
-starts a detached job and prints `started`. The job tars `/home/jarvis` (workspace, `~/.paseo`
-agents, OpenCode's data in `~/.local/share/opencode`, `~/.jarvis` markers; not `org/`, the generated
-layers or caches) to a temp file and PUTs it to the presigned URL (S3 needs a length, so not
+starts a detached job and prints `started`. The job first asks jarvis-agent to sync the transcripts
+(above), then tars `/home/jarvis` (workspace with its `attachments/`, `~/.paseo` agents, OpenCode's
+data in `~/.local/share/opencode`, `~/.jarvis` markers; not `org/`, `files/`, the generated layers or
+caches) to a temp file and PUTs it to the presigned URL (S3 needs a length, so not
 streamed), then writes `ok <bytes>` or `failed <message>`. A tar exit code 1 (a file changed while
 read, the daemon is live) still counts as a good archive. `jarvis-snapshot status <run>` prints the
 status line.
@@ -128,7 +165,7 @@ status line.
 
 The server sets everything (docs/API.md section 10). Optional, for tests and local runs only:
 `OPENROUTER_BASE_URL` (an OpenAI-compatible endpoint instead of OpenRouter; the local-Docker
-provider sets it from `envOverrides`), `JARVIS_STATUS_MS`, `JARVIS_DAEMON_PORT`.
+provider sets it from `envOverrides`), `JARVIS_STATUS_MS`, `JARVIS_TRANSCRIPT_MS`, `JARVIS_DAEMON_PORT`.
 
 ## Testing
 

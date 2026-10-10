@@ -155,7 +155,7 @@ export async function startStack(o: StackOptions): Promise<Stack> {
       admin: { openrouterMonthlyUsd: 5, machineHoursPerMonth: null, admin: true },
       staff: { openrouterMonthlyUsd: 1, machineHoursPerMonth: 10 },
     },
-    models: [{ id: MODEL, label: "Claude (integration)" }],
+    models: [{ id: MODEL, label: "Claude (integration)", images: true }],
     defaultModel: MODEL,
     machines: { kind: "docker", image: o.image, guest: { cpu_kind: "shared", cpus: 2, memory_mb: 2048 } },
     storage: { kind: "s3", endpoint: minio.endpoint, region: "us-east-1", bucket },

@@ -58,6 +58,7 @@ daemon proxy. Targets:
 | 400 `bad_request` | malformed body or parameters |
 | 409 `busy` | another lifecycle operation is running on the task |
 | 409 `conflict` | the task's state does not allow this, or nothing to undo |
+| 413 `too_large` | a file over the per-file limit or the person's storage quota (section 13) |
 | 429 `machine_hours_cap`, `instance_budget`, `tools_cap`, `too_many_requests` | caps (sections 6 and 12), pairing rate limit |
 | 502 `upstream` | Fly, OpenRouter, Cloudflare, Google, S3 or a Tier 0 provider failed |
 | 503 `unavailable` | the daemon proxy was opened while the task's session is not connected |
@@ -85,6 +86,7 @@ Error body (every non-2xx JSON answer):
 | GET | `/api/tasks` | M (own); `?userId=U`: O of U, A; `?all=1`: A |
 | GET | `/api/tasks/:id` | O, A |
 | GET | `/api/tasks/:id/archive` | O, A |
+| GET | `/api/tasks/:id/transcript` | O, A |
 | POST | `/api/tasks/:id/pause` | O, A |
 | POST | `/api/tasks/:id/resume` | O, A |
 | DELETE | `/api/tasks/:id` | O, A |
@@ -93,6 +95,10 @@ Error body (every non-2xx JSON answer):
 | GET | `/api/users` | A |
 | GET | `/api/users/:id` | O, A |
 | PATCH | `/api/users/:id/limits` | A |
+| GET | `/api/users/:id/files` | O, A |
+| GET, PUT, DELETE | `/api/users/:id/files/<path>` | O, A |
+| POST | `/api/users/:id/files/move` | O, A |
+| GET | `/api/search` | M (own tasks); `?userId=U`: O of U, A; `?taskId=T`: O of T, A; `?all=1`: A |
 | GET | `/api/users/:id/layer` | O, A |
 | GET | `/api/users/:id/layers` | O, A |
 | PUT | `/api/users/:id/layer/instructions` | O, A |
@@ -120,6 +126,10 @@ Error body (every non-2xx JSON answer):
 | GET | `/api/session/org-env.tar` | S |
 | POST | `/api/session/notes` | S |
 | POST | `/api/session/status` | S |
+| GET | `/api/session/files`, `/api/session/files/<path>` | S (its owner's files) |
+| PUT | `/api/session/files/<path>` | S (into its owner's files) |
+| GET, POST | `/api/session/transcript` | S (its own task) |
+| GET | `/api/session/search`, `/api/session/tasks/:id/transcript` | S (its owner's tasks) |
 | GET | `/api/session/actions` | S |
 | POST | `/api/session/approvals` | S |
 | GET | `/api/session/approvals/:id` | S (its own task's requests) |
@@ -141,8 +151,9 @@ passkey routes, which `server/test/approvals.test.ts` covers (anyone but the own
 ### `GET /api/me` → `MeView`
 
 A `UserDetail` plus `unreadNotices`, the number of the caller's notices not yet marked read
-(section 6), and `features` (`InstanceFeatures`): `{ "suggestions": true }` when "Suggest for
-everyone" is set up (section 7a).
+(section 6), and `features` (`InstanceFeatures`): `suggestions` is true when "Suggest for
+everyone" is set up (section 7a); `files` and `search` are true on a server that has the files
+(section 13) and transcript search (section 14).
 
 ```json
 {
@@ -151,7 +162,7 @@ everyone" is set up (section 7a).
   "limits": { "openrouterMonthlyUsd": 20, "openrouterOverride": false, "machineHoursPerMonth": 10, "machineHoursOverride": false },
   "usage": { "month": "2026-10", "machineHours": 1.5, "machineHoursCapReached": false, "openrouterKey": true },
   "unreadNotices": 0,
-  "features": { "suggestions": true }
+  "features": { "suggestions": true, "files": true, "search": true }
 }
 ```
 
@@ -227,6 +238,7 @@ and destroy answer **202** at once with the task in its transitional state; poll
 - `agentId`: the Paseo agent on the task's daemon that is the task itself (the one the first prompt
   went to), as the session reports it; null until then. It stays the same across pause and resume,
   because a resumed daemon keeps its agents. The app opens this agent's chat.
+- `attachments`: the paths (in the owner's files) attached to the first prompt; `[]` when none.
 
 ### `POST /api/tasks` (`CreateTaskRequest`) → 201 `TaskView`
 
@@ -239,6 +251,12 @@ and destroy answer **202** at once with the task in its transitional state; poll
 - `title`: optional, ≤ 120 characters; default = the prompt's first line cut to 80.
 - `requestId`: optional `[A-Za-z0-9_-]{1,64}`; a repeat by the same user returns the first task
   (status 201, same id) and creates nothing.
+- `attachments`: optional, at most 20 paths in the caller's files (section 13); each must exist
+  (else 400). The app uploads the picked files first, to `attachments/<requestId>/<name>`. Only the
+  first machine gets them (`JARVIS_ATTACHMENTS`): the session copies them into
+  `~/workspace/attachments/`, names them at the end of the first message, and, when the model takes
+  image input (config `models[].images`), sends images (PNG, JPEG, GIF, WebP up to 5 MiB, at most 5)
+  to the model inline as well.
 
 On the user's first task the server mints their OpenRouter key here (an OpenRouter failure = **502**,
 no task is created). Refused with **429** when the user's machine-hour cap or the instance budget is
@@ -501,6 +519,13 @@ owner's personal layer; it can do nothing else.
 | `GET /api/session/actions` → `ActionCatalogue` | the broker's actions as this task sees them (section 11) |
 | `POST /api/session/approvals` (`SessionApprovalRequest`) → 201 `ApprovalView` | file a request (section 11) |
 | `GET /api/session/approvals/:id?wait=<s>` → `ApprovalView` | a request of this task; with `wait` (≤ 55 s) a long poll that answers as soon as it is settled |
+| `GET /api/session/files` → `FileList` | the owner's files (section 13) |
+| `GET /api/session/files/<path>` → `FileLink` | a download link (always JSON: a redirect would carry the session's headers to the bucket) |
+| `PUT /api/session/files/<path>` (raw body) → 201/200 `FileView` | save a file into the owner's files (`source: "session"`, `taskId`); same limits as the app |
+| `GET /api/session/transcript` → `SessionTranscriptCursors` | per agent, the epoch and highest `seq` the server holds (section 14) |
+| `POST /api/session/transcript` (`SessionTranscriptRequest`) → `SessionTranscriptCursors` | part of an agent's timeline (section 14) |
+| `GET /api/session/search?q=…` → `SearchResult` | search the owner's tasks (section 14) |
+| `GET /api/session/tasks/:id/transcript` → `TranscriptPage` | read one of the owner's tasks (404 for anyone else's) |
 | `POST /api/session/status` `{ "activity": "busy" \| "idle", "title"?, "agentId"? }` → `TaskView` | `idle` starts the auto-pause countdown (`idleMinutes`), `busy` stops it; `title` (≤ 120) renames the task; `agentId` (`[A-Za-z0-9._:-]{1,128}`) records the task's main agent |
 | `WS /api/session/channel` | the reverse channel (below) |
 
@@ -536,6 +561,9 @@ What the server gives a machine (env) and expects from the session image (built 
 | `PASEO_PASSWORD` | the daemon password (stable for the task's life) |
 | `JARVIS_DAEMON_PATH` | where the channel agent opens proxied sockets |
 | `JARVIS_FIRST_PROMPT` | first create only |
+| `JARVIS_ATTACHMENTS` | first create only, when the prompt has attachments: a JSON list of paths in the owner's files |
+| `JARVIS_MODEL_IMAGES` | `1` when the task's model takes image input (config `models[].images`) |
+| `JARVIS_FILES_SYNC_BYTES` | how much of the owner's files the session copies at boot (config `files.sessionSyncBytes`) |
 | `JARVIS_RESTORE_URL` | resume only: presigned GET of the snapshot (valid `presignSeconds`, default 1 h) |
 | `JARVIS_PROXY` | only with a `subuser` proxy provider and a proxy cap above 0: JSON `{host, port, username, password, targeting}` of the owner's own capped sub-account (section 12); jarvis-agent keeps it out of the agent's environment |
 
@@ -565,6 +593,7 @@ Bucket layout (server credentials only):
 snapshots/<taskId>/state.tar.gz            the pause snapshot
 archives/<userId>/<taskId>/state.tar.gz    the final state, written by Destroy
 archives/<userId>/<taskId>/task.json       {id, userId, title, model, createdAt, archivedAt}
+files/<userId>/<object id>                 one of the person's files (the path is only in the database)
 ```
 
 ## 11. Actions and approvals
@@ -662,3 +691,64 @@ provider), 409 `conflict` (the tool isn't set up), 502 `upstream` (the provider 
 400 for a malformed request (before any spend). The first refusal per month and cap leaves a
 `tools_cap` notice for the user and the admins.
 
+## 13. Files
+
+Each person has their own files (DESIGN "Front end": "the user's files"): the app's Files tab, the
+first prompt's attachments, and what a session saves for them. Types: `FileView`, `FileList`,
+`FileLink`, `MoveFileRequest`. Config: `files` (CONFIG.md).
+
+- **Paths** are relative and `/`-separated; folders exist only as parts of paths. 1..512
+  characters, segments of 1..255, no `.` or `..` segment, no control characters or backslashes;
+  leading and trailing slashes are dropped. A file and a folder can't share a name (409). In a URL
+  each segment is percent-encoded.
+- **Storage:** the bytes are in the bucket at `files/<userId>/<random id>`; the listing (path, size,
+  type, who wrote it) is in SQLite, so a rename never touches the bucket. A replaced or deleted
+  file's object is deleted once the database no longer points at it. Offboarding keeps them (an
+  admin can still list and download them).
+- **Limits:** `files.maxFileBytes` per file (default 50 MiB) and `files.quotaBytes` per person
+  (default 1 GiB), checked before the upload is read and again when it is recorded (413
+  `too_large`); at most 10 000 files per person.
+
+| route | does |
+|---|---|
+| `GET /api/users/:id/files` → `FileList` | every file (by path), bytes used, the quota, the per-file limit |
+| `PUT /api/users/:id/files/<path>` → 201 `FileView` (200 when replacing) | the body is the file itself (not JSON), streamed to the bucket; `Content-Length` is required (400 without); `Content-Type` is recorded, or guessed from the name |
+| `GET /api/users/:id/files/<path>` → 302 | to a presigned GET valid 10 minutes that answers as a download (`Content-Disposition: attachment` with the file's name); `?link=1` → 200 `FileLink` `{url, expiresAt}` instead (the iOS app) |
+| `DELETE /api/users/:id/files/<path>` → `{ "ok": true }` | 404 when absent |
+| `POST /api/users/:id/files/move` `{from, to}` → `FileView` | rename or move; 409 when `to` exists |
+
+**In the session** (SESSION-IMAGE.md): at boot the owner's files are copied to `~/files`, newest
+first, up to `files.sessionSyncBytes` (default 256 MiB); the rest is fetched on demand with
+`jarvis-files get`. The copy is not saved back and not part of a snapshot: `jarvis-files save`
+puts a file into the owner's files (`source: "session"`, the task id).
+
+## 14. Transcript search
+
+A person searches what was said and done in their own tasks: running, paused and archived. Types:
+`TranscriptEntry`, `SearchHit`, `SearchResult`, `TranscriptPage`, `SessionTranscriptRequest`,
+`SessionTranscriptCursors`.
+
+- **What is indexed:** each session reports its Paseo agents' timelines (`POST
+  /api/session/transcript`): what the user said, what the agent answered (and its errors), and each
+  tool call as one line of name, input and output, trimmed (head and tail). Reasoning, todo lists
+  and compaction markers are left out. The session sends when its agents go idle, every 30 s while
+  they work, and before every snapshot (pause and destroy), so an archived task stays searchable.
+- **The index:** SQLite FTS5 with the trigram tokenizer: case-insensitive substring matching in
+  any language (中文 included), ranked by bm25. Keyword only: no embeddings, nothing leaves the
+  instance. Entries are kept up to 8000 characters.
+- **Queries:** every term must appear; `"…"` keeps a phrase together; terms shorter than 3
+  characters (the trigram index can't hold them) are matched by substring on the rows found, or,
+  when every term is short, on the person's rows newest first. FTS syntax in the query is quoted,
+  never parsed.
+
+| route | does |
+|---|---|
+| `GET /api/search?q=…[&limit=…][&taskId=…][&userId=…][&all=1]` → `SearchResult` | `q` 1..200 characters, `limit` 1..100 (default 30). The caller's own tasks; `userId` (that person or an admin), `taskId` (its owner or an admin), `all=1` (admin) widen or narrow it. Each hit has its task's title and state, the role, the time, the agent and `seq`, a `snippet` and the `matches` ([start, end) ranges in the snippet) |
+| `GET /api/tasks/:id/transcript[?agentId=…][&around=<seq>\|&before=<seq>\|&after=<seq>][&limit=…]` → `TranscriptPage` | a task's conversation, oldest first, `limit` 1..200 (default 50); the task's main agent unless `agentId` says otherwise; no cursor = from the start. Works for paused and archived tasks (the chat itself needs a running machine) |
+
+**The session's side:** `GET /api/session/transcript` says what the server holds per agent
+(`epoch`, highest `seq`). A POST carries ≤ 500 entries of one agent; an entry whose `seq` the
+server already has replaces it (the session re-sends the last one, which may have grown), and a new
+`epoch` (Paseo rebuilt the timeline) replaces everything held for that agent. `jarvis-search` in
+the machine uses `GET /api/session/search` and `GET /api/session/tasks/:id/transcript`, limited to
+the owner's tasks like the app.

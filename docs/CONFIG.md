@@ -22,7 +22,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `directory.intervalSeconds` | poll interval, default 300 |
 | `bootstrapAdmins` | emails that get the first admin role whatever their groups say (suspension still wins) |
 | `roles` | role → `{openrouterMonthlyUsd, machineHoursPerMonth, admin?, toolsMonthlyUsd?, proxyMonthlyGb?}`. `null` = no limit. `toolsMonthlyUsd` (search + fetch, USD) is required once `tools.search` or `tools.fetch` is set, `proxyMonthlyGb` once `tools.proxy` is (a number, or an explicit `null`; a `subuser` proxy needs a number). Key order is the precedence when a user is in several mapped groups. At least one role has `admin: true` |
-| `models`, `defaultModel` | the curated OpenRouter model list (`{id, label}`) and its default |
+| `models`, `defaultModel` | the curated OpenRouter model list (`{id, label, images?}`) and its default; `images: true` = the model takes image input, so attached images go to it inline (otherwise only as files) |
 | `machines` | `kind: "fly"`: `app` (one per instance, made by the operator and kept; the server never creates or deletes it, so `FLY_API_TOKEN` can be scoped to that app), `org`, `region`, session `image`, `guest` size, `rootfsGb`. `kind: "docker"` (CI and local runs only): `image`, `guest`, `socketPath`, `network`, `envOverrides`, `extraHosts` |
 | `storage` | S3 endpoint, region, bucket (Hetzner Object Storage in the instance's own project) |
 | `orgEnv.mirrorPath` | a bare mirror of the org-env repo kept fetched by the deployment (read-only deploy key); `/data/org-env.git` under the standard deployment (docs/DEPLOY.md) |
@@ -36,6 +36,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `suggestions` | optional; turns on "Suggest for everyone": `kind: "github"`, `repo` (`owner/name` of the org-env repo), `baseBranch` (default `main`), `apiUrl` (default `https://api.github.com`; a GitHub Enterprise Server's `https://<host>/api/v3`), `auth`: `{kind: "token"}` or `{kind: "app", appId, installationId}`. Absent: the app hides the button and the route answers 409 |
 | `owner` | an admin's email: the only person who approves Tier 3 changes, with a passkey ([ACTIONS.md](ACTIONS.md)) |
 | `tools` | optional; Tier 0 tools ([TOOLS.md](TOOLS.md)): `search`, `fetch`, `proxy`, each `{provider, credential?, baseUrl?, pricing?, settings?}` (`credential` names the environment variable with the organisation's key; `pricing`: `perCallUsd`, `perCreditUsd`, `perGbUsd`), and `monthlyUsd`, an instance-wide cap on search + fetch. A kind left out is off |
+| `files` | optional: `maxFileBytes` (one file, default 50 MiB; Cloudflare's free plan refuses request bodies over 100 MB), `quotaBytes` (per person, default 1 GiB), `sessionSyncBytes` (how much of a person's files a session copies at boot, default 256 MiB; the rest on demand) — docs/API.md section 13 |
 | `actions` | the broker's named actions, their policies and the environment variables holding their credentials ([ACTIONS.md](ACTIONS.md)) |
 
 ## Secrets (environment)

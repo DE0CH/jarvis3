@@ -189,3 +189,40 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
 53. **Sub-account use is read every 15 minutes**, so the shown GB lag; the provider's own allocation
     is what stops traffic, not the shown figure.
 
+## Files, attachments and transcript search (v0.5)
+
+54. **Files are one folder per person**, not named stores shared between people or chosen per task
+    (Jarvis 1's content stores). Sharing a file with a colleague, or org-wide files, would need an
+    owner model beyond "a person's own"; until then the org-env repo holds what everyone shares.
+55. **A session gets a copy of the files, not a mount.** `~/files` is copied at boot (newest
+    first, up to `files.sessionSyncBytes`) and never synced back; the agent saves a result
+    explicitly with `jarvis-files save`. Two-way sync would need conflict rules between a task's
+    copy, the app and other tasks. A file changed in the app during a task reaches it only with
+    `jarvis-files get`.
+56. **Uploads stream through the server**, not straight from the app to the bucket with a presigned
+    PUT: that would need CORS on the bucket and a second origin the app talks to. The cost is the
+    server's bandwidth, and Cloudflare's 100 MB request limit caps a single file (default limit
+    50 MiB). Downloads are presigned links straight from the bucket.
+57. **Attachments are files.** The app uploads them into the person's files
+    (`attachments/<requestId>/…`) before creating the task; they stay there (visible in the Files
+    tab, deletable) rather than in a staging area that is cleaned up (Jarvis 1's `.uploads`).
+58. **Images go to the model inline only when the config says it takes images** (`models[].images`;
+    without it OpenCode refuses them with "this model does not support image input"), and always
+    as files; after three failed attempts to start the agent
+    with them (a model without image input), the first prompt goes without the inline images (the
+    files are still in `~/workspace/attachments/`).
+59. **Transcript search is keyword only** (SQLite FTS5, trigram): no embeddings, so nothing leaves
+    the instance and nothing is billed. Jarvis 1's search adds semantic matching through
+    OpenRouter embeddings; that could be added per instance later (a per-instance key and a
+    re-embed job).
+60. **The session pushes its transcript; the server never reads snapshots.** A task paused or
+    archived before v0.5 is not in the index until it is resumed (its whole timeline is sent then).
+    Archived tasks from before v0.5 stay unsearchable; indexing them would mean unpacking each
+    archive's OpenCode data on the server.
+61. **The index holds the conversation as text in the database** (up to 8000 characters per
+    entry), so it is in the Litestream replica too. Tool output is trimmed to about 1 KB per call.
+62. **An agent may search its owner's other tasks** (`jarvis-search`), not only the app: the same
+    scope as the owner's own search. It is a fifth session right (docs/OPEN.md #2), limited to the
+    owner's data.
+63. **Offboarding keeps a person's files and transcripts** for the organisation (admins can list,
+    download and search them), like their personal layer and archives.

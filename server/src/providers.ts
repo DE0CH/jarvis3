@@ -44,13 +44,19 @@ export interface MachineProvider {
 
 export interface BlobStore {
   put(key: string, body: Uint8Array | string, contentType?: string): Promise<void>;
+  /**
+   * Upload `length` bytes from a stream without buffering them (users' files). Rejects when the
+   * stream ends early or errors; the object is then absent or incomplete and must not be recorded.
+   */
+  putStream(key: string, body: NodeJS.ReadableStream, length: number, contentType: string): Promise<void>;
   get(key: string): Promise<Uint8Array | null>;
   exists(key: string): Promise<boolean>;
   copy(fromKey: string, toKey: string): Promise<void>;
   delete(key: string): Promise<void>;
   /** A URL the session machine can PUT the object to, without holding storage credentials. */
   presignPut(key: string, expiresSeconds: number): Promise<string>;
-  presignGet(key: string, expiresSeconds: number): Promise<string>;
+  /** `downloadName`: the answer is a download (Content-Disposition: attachment) with this file name. */
+  presignGet(key: string, expiresSeconds: number, o?: { downloadName?: string }): Promise<string>;
 }
 
 // ---- OpenRouter keys ----------------------------------------------------------------------------

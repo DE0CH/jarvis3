@@ -34,7 +34,7 @@ test("a personal skill becomes a pull request that replaces skills/<name>/ exact
   run(async (h, gh, u) => {
     const c = await asEmail(h, u.alice);
     const me = await call(h, c, "GET", "/api/me");
-    assert.deepEqual(me.body.features, { suggestions: true });
+    assert.equal(me.body.features.suggestions, true);
     const alice = me.body.user.id;
     await call(h, c, "PUT", `/api/users/${alice}/layer/skills/invoices`, { files: { "SKILL.md": "better invoices", "refs/vendors.md": "ACME" } });
     const r = await call(h, c, "POST", `/api/users/me/layer/suggest`, { kind: "skill", name: "invoices", message: "We all need this." });
@@ -156,7 +156,7 @@ test("without a suggestions config the feature is off", () =>
   run(
     async (h, _gh, u) => {
       const c = await asEmail(h, u.alice);
-      assert.deepEqual((await call(h, c, "GET", "/api/me")).body.features, { suggestions: false });
+      assert.equal((await call(h, c, "GET", "/api/me")).body.features.suggestions, false);
       await call(h, c, "PUT", "/api/users/me/layer/skills/x", { files: { "SKILL.md": "x" } });
       const r = await call(h, c, "POST", "/api/users/me/layer/suggest", { kind: "skill", name: "x" });
       assert.equal(r.status, 409);

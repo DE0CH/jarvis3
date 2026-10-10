@@ -7,22 +7,29 @@
 //   3. channel  the reverse channel to the server, relaying the app's sockets to the daemon
 //   4. prompt   the first prompt (create only) becomes the task's main agent
 //   5. status   busy / idle (+ the main agent's id and title) to POST /api/session/status on change
-//   6. local    a unix socket for in-machine helpers: jarvis-remember posts notes through it, the
+//   6. local    a unix socket for in-machine helpers: jarvis-remember posts notes through it, jarvis-files
+//               and jarvis-search reach the owner's files and transcripts through it, the
 //               OpenCode policy plugin (lib/opencode-plugin.mjs) files approvals and waits on
 //               them, and the web tools (web_search, web_fetch, jarvis-web) go to the server's
 //               metered Tier 0 routes, so the session token never enters the agent's shell
 //   7. proxy    the Tier 0 local proxy on 127.0.0.1:3128 (lib/proxy.mjs), when the instance has one
+//   8. files    at boot, the owner's files -> ~/files (newest first, up to JARVIS_FILES_SYNC_BYTES);
+//               the first prompt's attachments -> ~/workspace/attachments/
+//   9. search   the agents' timelines -> POST /api/session/transcript (lib/transcript.mjs), so the
+//               owner can search this conversation from the app
 //
 // Config comes from the env the server sets (docs/API.md section 10).
 import { spawn, spawnSync } from "node:child_process";
-import { createServer } from "node:http";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createServer, request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createPaseoClient } from "@getpaseo/client";
 import WebSocket from "ws";
 import { writeLayers } from "./assemble.mjs";
 import { startChannel, VERSION } from "./channel.mjs";
 import { relayTunnel, startLocalProxy, subuserTunnel } from "./proxy.mjs";
+import { syncAgent } from "./transcript.mjs";
 
 const env = process.env;
 const need = (k) => {
@@ -45,6 +52,8 @@ const P = {
   jarvis: join(HOME, ".jarvis"),
   paseo: join(HOME, ".paseo"),
   opencodeConfig: join(HOME, ".config", "opencode", "opencode.json"),
+  files: join(HOME, "files"),
+  attachments: join(HOME, "workspace", "attachments"),
   socket: join(RUN, "agent.sock"),
 };
 const DAEMON_PORT = Number(env.JARVIS_DAEMON_PORT || 6767);
@@ -132,6 +141,8 @@ async function loadLayers() {
     opencodeConfigPath: P.opencodeConfig,
     tools,
     proxyUrl: PROXY_URL,
+    filesDir: P.files,
+    images: env.JARVIS_MODEL_IMAGES === "1",
   });
   chownR(P.jarvis);
   chownR(join(HOME, ".config"));
@@ -256,15 +267,19 @@ async function sendFirstPrompt() {
   const prompt = env.JARVIS_FIRST_PROMPT;
   const marker = join(P.jarvis, "first-prompt-sent");
   if (!prompt || existsSync(marker)) return;
+  const { note, images } = await prepareAttachments();
+  const text = prompt + note;
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
       const c = await paseo();
-      log("creating the main agent", { attempt });
-      const agent = await c.agents.create({ config: { provider: `opencode/openrouter/${MODEL}` }, cwd: P.workspace, prompt });
+      // images go to the model inline; if that keeps failing (a model without image input), without them
+      const withImages = images.length > 0 && attempt < 3;
+      log("creating the main agent", { attempt, attachments: note ? "yes" : "no", images: withImages ? images.length : 0 });
+      const agent = await c.agents.create({ config: { provider: `opencode/openrouter/${MODEL}` }, cwd: P.workspace, prompt: text, ...(withImages ? { images } : {}) });
       writeFileSync(mainAgentFile(), agent.id);
       writeFileSync(marker, new Date().toISOString());
       chownR(P.jarvis);
-      log("first prompt sent", { agent: agent.id, bytes: prompt.length });
+      log("first prompt sent", { agent: agent.id, bytes: text.length });
       return;
     } catch (e) {
       log("first prompt failed; retrying", { error: e.message });
@@ -285,12 +300,15 @@ async function statusTick(force = false) {
     dropClient();
     return;
   }
+  knownAgents = agents.map((a) => a.agent ?? a).filter((a) => !a.internal).map((a) => a.id);
   const list = agents.map((a) => a.agent ?? a).filter((a) => !a.archivedAt && !a.internal);
   const busy = firstPromptPending || list.some((a) => a.status === "running" || a.status === "initializing");
   const main = list.find((a) => a.id === mainAgent());
   const title = (main?.title || "").slice(0, 120);
   const agentId = mainAgent();
   const activity = busy ? "busy" : "idle";
+  // the conversation into the search index: when the agents settle, and every 30 s while they work
+  if ((activity === "idle" && reported.activity === "busy") || Date.now() - lastSync > TRANSCRIPT_EVERY_MS) void syncTranscripts(knownAgents);
   if (!force && activity === reported.activity && title === reported.title && agentId === reported.agentId) return;
   try {
     await server("POST", "/api/session/status", {
@@ -305,18 +323,209 @@ async function statusTick(force = false) {
   }
 }
 
+// ---- 8. the owner's files and the first prompt's attachments ----------------------------------
+
+const encPath = (p) => p.split("/").map(encodeURIComponent).join("/");
+/** A path from the server, refused if it would leave `dir`. */
+function inside(dir, p) {
+  const full = resolve(dir, p);
+  const rel = relative(dir, full);
+  if (!rel || rel.startsWith("..") || rel.startsWith("/")) throw new Error(`refusing path ${p}`);
+  return full;
+}
+
+/** Download one of the owner's files to `dest` (as root; the caller chowns). */
+async function downloadFile(path, dest, updatedAt) {
+  const link = await server("GET", `/api/session/files/${encPath(path)}`, undefined, { retries: 3 });
+  const r = await fetch(link.url, { signal: AbortSignal.timeout(600_000) });
+  if (!r.ok) throw new Error(`download ${path} -> ${r.status}`);
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, Buffer.from(await r.arrayBuffer()));
+  if (updatedAt) {
+    const t = new Date(updatedAt);
+    utimesSync(dest, t, t);
+  }
+}
+
+let fileIndex = []; // the owner's files at boot: [{path, size, contentType, updatedAt, local}]
+
+/** Boot: the owner's files -> ~/files, newest first, within the sync budget. Never fails the boot. */
+async function pullFiles() {
+  try {
+    const list = await server("GET", "/api/session/files", undefined, { retries: 5 });
+    const budget = Number(env.JARVIS_FILES_SYNC_BYTES || 256 * 1024 * 1024);
+    let used = 0;
+    rmSync(P.files, { recursive: true, force: true }); // a fresh copy every boot (not in the snapshot)
+    mkdirSync(P.files, { recursive: true });
+    fileIndex = [];
+    for (const f of [...list.files].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
+      let local = false;
+      if (used + f.size <= budget) {
+        try {
+          await downloadFile(f.path, inside(P.files, f.path), f.updatedAt);
+          used += f.size;
+          local = true;
+        } catch (e) {
+          log("file not downloaded", { path: f.path, error: e.message });
+        }
+      }
+      fileIndex.push({ ...f, local });
+    }
+    chownR(P.files);
+    log("files copied", { files: fileIndex.filter((f) => f.local).length, of: fileIndex.length, bytes: used });
+  } catch (e) {
+    log("files not copied", { error: e.message });
+  }
+}
+
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MAX_INLINE_IMAGE = 5 * 1024 * 1024;
+const MAX_INLINE_IMAGES = 5;
+
+/**
+ * The first prompt's attachments (JARVIS_ATTACHMENTS, paths in the owner's files) -> copies in
+ * ~/workspace/attachments/, a note naming them for the prompt, and the images to send inline.
+ */
+async function prepareAttachments() {
+  let paths = [];
+  try {
+    paths = JSON.parse(env.JARVIS_ATTACHMENTS || "[]");
+  } catch {
+    log("JARVIS_ATTACHMENTS is not JSON; ignored");
+  }
+  if (!Array.isArray(paths) || !paths.length) return { note: "", images: [] };
+  mkdirSync(P.attachments, { recursive: true });
+  const lines = [];
+  const images = [];
+  const taken = new Set();
+  for (const p of paths) {
+    const meta = fileIndex.find((f) => f.path === p);
+    let name = basename(p);
+    for (let i = 2; taken.has(name); i++) name = `${basename(p, extname(p))}-${i}${extname(p)}`;
+    taken.add(name);
+    const dest = join(P.attachments, name);
+    try {
+      const local = meta?.local ? inside(P.files, p) : null;
+      if (local && existsSync(local)) copyFileSync(local, dest);
+      else await downloadFile(p, dest, meta?.updatedAt);
+      const size = statSync(dest).size;
+      const type = meta?.contentType || "";
+      lines.push(`- ${dest} (${type || "file"}, ${size} bytes; "${p}" in their files)`);
+      // inline only for a model that takes images (else OpenCode answers "cannot read"); the file is there either way
+      if (env.JARVIS_MODEL_IMAGES === "1" && IMAGE_TYPES.has(type) && size <= MAX_INLINE_IMAGE && images.length < MAX_INLINE_IMAGES) {
+        images.push({ data: readFileSync(dest).toString("base64"), mimeType: type });
+      }
+    } catch (e) {
+      log("attachment not copied", { path: p, error: e.message });
+      lines.push(`- "${p}" could not be copied (${e.message.slice(0, 120)})`);
+    }
+  }
+  chownR(P.attachments);
+  const note = `\n\nThe user attached ${paths.length === 1 ? "a file" : `${paths.length} files`} to this message (copied into ${P.attachments}/):\n${lines.join("\n")}`;
+  return { note, images };
+}
+
+/** Stream a request body (from a helper on the socket) to a server route, with its length. */
+function serverPutStream(path, body, length, contentType) {
+  const url = new URL(SERVER + path);
+  return new Promise((resolvePut, reject) => {
+    const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(
+      url,
+      { method: "PUT", headers: { ...serverHeaders, "content-length": String(length), "content-type": contentType || "application/octet-stream" }, timeout: 600_000 },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => resolvePut({ status: res.statusCode, text: Buffer.concat(chunks).toString() }));
+      },
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("upload timed out")));
+    body.on("error", (e) => req.destroy(e));
+    body.pipe(req);
+  });
+}
+
+// ---- 9. transcript sync ----------------------------------------------------------------------------
+
+const TRANSCRIPT_EVERY_MS = Number(env.JARVIS_TRANSCRIPT_MS || 30_000);
+const held = new Map(); // agentId -> {epoch, lastSeq, lastEnd}
+let heldLoaded = false;
+let syncing = null;
+let lastSync = 0;
+
+/** Every agent's timeline -> the server. One run at a time; a failure is retried at the next one. */
+function syncTranscripts(agentIds) {
+  syncing ??= (async () => {
+    try {
+      if (!heldLoaded) {
+        for (const a of (await server("GET", "/api/session/transcript")).agents) held.set(a.agentId, { epoch: a.epoch, lastSeq: a.lastSeq });
+        heldLoaded = true;
+      }
+      const c = await paseo();
+      for (const agentId of agentIds) {
+        const h = c.agents.ref(agentId);
+        try {
+          const r = await syncAgent({
+            agentId,
+            held: held.get(agentId) ?? null,
+            probe: () => h.timeline.refetch({ direction: "tail", limit: 1, projection: "projected" }),
+            fetchPage: ({ cursor, limit }) => h.timeline.refetch({ direction: "after", cursor, limit, projection: "projected" }),
+            post: (body) => server("POST", "/api/session/transcript", body, { retries: 2 }),
+          });
+          held.set(agentId, { epoch: r.epoch, lastSeq: r.lastSeq, lastEnd: r.lastEnd });
+          if (r.sent) log("transcript synced", { agent: agentId, entries: r.sent });
+        } catch (e) {
+          log("transcript sync failed", { agent: agentId, error: e.message });
+        }
+      }
+    } catch (e) {
+      log("transcript sync failed", { error: e.message });
+    } finally {
+      lastSync = Date.now();
+      syncing = null;
+    }
+  })();
+  return syncing;
+}
+
+let knownAgents = [];
+async function syncNow() {
+  try {
+    knownAgents = ((await (await paseo()).agents.list()).entries ?? []).map((a) => a.agent ?? a).filter((a) => !a.internal).map((a) => a.id);
+  } catch {
+    /* keep the last list */
+  }
+  await syncTranscripts(knownAgents);
+}
+
 // ---- 6. local helpers socket ------------------------------------------------------------------
 
 function localApi() {
   mkdirSync(RUN, { recursive: true });
   rmSync(P.socket, { force: true });
   const srv = createServer(async (req, res) => {
-    const chunks = [];
-    for await (const c of req) chunks.push(c);
     const reply = (status, body) => {
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
     };
+    const u0 = new URL(req.url, "http://local");
+    // jarvis-files save: the body (the file, read by the agent's own user) streams through to the server
+    if (req.method === "PUT" && u0.pathname.startsWith("/files/")) {
+      const length = Number(req.headers["content-length"]);
+      if (!Number.isFinite(length)) return reply(400, { error: { code: "bad_request", message: "a Content-Length is needed" } });
+      try {
+        const path = decodeURIComponent(u0.pathname.slice("/files/".length));
+        const r = await serverPutStream(`/api/session/files/${encPath(path)}`, req, length, req.headers["content-type"]);
+        res.writeHead(r.status, { "content-type": "application/json" });
+        res.end(r.text);
+        if (r.status < 300) log("file saved", { path, bytes: length });
+      } catch (e) {
+        reply(502, { error: { code: "upstream", message: `the Jarvis server is unreachable: ${e.message}` } });
+      }
+      return;
+    }
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
     if (req.method === "POST" && req.url === "/remember") {
       let text = "";
       try {
@@ -362,6 +571,45 @@ function localApi() {
       const r = await forward("POST", `/api/session${url.pathname}`, body, 200, 100_000);
       log(`web ${url.pathname.slice(7)}`, { status: res.statusCode });
       return r;
+    }
+    // jarvis-files
+    if (req.method === "GET" && url.pathname === "/files") {
+      try {
+        const list = await server("GET", "/api/session/files");
+        const files = list.files.map((f) => {
+          let local = false;
+          try {
+            local = statSync(inside(P.files, f.path)).size === f.size;
+          } catch {
+            /* not on disk */
+          }
+          return { ...f, local };
+        });
+        return reply(200, { ...list, files, dir: P.files });
+      } catch (e) {
+        return reply(e.status || 502, { error: { code: "upstream", message: e.message } });
+      }
+    }
+    if (req.method === "POST" && url.pathname === "/files/get") {
+      let path = "";
+      try {
+        path = String(JSON.parse(Buffer.concat(chunks).toString()).path || "");
+        const dest = inside(P.files, path);
+        await downloadFile(path, dest);
+        chownR(P.files);
+        return reply(200, { path, local: dest });
+      } catch (e) {
+        return reply(e.status || 502, { error: { code: e.status === 404 ? "not_found" : "upstream", message: e.status === 404 ? `no file "${path}" in the user's files` : e.message } });
+      }
+    }
+    // jarvis-search
+    if (req.method === "GET" && url.pathname === "/search") return forward("GET", `/api/session/search?${url.searchParams}`);
+    const tm = /^\/tasks\/([A-Za-z0-9_-]{1,64})\/transcript$/.exec(url.pathname);
+    if (req.method === "GET" && tm) return forward("GET", `/api/session/tasks/${tm[1]}/transcript?${url.searchParams}`);
+    // jarvis-snapshot, before it packs: the conversation so far into the search index
+    if (req.method === "POST" && url.pathname === "/transcript-sync") {
+      await Promise.race([syncNow(), sleep(25_000)]);
+      return reply(200, { ok: true });
     }
     if (req.method === "GET" && url.pathname === "/actions") return forward("GET", "/api/session/actions");
     if (req.method === "POST" && url.pathname === "/approvals") {
@@ -417,6 +665,7 @@ async function startProxy() {
 async function main() {
   log("jarvis-agent starting", { version: VERSION, task: env.JARVIS_TASK_ID, model: MODEL });
   await loadLayers();
+  await pullFiles();
   const local = localApi();
   const proxy = await startProxy();
   warmOpencode();

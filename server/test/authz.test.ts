@@ -67,6 +67,17 @@ const ROUTES: R[] = [
   { kind: "owned", method: "DELETE", path: (i) => `/api/users/${i.alice}/layer/skills/my-skill` },
   { kind: "owned", method: "POST", path: (i) => `/api/users/${i.alice}/layer/reset` },
   { kind: "owned", method: "POST", path: (i) => `/api/users/${i.alice}/layer/undo` },
+  { kind: "owned", method: "GET", path: (i) => `/api/users/${i.alice}/files` },
+  { kind: "owned", method: "GET", path: (i) => `/api/users/${i.alice}/files/docs/a.txt` },
+  { kind: "owned", method: "GET", path: (i) => `/api/users/${i.alice}/files/docs/a.txt?link=1` },
+  { kind: "owned", method: "PUT", path: (i) => `/api/users/${i.alice}/files/docs/matrix.txt`, body: { any: "bytes" } },
+  { kind: "owned", method: "POST", path: (i) => `/api/users/${i.alice}/files/move`, body: { from: "docs/matrix.txt", to: "docs/moved.txt" } },
+  { kind: "member", method: "GET", path: () => "/api/search?q=matrix" },
+  { kind: "owned", method: "GET", path: (i) => `/api/search?q=matrix&userId=${i.alice}` },
+  { kind: "owned", method: "GET", path: (i) => `/api/search?q=matrix&taskId=${i.task}` },
+  { kind: "admin", method: "GET", path: () => "/api/search?q=matrix&all=1" },
+  { kind: "owned", method: "GET", path: (i) => `/api/tasks/${i.task}/transcript` },
+  { kind: "member", method: "POST", path: () => "/api/tasks", body: { prompt: "matrix with a file", attachments: [] } },
   { kind: "member", method: "GET", path: () => "/api/approvals" },
   { kind: "owned", method: "GET", path: (i) => `/api/approvals/${i.approval}` },
   { kind: "owned", method: "GET", path: (i) => `/api/approvals?taskId=${i.task}` },
@@ -89,6 +100,14 @@ const ROUTES: R[] = [
   { kind: "session", method: "GET", path: () => "/api/session/tools" },
   { kind: "session", method: "POST", path: () => "/api/session/tools/search", body: { query: "matrix" } },
   { kind: "session", method: "POST", path: () => "/api/session/tools/fetch", body: { url: "https://example.org/" } },
+  { kind: "session", method: "GET", path: () => "/api/session/files" },
+  { kind: "session", method: "GET", path: () => "/api/session/files/docs/a.txt" },
+  { kind: "session", method: "PUT", path: () => "/api/session/files/from-session.txt", body: { saved: true } },
+  { kind: "session", method: "GET", path: () => "/api/session/transcript" },
+  { kind: "session", method: "POST", path: () => "/api/session/transcript", body: { agentId: "matrix-agent", epoch: "e", entries: [{ seq: 0, role: "user", text: "matrix entry", at: "2026-10-08T12:00:00.000Z" }] } },
+  { kind: "session", method: "GET", path: () => "/api/session/search?q=matrix" },
+  { kind: "session", method: "GET", path: (i) => `/api/session/tasks/${i.task}/transcript` },
+  { kind: "owned", method: "DELETE", path: (i) => `/api/users/${i.alice}/files/docs/a.txt` },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/pause` },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/resume` },
   { kind: "owned", method: "DELETE", path: (i) => `/api/tasks/${i.task}` },
@@ -136,6 +155,7 @@ async function setup(): Promise<{ h: Harness; ids: Ids; creds: Record<Who, Cred 
   const revoked = await pair();
   assert.equal((await call(h, aliceCred, "DELETE", `/api/devices/${revoked.id}`)).status, 200);
   const note = await call(h, aliceCred, "POST", `/api/users/${aliceId}/layer/notes`, { text: "seed note" });
+  assert.equal((await call(h, aliceCred, "PUT", "/api/users/me/files/docs/a.txt", { seed: "file" })).status, 201);
   // suspend sam
   h.directory.set(u.sus, { suspended: true });
   await h.jarvis.syncDirectory();

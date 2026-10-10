@@ -3,8 +3,8 @@
 #   jarvis-snapshot start <run> <presigned PUT url>   start a detached upload, print "started"
 #   jarvis-snapshot status <run>                       print running | ok <bytes> | failed <msg>
 # The snapshot is a tar.gz of /home/jarvis: the workspace, the Paseo daemon home (agents) and
-# OpenCode's data (conversations). The org-env tree and the generated layers are left out: every
-# boot rebuilds them from the server.
+# OpenCode's data (conversations). The org-env tree, the generated layers and the copy of the
+# owner's files (~/files) are left out: every boot rebuilds them from the server.
 set -u
 DIR=/run/jarvis/snapshots
 HOME_DIR=/home/jarvis
@@ -25,8 +25,10 @@ case "$op" in
   _run)
     url="${3:-}"
     tmp="/var/tmp/jarvis-snapshot-$run.tar.gz"
+    # the conversation so far into the server's search index first (best effort, ≤ 25 s)
+    curl -fsS -m 30 --unix-socket /run/jarvis/agent.sock -X POST http://local/transcript-sync > /dev/null 2>&1 || true
     tar -czf "$tmp" -C "$HOME_DIR" \
-      --exclude=./org --exclude=./.jarvis/skills --exclude=./.jarvis/instructions.md \
+      --exclude=./org --exclude=./files --exclude=./.jarvis/skills --exclude=./.jarvis/instructions.md \
       --exclude=./.cache --exclude=./.npm \
       --warning=no-file-changed --ignore-failed-read .
     rc=$?

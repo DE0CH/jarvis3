@@ -6,6 +6,11 @@
 //   MinIO). Another user gets 404 on the task and on the daemon socket. The task carries its main
 //   agent's id, and the HTTP relay reaches the daemon.
 //
+// The user's files reach the machine (~/files), the first prompt's attachments are in the workspace
+// and named in the first message (an image also inline), jarvis-files saves a file back, and the
+// conversation is searchable (from the app and with jarvis-search), by its owner only, also once
+// the task is archived.
+//
 // Then actions and approvals (DESIGN "Actions and approvals") through the real OpenCode policy
 // plugin: self-confirm, admin approval, denial (of an action and of a guarded tool call), and a
 // Tier 3 change signed by the owner with a software passkey.
@@ -119,6 +124,14 @@ async function waitFor<T>(what: string, fn: () => Promise<T | null | undefined |
   }
 }
 
+async function put(email: string, path: string, data: Uint8Array, type: string) {
+  const r = await fetch(s.base + path, { method: "PUT", headers: { "cf-access-jwt-assertion": await s.jwt(email), "content-type": type }, body: data });
+  const text = await r.text();
+  return { status: r.status, body: text ? JSON.parse(text) : null };
+}
+// a 1x1 PNG
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
+
 const taskOf = (email: string, id: string) => call(email, "GET", `/api/tasks/${id}`).then((r) => r.body);
 
 /** Paseo's own client SDK, connected through the server's daemon proxy as `email`. */
@@ -208,7 +221,15 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     aliceUserId = me.body.user.id;
     assert.equal((await call(ALICE, "PUT", "/api/users/me/layer/instructions", { text: "PERSONAL-MARK: answer briefly." })).status, 200);
     assert.equal((await call(ALICE, "PUT", "/api/users/me/layer/skills/search", { files: { "SKILL.md": "---\nname: search\ndescription: My own search\n---\nPersonal search." } })).status, 200);
-    const r = await call(ALICE, "POST", "/api/tasks", { prompt: "Hello from alice FIRST-PROMPT", requestId: "itest-1" });
+    assert.equal((await put(ALICE, "/api/users/me/files/notes/brief.md", Buffer.from("# BRIEF-MARK\n"), "text/markdown")).status, 201);
+    assert.equal((await put(ALICE, "/api/users/me/files/attachments/itest-1/order.txt", Buffer.from("ORDER-MARK 42\n"), "text/plain")).status, 201);
+    assert.equal((await put(ALICE, "/api/users/me/files/attachments/itest-1/photo.png", PNG, "image/png")).status, 201);
+    assert.equal((await put(BOB, "/api/users/me/files/bob-only.txt", Buffer.from("BOB-MARK"), "text/plain")).status, 201);
+    const r = await call(ALICE, "POST", "/api/tasks", {
+      prompt: "Hello from alice FIRST-PROMPT",
+      requestId: "itest-1",
+      attachments: ["attachments/itest-1/order.txt", "attachments/itest-1/photo.png"],
+    });
     assert.equal(r.status, 201, JSON.stringify(r.body));
     taskId = r.body.id;
     assert.equal(r.body.state, "starting");
@@ -269,6 +290,19 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.ok(chat.tools.includes("bash"));
   });
 
+  await step("alice's files are in ~/files; the attachments are in the workspace and named in the first message", async () => {
+    const m = await machineOf(taskId);
+    assert.equal(await exec(m, "cat /home/jarvis/files/notes/brief.md"), "# BRIEF-MARK");
+    assert.equal(await exec(m, "stat -c %U /home/jarvis/files/notes/brief.md"), "jarvis");
+    assert.equal(await exec(m, "test -e /home/jarvis/files/bob-only.txt && echo leaked || echo absent"), "absent");
+    assert.equal(await exec(m, "cat /home/jarvis/workspace/attachments/order.txt"), "ORDER-MARK 42");
+    assert.equal(await exec(m, "stat -c %s /home/jarvis/workspace/attachments/photo.png"), String(PNG.length));
+    const chat = s.openrouter.chats.find((c) => c.lastUser.includes("FIRST-PROMPT"))!;
+    assert.match(chat.lastUser, /attached 2 files[\s\S]*\/home\/jarvis\/workspace\/attachments\/order\.txt[\s\S]*photo\.png/);
+    log(`the first message carried ${chat.images} inline image part(s)`);
+    assert.ok(chat.images >= 1, "the attached image reached the model inline");
+  });
+
   await step("chat round-trips through the server's daemon proxy (Paseo client SDK)", async () => {
     const client = await paseoAs(ALICE, taskId);
     try {
@@ -314,6 +348,55 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.ok(note, JSON.stringify(layer.notes));
     assert.equal(note.source, "session");
     assert.equal(note.taskId, taskId);
+  });
+
+  await step("jarvis-files saves a file into alice's files; jarvis-files list sees hers only", async () => {
+    const client = await paseoAs(ALICE, taskId);
+    try {
+      const agent = client.agents.ref(agentId);
+      const r = await agent.run("run: printf 'REPORT-MARK\\n' > /tmp/report.txt && jarvis-files save /tmp/report.txt reports/weekly.txt", { timeoutMs: TURN_MS });
+      assert.match(String(r.lastMessage), /TOOL RESULT: Saved to the user's files as "reports\/weekly\.txt"/, JSON.stringify(r));
+      const l = await agent.run("run: jarvis-files list | grep -c bob-only; jarvis-files list | head -1", { timeoutMs: TURN_MS });
+      assert.match(String(l.lastMessage), /TOOL RESULT: 0/, "bob's file is not listed");
+    } finally {
+      await client.close();
+    }
+    const files = (await call(ALICE, "GET", "/api/users/me/files")).body.files;
+    const saved = files.find((f: { path: string }) => f.path === "reports/weekly.txt");
+    assert.ok(saved, JSON.stringify(files));
+    assert.equal(saved.source, "session");
+    assert.equal(saved.taskId, taskId);
+    const dl = await fetch(s.base + "/api/users/me/files/reports/weekly.txt?link=1", { headers: { "cf-access-jwt-assertion": await s.jwt(ALICE) } });
+    assert.equal(await (await fetch(((await dl.json()) as { url: string }).url)).text(), "REPORT-MARK\n");
+    assert.equal((await call(BOB, "GET", `/api/users/${aliceUserId}/files`)).status, 404);
+  });
+
+  await step("the conversation is searchable by alice (app and jarvis-search), not by bob", async () => {
+    const hits = await waitFor(
+      "the chat in the search index",
+      async () => {
+        const r = await call(ALICE, "GET", "/api/search?q=ping-ITEST-123");
+        return r.body.hits.length ? r.body.hits : null;
+      },
+      90_000,
+      2000,
+    );
+    assert.ok(hits.every((h: { taskId: string }) => h.taskId === taskId));
+    assert.ok(hits.some((h: { role: string }) => h.role === "user") && hits.some((h: { role: string }) => h.role === "assistant"), JSON.stringify(hits));
+    assert.equal((await call(BOB, "GET", "/api/search?q=ping-ITEST-123")).body.hits.length, 0);
+    assert.equal((await call(BOB, "GET", `/api/tasks/${taskId}/transcript`)).status, 404);
+    assert.ok((await call(ADMIN, "GET", "/api/search?q=ping-ITEST-123&all=1")).body.hits.length > 0);
+    const page = (await call(ALICE, "GET", `/api/tasks/${taskId}/transcript?around=${hits[0].seq}&limit=10`)).body;
+    assert.ok(page.entries.some((e: { text: string }) => e.text.includes("ping-ITEST-123")));
+    // the tool call that saved the report is indexed too
+    await waitFor("the tool call in the index", async () => (await call(ALICE, "GET", "/api/search?q=jarvis-files save")).body.hits.some((h: { role: string }) => h.role === "tool"), 90_000, 2000);
+    const client = await paseoAs(ALICE, taskId);
+    try {
+      const r = await client.agents.ref(agentId).run("run: jarvis-search ping-ITEST-123 -n 1 | head -1", { timeoutMs: TURN_MS });
+      assert.match(String(r.lastMessage), /TOOL RESULT: .*\(task [0-9a-f]+, (running|idle)\)/, JSON.stringify(r));
+    } finally {
+      await client.close();
+    }
   });
 
   await step("another user gets 404 on the task and on the daemon socket; the admin sees it", async () => {
@@ -385,6 +468,13 @@ test("a task end to end on the real session image", { timeout: 20 * 60_000 }, as
     assert.equal(meta.id, taskId);
     assert.equal(await s3exists(`snapshots/${taskId}/state.tar.gz`), false);
     assert.equal((await s.machines.list()).length, 0);
+  });
+
+  await step("the archived task is still searchable and readable", async () => {
+    const hits = (await call(ALICE, "GET", "/api/search?q=after-RESUME")).body.hits;
+    assert.ok(hits.length > 0, "the conversation after the resume was indexed before the machine went");
+    assert.ok(hits.every((h: { taskState: string }) => h.taskState === "archived"));
+    assert.ok((await call(ALICE, "GET", `/api/tasks/${taskId}/transcript`)).body.entries.length > 0);
   });
 });
 

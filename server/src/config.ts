@@ -22,6 +22,8 @@ export interface RoleConfig {
 export interface ModelConfig {
   id: string;
   label: string;
+  /** The model takes image input: attached images go to it inline (default false: files only). */
+  images?: boolean;
 }
 
 export type DirectoryConfig =
@@ -199,6 +201,24 @@ export interface Config {
   actions?: Record<string, ActionConfig>;
   /** Tier 0 tools: web search, page fetching, proxies (docs/TOOLS.md). */
   tools?: ToolsConfig;
+  /** The users' files (docs/API.md section 13). Every field has a default. */
+  files?: FilesConfig;
+}
+
+export interface FilesConfig {
+  /** Largest single file, bytes (default 50 MiB; Cloudflare's free plan refuses bodies over 100 MB). */
+  maxFileBytes?: number;
+  /** Per-user storage quota, bytes (default 1 GiB). */
+  quotaBytes?: number;
+  /** A session downloads its owner's files at boot, newest first, up to this many bytes (default 256 MiB); the rest on demand. */
+  sessionSyncBytes?: number;
+}
+
+export const FILE_DEFAULTS = { maxFileBytes: 50 * 1024 * 1024, quotaBytes: 1024 * 1024 * 1024, sessionSyncBytes: 256 * 1024 * 1024 } as const;
+
+/** The files settings in force (defaults filled in). */
+export function filesConfig(c: Config): Required<FilesConfig> {
+  return { ...FILE_DEFAULTS, ...(c.files ?? {}) };
 }
 
 /** Secrets come only from the environment. */
@@ -258,6 +278,10 @@ export function validateConfig(c: Config): Config {
     if (a.approval !== undefined && !["auto", "self", "admin"].includes(a.approval)) fail(`actions.${name}: approval must be auto, self or admin`);
   }
   validateTools(c, fail);
+  for (const k of ["maxFileBytes", "quotaBytes", "sessionSyncBytes"] as const) {
+    const v = c.files?.[k];
+    if (v !== undefined && !(Number.isInteger(v) && v > 0)) fail(`files.${k} must be a positive integer (bytes)`);
+  }
   return c;
 }
 

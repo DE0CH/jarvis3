@@ -1,0 +1,84 @@
+#!/usr/bin/env node
+// jarvis-files: the task owner's files (the Files tab of the Jarvis app), through jarvis-agent's
+// local socket (which holds the session token; the agent's shell never does).
+//   jarvis-files list                         every file, and whether it is copied in ~/files
+//   jarvis-files get <path>                   fetch one into ~/files/<path>
+//   jarvis-files save <local file> [<path>]   save a file into the owner's files (default path: its
+//                                             place under ~/files, else its name)
+const http = process.getBuiltinModule("node:http");
+const fs = process.getBuiltinModule("node:fs");
+const path = process.getBuiltinModule("node:path");
+const SOCKET = process.env.JARVIS_AGENT_SOCKET || "/run/jarvis/agent.sock";
+const FILES = path.join(process.env.HOME || "/home/jarvis", "files");
+
+function usage() {
+  console.error("usage: jarvis-files list | get <path> | save <local file> [<path in the user's files>]");
+  process.exit(2);
+}
+function call(method, p, { body, stream, length, type } = {}) {
+  return new Promise((resolve, reject) => {
+    const headers = {};
+    if (body !== undefined) Object.assign(headers, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+    if (stream) Object.assign(headers, { "content-type": type, "content-length": length });
+    const req = http.request({ socketPath: SOCKET, path: p, method, headers }, (res) => {
+      let out = "";
+      res.on("data", (c) => (out += c));
+      res.on("end", () => {
+        let json = null;
+        try {
+          json = JSON.parse(out);
+        } catch {
+          /* text */
+        }
+        resolve({ status: res.statusCode, json, text: out });
+      });
+    });
+    req.on("error", (e) => reject(new Error(`the session agent is not reachable: ${e.message}`)));
+    if (stream) stream.pipe(req);
+    else req.end(body);
+  });
+}
+const enc = (p) => p.split("/").map(encodeURIComponent).join("/");
+const human = (n) => (n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 ** 2).toFixed(1)} MB`);
+const fail = (r) => {
+  console.error(`jarvis-files failed (${r.status}): ${r.json?.error?.message || r.text}`);
+  process.exit(1);
+};
+const TYPES = { txt: "text/plain", md: "text/markdown", csv: "text/csv", json: "application/json", html: "text/html", pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", zip: "application/zip" };
+
+async function main() {
+  const [cmd, a, b] = process.argv.slice(2);
+  if (cmd === "list") {
+    const r = await call("GET", "/files");
+    if (r.status !== 200) fail(r);
+    const { files, usedBytes, quotaBytes, dir } = r.json;
+    if (!files.length) console.log("The user has no files yet.");
+    for (const f of files) console.log(`${f.local ? "  " : "* "}${f.path}  (${human(f.size)}, ${f.updatedAt.slice(0, 10)}${f.source === "session" ? ", saved by a task" : ""})`);
+    console.log(`\n${files.length} files, ${human(usedBytes)} of ${human(quotaBytes)}. Copied in ${dir}${files.some((f) => !f.local) ? "; * = not copied, fetch with: jarvis-files get <path>" : ""}.`);
+  } else if (cmd === "get" && a) {
+    const r = await call("POST", "/files/get", { body: JSON.stringify({ path: a }) });
+    if (r.status !== 200) fail(r);
+    console.log(r.json.local);
+  } else if (cmd === "save" && a) {
+    const src = path.resolve(a);
+    const st = fs.statSync(src, { throwIfNoEntry: false });
+    if (!st || !st.isFile()) {
+      console.error(`jarvis-files: ${a} is not a file`);
+      process.exit(2);
+    }
+    let dest = b;
+    if (!dest) {
+      const rel = path.relative(FILES, src);
+      dest = rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : path.basename(src);
+    }
+    dest = dest.replace(/^\/+/, "");
+    const type = TYPES[path.extname(src).slice(1).toLowerCase()] || "application/octet-stream";
+    const r = await call("PUT", `/files/${enc(dest)}`, { stream: fs.createReadStream(src), length: st.size, type });
+    if (r.status !== 200 && r.status !== 201) fail(r);
+    console.log(`Saved to the user's files as "${r.json.path}" (${human(r.json.size)}).`);
+  } else usage();
+}
+main().catch((e) => {
+  console.error(`jarvis-files: ${e.message}`);
+  process.exit(1);
+});

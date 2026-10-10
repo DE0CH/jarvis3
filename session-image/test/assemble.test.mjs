@@ -84,6 +84,8 @@ test("opencode.json: the task's OpenRouter model, the key from env, instructions
   assert.equal(c.provider.openrouter.options.baseURL, "http://stub/api/v1");
   assert.ok(c.provider.openrouter.models["anthropic/claude-test"]);
   assert.ok(!JSON.stringify(c).includes("sk-or"), "no key material in the file");
+  const vision = opencodeConfig({ model: "m/v", bundle: { deny: [] }, instructionsPath: "/i.md", skillsDir: "/s", baseUrl: "", images: true });
+  assert.deepEqual(vision.provider.openrouter.models["m/v"], { tool_call: true, attachment: true, modalities: { input: ["text", "image"], output: ["text"] } });
   const prod = opencodeConfig({ model: "m/x", bundle: { deny: [] }, instructionsPath: "/i.md", skillsDir: "/s", baseUrl: "" });
   assert.equal(prod.provider.openrouter.options.baseURL, undefined);
   assert.equal(prod.permission, "allow");

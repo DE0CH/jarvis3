@@ -33,8 +33,8 @@ WORKDIR /usr/local/lib/jarvis
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY lib ./lib
-COPY bin/jarvis-boot bin/jarvis-snapshot bin/jarvis-remember bin/jarvis-web /usr/local/bin/
-RUN chmod 755 /usr/local/bin/jarvis-boot /usr/local/bin/jarvis-snapshot /usr/local/bin/jarvis-remember /usr/local/bin/jarvis-web
+COPY bin/jarvis-boot bin/jarvis-snapshot bin/jarvis-remember bin/jarvis-web bin/jarvis-files bin/jarvis-search /usr/local/bin/
+RUN chmod 755 /usr/local/bin/jarvis-boot /usr/local/bin/jarvis-snapshot /usr/local/bin/jarvis-remember /usr/local/bin/jarvis-web /usr/local/bin/jarvis-files /usr/local/bin/jarvis-search
 
 WORKDIR /home/jarvis
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/jarvis-boot"]

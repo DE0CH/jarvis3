@@ -25,6 +25,8 @@ export interface ChatRecord {
   transcript: string;
   tools: string[];
   reply: Reply;
+  /** Image parts in the user messages (an attachment sent inline). */
+  images: number;
 }
 
 type Reply = { text: string } | { tool: { name: string; args: Record<string, unknown> } };
@@ -118,6 +120,10 @@ export class FakeOpenRouter {
         transcript: messages.map((m) => textOf(m.content)).join("\n"),
         tools: (body.tools || []).map((t: { function?: { name?: string } }) => t.function?.name || ""),
         reply,
+        images: messages
+          .filter((m) => m.role === "user" && Array.isArray(m.content))
+          .flatMap((m) => m.content as { type?: string }[])
+          .filter((p) => p?.type === "image_url" || p?.type === "image" || p?.type === "file").length,
       });
       return body.stream ? stream(res, String(body.model), reply) : json(200, completion(String(body.model), reply));
     }

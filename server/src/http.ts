@@ -23,6 +23,8 @@ import * as passkeys from "./passkeys.ts";
 import { approvalPage, PAGE_HEADERS, passkeysPage, safeReturn } from "./pages.ts";
 import * as tools from "./tools/index.ts";
 import { checkRelay, parseTarget, runTunnel } from "./tools/relay.ts";
+import * as files from "./files.ts";
+import * as transcripts from "./transcripts.ts";
 
 export const VERSION = "0.1.0";
 
@@ -84,11 +86,25 @@ function sessionTask(ctx: Ctx, r: Req) {
   return tasks.getTask(ctx, p.task.id)!;
 }
 
+function searchLimit(sp: URLSearchParams): number {
+  const raw = sp.get("limit");
+  if (raw === null || raw === "") return 30;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 100) throw httpError("bad_request", "limit must be 1..100");
+  return n;
+}
+
 export function defineRoutes(ctx: Ctx): Routes {
   const routes: Route[] = [];
   const route = (method: string, path: string, handler: Handler, o: { auth?: boolean } = {}): void => {
     const keys: string[] = [];
-    const re = new RegExp("^" + path.replace(/:(\w+)/g, (_, k: string) => (keys.push(k), "([^/]+)")) + "$");
+    // ":name" is one segment; a trailing "*" is the rest of the path (a file path), as `path`
+    let src = path.replace(/:(\w+)/g, (_, k: string) => (keys.push(k), "([^/]+)"));
+    if (src.endsWith("/*")) {
+      keys.push("path");
+      src = src.slice(0, -1) + "(.+)";
+    }
+    const re = new RegExp("^" + src + "$");
     routes.push({ method, re, keys, auth: o.auth ?? true, handler });
   };
 
@@ -101,7 +117,7 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok({
       ...users.userDetail(ctx, user),
       unreadNotices: notices.unreadCount(ctx, user.id),
-      features: { suggestions: suggestions.suggestionsEnabled(ctx), ...tools.featureFlag(ctx) },
+      features: { suggestions: suggestions.suggestionsEnabled(ctx), ...tools.featureFlag(ctx), files: true, search: true },
       pendingApprovals: approvals.pendingCount(ctx, userOf(r.principal)),
       isOwner: approvals.isOwner(ctx, user),
     } satisfies A.MeView);
@@ -273,6 +289,60 @@ export function defineRoutes(ctx: Ctx): Routes {
     const { id } = ownedUser(ctx, r);
     const s = await suggestions.suggest(ctx, users.requireUser(ctx, id), userOf(r.principal).user, (await r.body()) as A.SuggestRequest);
     return ok(suggestions.suggestionView(ctx, s) satisfies A.SuggestionView, 201);
+  });
+
+  // ---- the user's files -------------------------------------------------------------------------
+  route("GET", "/api/users/:id/files", (r) => ok(files.listFiles(ctx, ownedUser(ctx, r).id) satisfies A.FileList));
+
+  route("POST", "/api/users/:id/files/move", async (r) => {
+    const { id } = ownedUser(ctx, r);
+    return ok(files.fileView(files.moveFile(ctx, id, (await r.body()) as A.MoveFileRequest)) satisfies A.FileView);
+  });
+
+  route("PUT", "/api/users/:id/files/*", async (r) => {
+    const { id } = ownedUser(ctx, r);
+    const { file, created } = await files.putFile(ctx, id, r.params.path!, r.req, { source: "user", taskId: null });
+    return ok(files.fileView(file) satisfies A.FileView, created ? 201 : 200);
+  });
+
+  route("GET", "/api/users/:id/files/*", async (r) => {
+    const { id } = ownedUser(ctx, r);
+    const link = await files.fileLink(ctx, files.requireFile(ctx, id, files.filePath(r.params.path)));
+    // ?link=1: the link as JSON, for a client that can't follow a redirect with its own headers (iOS)
+    if (r.url.searchParams.get("link") === "1") return ok(link satisfies A.FileLink);
+    return { redirect: link.url };
+  });
+
+  route("DELETE", "/api/users/:id/files/*", async (r) => {
+    const { id } = ownedUser(ctx, r);
+    await files.deleteFile(ctx, id, r.params.path!);
+    return ok({ ok: true });
+  });
+
+  // ---- transcript search ---------------------------------------------------------------------------
+  route("GET", "/api/search", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const { user } = userOf(r.principal);
+    const sp = r.url.searchParams;
+    let userId: string | null = user.id;
+    if (sp.get("all") === "1") {
+      authorize(r.principal, { kind: "admin", what: "search" });
+      userId = null;
+    } else if (sp.get("userId")) {
+      userId = sp.get("userId")!;
+      authorize(r.principal, { kind: "owned", ownerId: userId, what: "user" });
+    }
+    const taskId = sp.get("taskId") || undefined;
+    if (taskId) {
+      ownedTask(ctx, { ...r, params: { id: taskId } });
+      if (sp.get("all") !== "1" && !sp.get("userId")) userId = null; // the task check decided access
+    }
+    return ok(transcripts.search(ctx, sp.get("q"), { userId, ...(taskId ? { taskId } : {}), limit: searchLimit(sp) }) satisfies A.SearchResult);
+  });
+
+  route("GET", "/api/tasks/:id/transcript", (r) => {
+    const t = ownedTask(ctx, r);
+    return ok(transcripts.page(ctx, t, transcripts.pageQuery(r.url.searchParams)) satisfies A.TranscriptPage);
   });
 
   // ---- suggestions -------------------------------------------------------------------------------
@@ -457,6 +527,40 @@ export function defineRoutes(ctx: Ctx): Routes {
   route("POST", "/api/session/tools/fetch", async (r) => {
     const t = sessionTask(ctx, r);
     return ok((await tools.webFetch(ctx, t, await r.body())) satisfies A.WebFetchResponse);
+  });
+
+  route("GET", "/api/session/files", (r) => ok(files.listFiles(ctx, sessionTask(ctx, r).user_id) satisfies A.FileList));
+
+  route("GET", "/api/session/files/*", async (r) => {
+    const t = sessionTask(ctx, r);
+    // always JSON: a redirect would carry the session's headers (the gate secret) to the bucket
+    return ok((await files.fileLink(ctx, files.requireFile(ctx, t.user_id, files.filePath(r.params.path)))) satisfies A.FileLink);
+  });
+
+  route("PUT", "/api/session/files/*", async (r) => {
+    const t = sessionTask(ctx, r);
+    const { file, created } = await files.putFile(ctx, t.user_id, r.params.path!, r.req, { source: "session", taskId: t.id });
+    return ok(files.fileView(file) satisfies A.FileView, created ? 201 : 200);
+  });
+
+  route("GET", "/api/session/transcript", (r) => ok(transcripts.cursors(ctx, sessionTask(ctx, r).id) satisfies A.SessionTranscriptCursors));
+
+  route("POST", "/api/session/transcript", async (r) => {
+    const t = sessionTask(ctx, r);
+    return ok(transcripts.ingest(ctx, t, (await r.body()) as A.SessionTranscriptRequest) satisfies A.SessionTranscriptCursors);
+  });
+
+  route("GET", "/api/session/search", (r) => {
+    const t = sessionTask(ctx, r);
+    return ok(transcripts.search(ctx, r.url.searchParams.get("q"), { userId: t.user_id, limit: searchLimit(r.url.searchParams) }) satisfies A.SearchResult);
+  });
+
+  route("GET", "/api/session/tasks/:id/transcript", (r) => {
+    const t = sessionTask(ctx, r);
+    const other = tasks.getTask(ctx, r.params.id!);
+    // the owner's own tasks only, like the search that found it
+    if (!other || other.user_id !== t.user_id) throw httpError("not_found", "no such task");
+    return ok(transcripts.page(ctx, other, transcripts.pageQuery(r.url.searchParams)) satisfies A.TranscriptPage);
   });
 
   route("POST", "/api/session/status", async (r) => {

@@ -50,6 +50,8 @@ export interface TaskRow {
   updated_at: number;
   idle_since: number | null;
   agent_id: string | null;
+  /** JSON string[]: the first prompt's attachments (paths in the owner's files), or null. */
+  attachments: string | null;
 }
 
 export interface KeyRow {

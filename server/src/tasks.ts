@@ -18,6 +18,8 @@ import { ensureKey } from "./userkeys.ts";
 import { budgetCapped, machineHoursCapReached, startRun, stopRuns } from "./spend.ts";
 import { cancelForTask } from "./approvals.ts";
 import { ensureProxyUser } from "./tools/index.ts";
+import { checkAttachments } from "./files.ts";
+import { filesConfig } from "./config.ts";
 
 export type BusyKind = "creating" | "pausing" | "resuming" | "destroying";
 export type PauseReason = "user" | "idle" | "machine_hours_cap" | "instance_budget" | "offboarded";
@@ -48,6 +50,7 @@ export function taskView(ctx: Ctx, t: TaskRow): TaskView {
     updatedAt: iso(t.updated_at),
     connected: ctx.hub.isConnected(t.id),
     agentId: t.agent_id ?? null,
+    attachments: t.attachments ? (JSON.parse(t.attachments) as string[]) : [],
   };
 }
 
@@ -82,7 +85,7 @@ function checkCaps(ctx: Ctx, user: UserRow): void {
 
 // ---- machines --------------------------------------------------------------------------------
 
-async function launch(ctx: Ctx, task: TaskRow, user: UserRow, o: { firstPrompt?: string; restore: boolean }): Promise<void> {
+async function launch(ctx: Ctx, task: TaskRow, user: UserRow, o: { firstPrompt?: string; attachments?: string[]; restore: boolean }): Promise<void> {
   const key = await ensureKey(ctx, user);
   const token = mintToken();
   const env: Record<string, string> = {
@@ -95,12 +98,15 @@ async function launch(ctx: Ctx, task: TaskRow, user: UserRow, o: { firstPrompt?:
     OPENROUTER_API_KEY: key,
     JARVIS_MODEL: task.model,
     PASEO_PASSWORD: ctx.sealer.open(task.daemon_password_sealed, daemonAad(task.id)),
+    JARVIS_FILES_SYNC_BYTES: String(filesConfig(ctx.config).sessionSyncBytes),
   };
+  if (ctx.config.models.find((m) => m.id === task.model)?.images) env.JARVIS_MODEL_IMAGES = "1";
   if (o.firstPrompt) env.JARVIS_FIRST_PROMPT = o.firstPrompt;
   // Tier 0 proxy, subuser providers: the owner's own capped sub-account (jarvis-agent keeps it out
   // of the agent's environment and serves it as a local proxy). Relay providers need nothing here.
   const proxy = await proxyEnv(ctx, user);
   if (proxy) env.JARVIS_PROXY = proxy;
+  if (o.attachments?.length) env.JARVIS_ATTACHMENTS = JSON.stringify(o.attachments);
   if (o.restore) env.JARVIS_RESTORE_URL = await ctx.blobs.presignGet(snapshotKey(task.id), ctx.config.presignSeconds ?? 3600);
   // the token must be known before the machine can dial in
   update(ctx, task.id, { session_token_hash: sha256hex(token) });
@@ -185,6 +191,7 @@ export function createTask(ctx: Ctx, user: UserRow, body: CreateTaskRequest): Pr
   const requestId = body.requestId ?? null;
   if (requestId !== null && !/^[A-Za-z0-9_-]{1,64}$/.test(requestId)) throw httpError("bad_request", "requestId must be [A-Za-z0-9_-]{1,64}");
   if (body.title !== undefined && (typeof body.title !== "string" || body.title.length > 120)) throw httpError("bad_request", "title must be ≤ 120 characters");
+  const attachments = checkAttachments(ctx, user.id, body.attachments);
   if (requestId) {
     const dup = ctx.db.prepare("SELECT * FROM tasks WHERE user_id = ? AND request_id = ?").get(user.id, requestId) as TaskRow | undefined;
     if (dup) return Promise.resolve(dup);
@@ -199,15 +206,15 @@ export function createTask(ctx: Ctx, user: UserRow, body: CreateTaskRequest): Pr
     const pw = mintToken();
     ctx.db
       .prepare(
-        "INSERT INTO tasks(id, user_id, title, model, state, daemon_password_sealed, request_id, created_at, updated_at) VALUES (?, ?, ?, ?, 'starting', ?, ?, ?, ?)",
+        "INSERT INTO tasks(id, user_id, title, model, state, daemon_password_sealed, request_id, attachments, created_at, updated_at) VALUES (?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?)",
       )
-      .run(id, user.id, title, model, ctx.sealer.seal(pw, daemonAad(id)), requestId, now, now);
+      .run(id, user.id, title, model, ctx.sealer.seal(pw, daemonAad(id)), requestId, attachments.length ? JSON.stringify(attachments) : null, now, now);
     const task = getTask(ctx, id)!;
     lock(ctx, id, "creating");
     ctx.ops.run(
       (async () => {
         try {
-          await launch(ctx, task, user, { firstPrompt: prompt, restore: false });
+          await launch(ctx, task, user, { firstPrompt: prompt, attachments, restore: false });
         } catch (e) {
           const msg = (e as Error).message.slice(0, 300);
           update(ctx, id, { state: "failed", error: `could not start the machine: ${msg}`, session_token_hash: null });

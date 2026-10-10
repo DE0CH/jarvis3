@@ -13,6 +13,7 @@ const STATUS: Record<ErrorCode, number> = {
   tools_cap: 429,
   too_many_requests: 429,
   capability_missing: 403,
+  too_large: 413,
   upstream: 502,
   unavailable: 503,
   internal: 500,

@@ -211,6 +211,52 @@ const MIGRATIONS: string[] = [
     created_at INTEGER NOT NULL
   );
   `,
+  // 6: the users' files (objects in the bucket under files/<userId>/), first-prompt attachments,
+  //    and the transcript search index (FTS5, trigram: substring search in any language)
+  `
+  CREATE TABLE files (
+    user_id TEXT NOT NULL REFERENCES users(id),
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    content_type TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('user','session')),
+    task_id TEXT,
+    object_key TEXT NOT NULL,                     -- files/<userId>/<random id>: a path change is a row update
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, path)
+  );
+  ALTER TABLE tasks ADD COLUMN attachments TEXT;  -- JSON string[] of paths in the owner's files
+  CREATE TABLE transcript_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    user_id TEXT NOT NULL REFERENCES users(id),
+    agent_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user','assistant','tool')),
+    text TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    UNIQUE (task_id, agent_id, seq)
+  );
+  CREATE INDEX transcript_user ON transcript_entries(user_id);
+  CREATE VIRTUAL TABLE transcript_fts USING fts5(text, content='transcript_entries', content_rowid='id', tokenize='trigram');
+  CREATE TRIGGER transcript_ai AFTER INSERT ON transcript_entries BEGIN
+    INSERT INTO transcript_fts(rowid, text) VALUES (new.id, new.text);
+  END;
+  CREATE TRIGGER transcript_ad AFTER DELETE ON transcript_entries BEGIN
+    INSERT INTO transcript_fts(transcript_fts, rowid, text) VALUES ('delete', old.id, old.text);
+  END;
+  CREATE TRIGGER transcript_au AFTER UPDATE ON transcript_entries BEGIN
+    INSERT INTO transcript_fts(transcript_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    INSERT INTO transcript_fts(rowid, text) VALUES (new.id, new.text);
+  END;
+  CREATE TABLE transcript_agents (
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    agent_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    PRIMARY KEY (task_id, agent_id)
+  );
+  `,
 ];
 
 export type Db = DatabaseSync;

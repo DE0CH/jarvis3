@@ -1,0 +1,67 @@
+#!/usr/bin/env node
+// jarvis-search: search the task owner's conversations (this task and their earlier ones),
+// through jarvis-agent's local socket.
+//   jarvis-search "<words>" [-n <hits>]          matches, best first ("…" keeps a phrase together)
+//   jarvis-search --read <task id> [--around <seq>] [-n <entries>]   the conversation around a hit
+const http = process.getBuiltinModule("node:http");
+const SOCKET = process.env.JARVIS_AGENT_SOCKET || "/run/jarvis/agent.sock";
+
+function get(p) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ socketPath: SOCKET, path: p, method: "GET" }, (res) => {
+      let out = "";
+      res.on("data", (c) => (out += c));
+      res.on("end", () => {
+        try {
+          resolve({ status: res.statusCode, json: JSON.parse(out) });
+        } catch {
+          resolve({ status: res.statusCode, json: null, text: out });
+        }
+      });
+    });
+    req.on("error", (e) => reject(new Error(`the session agent is not reachable: ${e.message}`)));
+    req.end();
+  });
+}
+const fail = (r) => {
+  console.error(`jarvis-search failed (${r.status}): ${r.json?.error?.message || r.text || ""}`);
+  process.exit(1);
+};
+const usage = () => {
+  console.error('usage: jarvis-search "<words>" [-n <hits>] | jarvis-search --read <task id> [--around <seq>] [-n <entries>]');
+  process.exit(2);
+};
+
+async function main() {
+  const args = process.argv.slice(2);
+  const opt = (k) => {
+    const i = args.indexOf(k);
+    if (i < 0) return undefined;
+    const v = args[i + 1];
+    args.splice(i, 2);
+    return v;
+  };
+  const n = opt("-n");
+  const read = opt("--read");
+  const around = opt("--around");
+  if (read) {
+    const q = new URLSearchParams({ limit: n || "20", ...(around ? { around } : {}) });
+    const r = await get(`/tasks/${encodeURIComponent(read)}/transcript?${q}`);
+    if (r.status !== 200) fail(r);
+    const out = r.json.entries.map((e) => `[seq ${e.seq}] ${e.role} · ${e.at.slice(0, 16).replace("T", " ")}\n${e.text}`);
+    if (r.json.hasOlder) out.unshift("(earlier messages: --around <a smaller seq>)");
+    if (r.json.hasNewer) out.push("(later messages: --around <a larger seq>)");
+    console.log(out.length ? out.join("\n\n") : "No messages.");
+    return;
+  }
+  const query = args.join(" ").trim();
+  if (!query) usage();
+  const r = await get(`/search?${new URLSearchParams({ q: query, limit: n || "10" })}`);
+  if (r.status !== 200) fail(r);
+  const out = r.json.hits.map((h) => `${h.taskTitle} (task ${h.taskId}, ${h.taskState}) · ${h.role} · seq ${h.seq} · ${h.at.slice(0, 16).replace("T", " ")}\n  ${h.snippet}`);
+  console.log(out.length ? out.join("\n\n") : "No matches.");
+}
+main().catch((e) => {
+  console.error(`jarvis-search: ${e.message}`);
+  process.exit(1);
+});
