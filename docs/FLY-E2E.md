@@ -30,7 +30,7 @@ is enough. Everything it makes (machines, the OpenRouter key, tunnels, the bucke
 Needs node ≥ 22.18, git, `cloudflared` and `versitygw` on `PATH` (both are in Jarvis 1's session image).
 
 ```bash
-FLY_API_TOKEN=… FLY_ORG=personal FLY_APP=kamyee-jarvis3-sessions \
+FLY_API_TOKEN=… FLY_ORG=example-org FLY_APP=example-jarvis3-sessions \
 OPENROUTER_MANAGEMENT_KEY=… SESSION_IMAGE=ghcr.io/de0ch/jarvis3-session:<12 hex> \
 E2E_REPORT=/tmp/fly-e2e.json integration/fly-e2e.sh
 ```
@@ -40,10 +40,9 @@ It prints PASS/FAIL per step and a JSON report (also written to `E2E_REPORT`): s
 machine-seconds and their cost at the server's own rates (`server/src/spend.ts`), and what the model
 cost (the key's usage, read before it is deleted). It prints no secret.
 
-From a Jarvis 1 session the credentials are in the `default` store as `KAMYEE_FLY_TOKEN` (an
-attenuated token: the Fly org token plus an `Apps` caveat for `kamyee-jarvis3-sessions` alone),
-`KAMYEE_FLY_ORG`, `KAMYEE_FLY_APP` and `KAMYEE_OPENROUTER_PROVISIONING_KEY`; run the script through
-`pull-secrets --exec` with a small wrapper that maps them to the names above.
+`FLY_API_TOKEN` can be an org token narrowed offline to the instance's one app
+(`flyctl tokens attenuate` with an `Apps` caveat), so the test can't touch anything else in the org.
+Where an operator keeps these credentials is up to the instance's private repo.
 
 ## Gotchas
 
