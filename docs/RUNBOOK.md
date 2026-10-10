@@ -115,3 +115,15 @@ The volume's only state is the SQLite file (replicated) and the org-env mirror (
 There is no shell on the box. What the server answers through the tunnel (`/api/health`, the admin
 routes) and the bucket's contents are what an admin can see; a box that misbehaves in a way git can't
 fix is rebuilt.
+
+Reading `https://<hostname>/api/health` through Access (any service token of the account passes; the
+health route needs no user):
+
+- `530`: no tunnel connector. cloud-init or Flux hasn't got as far as cloudflared (the first boot takes a
+  few minutes), or the tunnel token is wrong.
+- `502`: cloudflared is up (so Flux applied `./deploy`) but the server isn't ready: an init container
+  failing (Litestream restore, the org-env clone) or the server exiting. With no `db/` objects in the
+  bucket, Litestream never started, so the pod is still in its init containers. Reproduce the step
+  off the box: `litestream restore` with `deploy/base/litestream.yml` and the bucket credentials, or a
+  clone of the org-env repo with its deploy key.
+- An extra app answering while the server doesn't tells you the box, Flux and the tunnels work.

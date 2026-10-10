@@ -47,16 +47,17 @@ By default each instance has its own:
 - identity provider (for example the organisation's Google Workspace);
 - org-env repo, secrets and backup and archive storage.
 
-**Hosting inside an operator's accounts.** An organisation's infrastructure may be hosted, for a
-while, under the provider accounts of the person who operates the instance, each piece in a space of
-its own: a GitHub org for the organisation, a separate Hetzner project, a separate Fly org (never the
-org of the operator's other workloads: budget and machine caps act per org), and Access apps for
-the organisation's own hostname in the operator's Cloudflare account. The instance server only ever
-gets keys scoped to those spaces, never account-wide keys. OpenRouter is the exception: the
-instance's provisioning key may sit on the operator's own OpenRouter account (no separate
-organisation or billing), and the instance still mints each user's key with its monthly limit from
-it. That key can list and delete every key on the account, so it is held by the instance server
-only, like the other Tier 3 credentials. Moving to the organisation's own
+**Hosting inside an operator's accounts.** A multi-user instance's provider resources may live, for a
+while, in the provider accounts and orgs of the person who operates it, with shared billing: a GitHub
+org for the organisation, a separate Hetzner project, Access apps for the organisation's own hostname
+in the operator's Cloudflare account, the session machines in a Fly app of their own inside one of the
+operator's Fly orgs, and the provisioning key on the operator's own OpenRouter account. Every key the
+instance server holds is scoped to the instance's own pieces (its project, its zone's Access apps, its
+Fly app, its bucket), never account-wide, with one exception: an OpenRouter provisioning key can list
+and delete every key on the account, so it is held by the instance server only, like the other Tier 3
+credentials. The instance still mints each user's OpenRouter key with its monthly limit from it. A Fly
+org's budget and machine caps also cover the instance's app when they share the org. Which accounts a
+given instance uses is recorded in its private instance repo, not here. Moving to the organisation's own
 accounts later costs:
 
 - GitHub: add owners to the org. Hetzner: rebuild the box from git and copy the bucket and SQLite file. Fly: nothing
