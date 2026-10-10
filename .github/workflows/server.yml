@@ -52,7 +52,6 @@ jobs:
         with:
           path: server/web-dist
           key: jarvis3-web-${{ steps.pin.outputs.commit }}
-      # the deploy key is read-only on DE0CH/jarvis3-app; once that repo is public it isn't needed
       - name: check out the app
         if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
@@ -60,7 +59,6 @@ jobs:
           repository: DE0CH/jarvis3-app
           ref: ${{ steps.pin.outputs.commit }}
           path: app
-          ssh-key: ${{ secrets.JARVIS3_APP_DEPLOY_KEY }}
       - uses: actions/setup-node@v4
         if: steps.cache.outputs.cache-hit != 'true'
         with:
