@@ -27,8 +27,8 @@ export const PAGE_HEADERS = {
 };
 
 const STYLE = `
-:root{--bg:#fff;--fg:#1c2024;--muted:#60646c;--line:#e0e1e6;--card:#f9f9fb;--accent:#0d74ce;--danger:#ce2c31;--ok:#218358}
-@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#edeef0;--muted:#b0b4ba;--line:#2e3135;--card:#18191b;--accent:#70b8ff;--danger:#ff9592;--ok:#3dd68c}}
+:root{--bg:#fff;--fg:#1c2024;--muted:#60646c;--line:#e0e1e6;--card:#f9f9fb;--accent:#0d74ce;--danger:#ce2c31;--ok:#218358;--on-accent:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#edeef0;--muted:#b0b4ba;--line:#2e3135;--card:#18191b;--accent:#70b8ff;--danger:#ff9592;--ok:#3dd68c;--on-accent:#111113}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 main{max-width:560px;margin:0 auto;padding:24px 16px 48px}h1{font-size:22px;margin:0 0 4px}p{margin:8px 0}.muted{color:var(--muted);font-size:14px}
 .card{border:1px solid var(--line);background:var(--card);border-radius:12px;padding:14px 16px;margin:16px 0}
@@ -37,7 +37,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0 0;font:13px/1.4 ui
 code{font:12px ui-monospace,Menlo,monospace;overflow-wrap:anywhere}
 button,input{font:inherit}input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
 .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:16px}button{border:0;border-radius:8px;padding:12px 18px;font-weight:600;cursor:pointer}
-.primary{background:var(--accent);color:#fff}.secondary{background:transparent;color:var(--danger);border:1px solid var(--line)}
+.primary{background:var(--accent);color:var(--on-accent)}.secondary{background:transparent;color:var(--danger);border:1px solid var(--line)}
 button:disabled{opacity:.5;cursor:default}#status{min-height:1.5em;margin-top:16px}.ok{color:var(--ok)}.err{color:var(--danger)}`;
 
 // base64url <-> ArrayBuffer and the JSON <-> WebAuthn conversions (no library in the page)
