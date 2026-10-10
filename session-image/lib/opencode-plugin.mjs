@@ -8,6 +8,10 @@
 //   jarvis_action         run one; the policy approves it, or the task's owner / an admin / the owner
 //   jarvis_request_access ask an admin for an action this task's role lacks
 //   jarvis_ask_boss       ask an admin a judgement question and wait for the answer
+//   jarvis_wakeup         be woken later: at a time, on a schedule, or when a web page/API says so
+//                         (the server resumes the task if it was paused and delivers the prompt)
+//   jarvis_wakeups        list this task's wakeups, or cancel one
+//   jarvis_post           post a result to this task's channel in the app (the owner is notified)
 //   web_search, web_fetch Tier 0 web tools (lib/web.mjs): metered by the server against the task
 //                         owner's monthly allowance, with the organisation's keys (never in here)
 //
@@ -16,11 +20,12 @@
 import { tool } from "@opencode-ai/plugin";
 import { LocalClient, errorText, matchGuard, outcome, waitSettled, waitingText } from "./policy.mjs";
 import { DEFAULT_INLINE_CHARS, fetchOutput, formatSearch, webCall } from "./web.mjs";
+import { describeWakeup, wakeupRequest } from "./wakeups.mjs";
 import { join } from "node:path";
 
 const z = tool.schema;
 // the web tools are NOT exempt: a guard rule may name web_fetch (or "*") like any other tool
-const OWN_TOOLS = new Set(["jarvis_actions", "jarvis_action", "jarvis_request_access", "jarvis_ask_boss"]);
+const OWN_TOOLS = new Set(["jarvis_actions", "jarvis_action", "jarvis_request_access", "jarvis_ask_boss", "jarvis_wakeup", "jarvis_wakeups", "jarvis_post"]);
 const PAGES_DIR = () => join(process.env.HOME || "/home/jarvis", "workspace", ".web");
 
 export const JarvisPolicyPlugin = async () => {
@@ -143,6 +148,62 @@ export const JarvisPolicyPlugin = async () => {
         },
         async execute(args, ctx) {
           return outcome(await ask({ kind: "question", question: args.question, ...(args.options?.length ? { options: args.options } : {}) }, ctx));
+        },
+      }),
+
+      jarvis_wakeup: tool({
+        description:
+          "Be woken later with a prompt, instead of waiting: Jarvis delivers `prompt` to this task as a new message at the time (or when the condition holds), starting the task again first if it was paused meanwhile. Give exactly one of: `in` (a delay like 30m, 2h, 3d), `at` (a time: ISO with offset, or a wall-clock time in the user's zone like 2026-10-12T09:00 or 09:00), `cron` (a recurring five-field schedule in the user's zone, at most every 15 minutes), or `checkUrl` (a public https URL the server fetches every `every` until the condition holds: `contains`, `absent`, `status`, `changed`; no credentials, so only public pages/APIs). Write the prompt so it makes sense on its own later. Arming the same `name` again replaces that wakeup.",
+        args: {
+          prompt: z.string().describe("what to do when woken, self-contained"),
+          name: z.string().optional().describe("a short name ([A-Za-z0-9_-]), to replace or cancel it later; default 'default'"),
+          in: z.string().optional().describe("a delay: 90s, 30m, 2h, 3d"),
+          at: z.string().optional().describe("a time: 2026-10-12T09:00 (user's zone), 09:00 (next), or ISO with offset"),
+          cron: z.string().optional().describe("minute hour day month weekday, e.g. '0 9 * * MON'"),
+          checkUrl: z.string().optional().describe("a public https URL to check"),
+          contains: z.string().optional().describe("check: passes when the body contains this text"),
+          absent: z.string().optional().describe("check: passes when the body no longer contains this text"),
+          status: z.number().int().optional().describe("check: passes when the HTTP status is this"),
+          changed: z.boolean().optional().describe("check: passes when the body differs from the first check's"),
+          every: z.string().optional().describe("check: how often, e.g. 5m (default 5m, at least 1m)"),
+          until: z.string().optional().describe("check: give up at this time (default 7 days, at most 30); cron: last firing before this"),
+          failPrompt: z.string().optional().describe("check: delivered instead if it gives up"),
+        },
+        async execute(args) {
+          const req = wakeupRequest(args, { tz: process.env.JARVIS_TIME_ZONE || "UTC" });
+          const r = await client.post("/wakeups", req);
+          if (r.status !== 201) throw new Error(errorText(r));
+          return `Wakeup armed. ${describeWakeup(r.body).slice(2)}. You may end your turn now; the task can be paused meanwhile.`;
+        },
+      }),
+
+      jarvis_wakeups: tool({
+        description: "List this task's armed wakeups, or cancel one by name.",
+        args: { cancel: z.string().optional().describe("the name of a wakeup to cancel") },
+        async execute(args) {
+          if (args.cancel) {
+            const r = await client.request("DELETE", `/wakeups/${encodeURIComponent(args.cancel)}`);
+            if (r.status !== 200) throw new Error(errorText(r));
+            return `Cancelled the wakeup "${args.cancel}".`;
+          }
+          const r = await client.get("/wakeups");
+          if (r.status !== 200) throw new Error(errorText(r));
+          const armed = r.body.wakeups.filter((w) => w.state === "armed");
+          return armed.length ? armed.map(describeWakeup).join("\n") : "No wakeups are armed.";
+        },
+      }),
+
+      jarvis_post: tool({
+        description:
+          "Post a result to this task's channel in the Jarvis app: a report, a summary, the outcome of a scheduled run. The task's owner gets a notice and reads it in the app. Markdown, up to 20000 characters. Use it for results worth keeping, not for progress chatter.",
+        args: {
+          text: z.string().describe("the post, markdown"),
+          title: z.string().optional().describe("a short title (default: the first line)"),
+        },
+        async execute(args) {
+          const r = await client.post("/posts", { text: args.text, ...(args.title ? { title: args.title } : {}) });
+          if (r.status !== 201) throw new Error(errorText(r));
+          return `Posted to the task's channel: ${r.body.title}`;
         },
       }),
     },

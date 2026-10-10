@@ -10,13 +10,17 @@
 //   6. local    a unix socket for in-machine helpers: jarvis-remember posts notes through it, jarvis-files
 //               and jarvis-search reach the owner's files and transcripts through it, the
 //               OpenCode policy plugin (lib/opencode-plugin.mjs) files approvals and waits on
-//               them, and the web tools (web_search, web_fetch, jarvis-web) go to the server's
-//               metered Tier 0 routes, so the session token never enters the agent's shell
+//               them, jarvis-wakeup / jarvis-post (and the plugin's tools) arm wakeups and post
+//               to the task's channel, and the web tools (web_search, web_fetch, jarvis-web) go
+//               to the server's metered Tier 0 routes, so the session token never enters the
+//               agent's shell
 //   7. proxy    the Tier 0 local proxy on 127.0.0.1:3128 (lib/proxy.mjs), when the instance has one
 //   8. files    at boot, the owner's files -> ~/files (newest first, up to JARVIS_FILES_SYNC_BYTES);
 //               the first prompt's attachments -> ~/workspace/attachments/
 //   9. search   the agents' timelines -> POST /api/session/transcript (lib/transcript.mjs), so the
 //               owner can search this conversation from the app
+//  10. inbox    wakeup prompts the server queued for this task go to the main agent as one new
+//               message, once it is not mid-turn (lib/wakeups.mjs)
 //
 // Config comes from the env the server sets (docs/API.md section 10).
 import { spawn, spawnSync } from "node:child_process";
@@ -30,6 +34,7 @@ import { writeLayers } from "./assemble.mjs";
 import { startChannel, VERSION } from "./channel.mjs";
 import { relayTunnel, startLocalProxy, subuserTunnel } from "./proxy.mjs";
 import { syncAgent } from "./transcript.mjs";
+import { InboxDelivery } from "./wakeups.mjs";
 
 const env = process.env;
 const need = (k) => {
@@ -65,6 +70,7 @@ const SERVER = need("JARVIS_URL").replace(/\/$/, "");
 const TOKEN = need("JARVIS_SESSION_TOKEN");
 const MODEL = need("JARVIS_MODEL");
 const PASSWORD = need("PASEO_PASSWORD");
+const TIME_ZONE = env.JARVIS_TIME_ZONE || "UTC";
 const DAEMON_PATH = env.JARVIS_DAEMON_PATH || "/ws";
 const serverHeaders = {
   "CF-Access-Client-Id": need("CF_ACCESS_CLIENT_ID"),
@@ -173,6 +179,9 @@ function daemonEnv() {
     PASEO_VOICE_MODE_ENABLED: "false",
     OPENROUTER_API_KEY: env.OPENROUTER_API_KEY || "",
     OPENCODE_DISABLE_AUTOUPDATE: "true",
+    // the owner's zone: `date` in the agent's shell, and jarvis-wakeup's default for wall-clock times
+    TZ: TIME_ZONE,
+    JARVIS_TIME_ZONE: TIME_ZONE,
     ...(env.OPENROUTER_BASE_URL ? { OPENROUTER_BASE_URL: env.OPENROUTER_BASE_URL } : {}),
     // the local proxy's address only; its upstream login (subuser) or the server's (relay) stays out
     ...(tools?.proxy ? { JARVIS_PROXY_URL: PROXY_URL } : {}),
@@ -622,6 +631,29 @@ function localApi() {
       log("approval requested", { kind: body?.kind, action: body?.action ?? body?.rule ?? null });
       return forward("POST", "/api/session/approvals", body);
     }
+    // wakeups and channel posts (jarvis-wakeup, jarvis-post, the plugin's tools)
+    if (url.pathname === "/wakeups" && (req.method === "GET" || req.method === "POST")) {
+      if (req.method === "GET") return forward("GET", "/api/session/wakeups");
+      let body;
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString());
+      } catch {
+        return reply(400, { error: { code: "bad_request", message: "body must be JSON" } });
+      }
+      log("wakeup armed", { name: body?.name ?? "default" });
+      return forward("POST", "/api/session/wakeups", body);
+    }
+    const wm = /^\/wakeups\/([A-Za-z0-9_-]{1,40})$/.exec(url.pathname);
+    if (req.method === "DELETE" && wm) return forward("DELETE", `/api/session/wakeups/${wm[1]}`);
+    if (req.method === "POST" && url.pathname === "/posts") {
+      let body;
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString());
+      } catch {
+        return reply(400, { error: { code: "bad_request", message: "body must be JSON" } });
+      }
+      return forward("POST", "/api/session/posts", body);
+    }
     const m = /^\/approvals\/([A-Za-z0-9_-]{1,64})$/.exec(url.pathname);
     if (req.method === "GET" && m) {
       const wait = Math.max(0, Math.min(55, Number(url.searchParams.get("wait") || 0) || 0));
@@ -660,6 +692,74 @@ async function startProxy() {
   }
 }
 
+// ---- 10. inbox --------------------------------------------------------------------------------
+
+function deliveredStore() {
+  const file = join(P.jarvis, "inbox-delivered");
+  const ids = new Set(existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : []);
+  return {
+    has: (id) => ids.has(id),
+    add(list) {
+      for (const id of list) ids.add(id);
+      // kept in the snapshot, so a resumed machine doesn't deliver a message twice
+      writeFileSync(file, [...ids].slice(-500).join("\n") + "\n");
+      chownR(file);
+    },
+  };
+}
+
+async function mainAgentState() {
+  const c = await paseo();
+  const list = ((await c.agents.list()).entries ?? []).map((a) => a.agent ?? a).filter((a) => !a.archivedAt);
+  const main = list.find((a) => a.id === mainAgent());
+  if (!main) return { exists: false, busy: false };
+  const busy = main.status === "running" || main.status === "initializing" || (Array.isArray(main.pendingPermissions) && main.pendingPermissions.length > 0);
+  return { exists: true, busy };
+}
+
+async function sendToMainAgent(text) {
+  const c = await paseo();
+  const s = await mainAgentState();
+  if (s.exists) {
+    await c.agents.ref(mainAgent()).send(text);
+    return;
+  }
+  // no main agent (it was archived, or the first prompt never made one): the message starts one
+  const agent = await c.agents.create({ config: { provider: `opencode/openrouter/${MODEL}` }, cwd: P.workspace, prompt: text });
+  writeFileSync(mainAgentFile(), agent.id);
+  chownR(P.jarvis);
+  log("a wakeup made a new main agent", { agent: agent.id });
+}
+
+function startInbox() {
+  const d = new InboxDelivery({
+    fetchInbox: async (wait) => (await server("GET", `/api/session/inbox?wait=${wait}`)).messages,
+    ack: (id) => server("POST", `/api/session/inbox/${encodeURIComponent(id)}/ack`, {}, { retries: 3 }),
+    agentState: async () => {
+      try {
+        return await mainAgentState();
+      } catch (e) {
+        dropClient();
+        throw e;
+      }
+    },
+    send: async (text) => {
+      try {
+        await sendToMainAgent(text);
+      } catch (e) {
+        dropClient();
+        throw e;
+      }
+      void statusTick(true);
+    },
+    delivered: deliveredStore(),
+    sleep,
+    log,
+  });
+  void d.run();
+  return d;
+}
+
 // ---- main ---------------------------------------------------------------------------------------
 
 async function main() {
@@ -684,6 +784,7 @@ async function main() {
   });
   await sendFirstPrompt();
   firstPromptPending = false;
+  const inbox = startInbox();
   const timer = setInterval(() => void statusTick(), Number(env.JARVIS_STATUS_MS || 3000));
   await statusTick();
 
@@ -692,6 +793,7 @@ async function main() {
     stopping = true;
     log("stopping");
     clearInterval(timer);
+    inbox.stop();
     channel.stop();
     local.close();
     proxy?.close();

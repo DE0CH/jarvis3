@@ -1,0 +1,81 @@
+#!/usr/bin/env node
+// jarvis-wakeup: ask Jarvis to wake this task later (docs/API.md section 12). The server delivers
+// the prompt to this task as a new message, starting the task again first if it was paused. Goes
+// through jarvis-agent's local socket, which holds the session token.
+//
+//   jarvis-wakeup [--name N] --in 2h "prompt"
+//   jarvis-wakeup [--name N] --at 2026-10-12T09:00 "prompt"       (no offset: the owner's time zone)
+//   jarvis-wakeup [--name N] --cron "0 9 * * MON" [--until T] "prompt"
+//   jarvis-wakeup [--name N] --check-url https://… [--contains S] [--absent S] [--status N]
+//                 [--changed] [--every 5m] [--until T] [--fail-prompt "…"] "prompt"
+//   jarvis-wakeup --list
+//   jarvis-wakeup --cancel N
+const http = process.getBuiltinModule("node:http");
+const LIB = process.env.JARVIS_LIB || "/usr/local/lib/jarvis/lib";
+const SOCKET = process.env.JARVIS_AGENT_SOCKET || "/run/jarvis/agent.sock";
+
+function local(method, path, body) {
+  return new Promise((resolve, reject) => {
+    const data = body === undefined ? undefined : JSON.stringify(body);
+    const req = http.request({ socketPath: SOCKET, path, method, headers: data ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {} }, (res) => {
+      let out = "";
+      res.on("data", (c) => (out += c));
+      res.on("end", () => {
+        let parsed = out;
+        try {
+          parsed = JSON.parse(out);
+        } catch {}
+        resolve({ status: res.statusCode, body: parsed });
+      });
+    });
+    req.on("error", (e) => reject(new Error(`the session agent is not reachable: ${e.message}`)));
+    req.end(data);
+  });
+}
+const fail = (m) => {
+  console.error(`jarvis-wakeup: ${m}`);
+  process.exit(1);
+};
+const errText = (r) => r.body?.error?.message || (typeof r.body === "string" ? r.body : JSON.stringify(r.body));
+
+(async () => {
+  const w = await import(`${LIB}/wakeups.mjs`);
+  const argv = process.argv.slice(2);
+  const a = {};
+  const words = [];
+  const flags = { "--name": "name", "--in": "in", "--at": "at", "--cron": "cron", "--tz": "timeZone", "--until": "until", "--check-url": "checkUrl", "--contains": "contains", "--absent": "absent", "--status": "status", "--every": "every", "--fail-prompt": "failPrompt", "--cancel": "cancel" };
+  for (let i = 0; i < argv.length; i++) {
+    const k = argv[i];
+    if (k === "--list") a.list = true;
+    else if (k === "--changed") a.changed = true;
+    else if (flags[k]) {
+      if (i + 1 >= argv.length) fail(`${k} needs a value`);
+      a[flags[k]] = argv[++i];
+    } else if (k.startsWith("--")) fail(`unknown option ${k}`);
+    else words.push(k);
+  }
+  if (a.list) {
+    const r = await local("GET", "/wakeups");
+    if (r.status !== 200) fail(errText(r));
+    const armed = r.body.wakeups.filter((x) => x.state === "armed");
+    console.log(armed.length ? armed.map(w.describeWakeup).join("\n") : "No wakeups are armed.");
+    return;
+  }
+  if (a.cancel) {
+    const r = await local("DELETE", `/wakeups/${encodeURIComponent(a.cancel)}`);
+    if (r.status !== 200) fail(errText(r));
+    console.log(`Cancelled the wakeup "${a.cancel}".`);
+    return;
+  }
+  a.prompt = words.join(" ").trim();
+  if (!a.prompt) fail('give the prompt to deliver, e.g. jarvis-wakeup --in 2h "Check whether the invoice was paid"');
+  let req;
+  try {
+    req = w.wakeupRequest(a, { tz: process.env.JARVIS_TIME_ZONE || "UTC" });
+  } catch (e) {
+    fail(e.message);
+  }
+  const r = await local("POST", "/wakeups", req);
+  if (r.status !== 201) fail(errText(r));
+  console.log(`Wakeup armed: ${w.describeWakeup(r.body).slice(2)}`);
+})().catch((e) => fail(e.message));

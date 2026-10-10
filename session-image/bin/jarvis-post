@@ -1,0 +1,43 @@
+#!/usr/bin/env node
+// jarvis-post [--title T] "text" | jarvis-post [--title T] - < file.md
+// Post a result to this task's channel in the Jarvis app (its owner gets a notice). Markdown,
+// ≤ 20000 characters. Goes through jarvis-agent's local socket, which holds the session token.
+const http = process.getBuiltinModule("node:http");
+const fs = process.getBuiltinModule("node:fs");
+const argv = process.argv.slice(2);
+let title;
+const words = [];
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i] === "--title") title = argv[++i];
+  else words.push(argv[i]);
+}
+let text = words.join(" ");
+if (text === "-") text = fs.readFileSync(0, "utf8");
+if (!text.trim()) {
+  console.error('usage: jarvis-post [--title "Title"] "the result, markdown" (or - to read stdin)');
+  process.exit(2);
+}
+const body = JSON.stringify({ text, ...(title ? { title } : {}) });
+const req = http.request(
+  { socketPath: process.env.JARVIS_AGENT_SOCKET || "/run/jarvis/agent.sock", path: "/posts", method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } },
+  (res) => {
+    let out = "";
+    res.on("data", (c) => (out += c));
+    res.on("end", () => {
+      if (res.statusCode === 201) console.log(`Posted to the task's channel: ${JSON.parse(out).title}`);
+      else {
+        let msg = out;
+        try {
+          msg = JSON.parse(out).error.message;
+        } catch {}
+        console.error(`jarvis-post failed (${res.statusCode}): ${msg}`);
+        process.exit(1);
+      }
+    });
+  },
+);
+req.on("error", (e) => {
+  console.error(`jarvis-post: the session agent is not reachable: ${e.message}`);
+  process.exit(1);
+});
+req.end(body);

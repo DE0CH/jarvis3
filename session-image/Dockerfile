@@ -13,7 +13,7 @@ ARG OPENCODE_VERSION=1.18.35
 ARG PASEO_VERSION=0.11.1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl git tini procps python3 ripgrep less \
+ && apt-get install -y --no-install-recommends ca-certificates curl git tini procps python3 ripgrep less tzdata \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -m -u 1001 -s /bin/bash jarvis
 
@@ -33,8 +33,8 @@ WORKDIR /usr/local/lib/jarvis
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY lib ./lib
-COPY bin/jarvis-boot bin/jarvis-snapshot bin/jarvis-remember bin/jarvis-web bin/jarvis-files bin/jarvis-search /usr/local/bin/
-RUN chmod 755 /usr/local/bin/jarvis-boot /usr/local/bin/jarvis-snapshot /usr/local/bin/jarvis-remember /usr/local/bin/jarvis-web /usr/local/bin/jarvis-files /usr/local/bin/jarvis-search
+COPY bin/jarvis-boot bin/jarvis-snapshot bin/jarvis-remember bin/jarvis-web bin/jarvis-files bin/jarvis-search bin/jarvis-wakeup bin/jarvis-post /usr/local/bin/
+RUN chmod 755 /usr/local/bin/jarvis-boot /usr/local/bin/jarvis-snapshot /usr/local/bin/jarvis-remember /usr/local/bin/jarvis-web /usr/local/bin/jarvis-files /usr/local/bin/jarvis-search /usr/local/bin/jarvis-wakeup /usr/local/bin/jarvis-post
 
 WORKDIR /home/jarvis
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/jarvis-boot"]

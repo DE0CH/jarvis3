@@ -778,3 +778,140 @@ test("Tier 0 tools through the real session image", { timeout: 20 * 60_000 }, as
     assert.equal(found.split("\n").length, 1, `files: ${found}`);
   });
 });
+
+test("scheduled tasks, wakeups and channels on the real session image", { timeout: 20 * 60_000 }, async (t) => {
+  let broken = false;
+  const step = (name: string, fn: () => Promise<void>) =>
+    t.test(name, { skip: broken ? "an earlier step failed" : false }, async () => {
+      try {
+        await fn();
+      } catch (e) {
+        broken = true;
+        diagnose();
+        throw e;
+      }
+    });
+  let scheduleId = "";
+  let taskId = "";
+  let agentId = "";
+  // The agent turn, not the title request (no tools) that carries the same first prompt.
+  const seenChat = (mark: string, since: number) => () => Promise.resolve(s.openrouter.chats.slice(since).find((c) => c.lastUser.includes(mark) && c.tools.length > 0));
+  /** One turn of alice's main agent, through the server's daemon proxy. */
+  const turn = async (text: string) => {
+    const client = await paseoAs(ALICE, taskId);
+    try {
+      const r = await client.agents.ref(agentId).run(text, { timeoutMs: TURN_MS });
+      assert.equal(r.status, "idle", JSON.stringify(r));
+      return String(r.lastMessage);
+    } finally {
+      await client.close();
+    }
+  };
+  const idle = () => waitFor("idle", async () => (await taskOf(ALICE, taskId)).state === "idle", 60_000);
+
+  await step("a schedule's 'Run now' starts a task whose first prompt is the schedule's", async () => {
+    const before = s.openrouter.chats.length;
+    const c = await call(ALICE, "POST", "/api/schedules", { title: "Weekly digest", prompt: "SCHEDULED-MARK summarise the week", cron: "0 9 * * MON", timeZone: "Europe/London" });
+    assert.equal(c.status, 201, JSON.stringify(c.body));
+    scheduleId = c.body.id;
+    assert.ok(c.body.nextRunAt);
+    const r = await call(ALICE, "POST", `/api/schedules/${scheduleId}/run`);
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal(r.body.run.result, "started");
+    taskId = r.body.task.id;
+    assert.equal(r.body.task.scheduleId, scheduleId);
+    await waitFor("the run's task running", async () => {
+      const v = await taskOf(ALICE, taskId);
+      if (v.state === "failed") throw Object.assign(new Error(`task failed: ${v.error}`), { fatal: true });
+      return v.connected && (v.state === "running" || v.state === "idle") && v.agentId ? v : null;
+    }, BOOT_MS, 2000);
+    agentId = (await taskOf(ALICE, taskId)).agentId;
+    const chat = await waitFor("the scheduled prompt at the model", seenChat("SCHEDULED-MARK", before), TURN_MS);
+    assert.match(chat.lastUser, /^\[Scheduled task "Weekly digest", started by hand from its schedule/);
+    assert.ok(chat.tools.includes("jarvis_wakeup") && chat.tools.includes("jarvis_post") && chat.tools.includes("jarvis_wakeups"), `${chat.tools}`);
+    assert.match(chat.system, /jarvis_wakeup/);
+    // bob can't see or run it
+    assert.equal((await call(BOB, "GET", `/api/schedules/${scheduleId}`)).status, 404);
+    assert.equal((await call(BOB, "POST", `/api/schedules/${scheduleId}/run`)).status, 404);
+    await idle();
+  });
+
+  await step("the agent posts to the task's channel (plugin tool); alice is told; bob sees nothing", async () => {
+    const reply = await turn('call: jarvis_post {"title": "ITEST report", "text": "CHANNEL-MARK all good"}');
+    assert.match(reply, /TOOL RESULT: Posted to the task's channel: ITEST report/);
+    const posts = (await call(ALICE, "GET", `/api/tasks/${taskId}/posts`)).body.posts;
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].text, "CHANNEL-MARK all good");
+    const me = (await call(ALICE, "GET", "/api/me")).body;
+    assert.equal(me.unreadPosts, 1);
+    const ch = (await call(ALICE, "GET", "/api/channels")).body.channels;
+    assert.equal(ch[0].taskId, taskId);
+    assert.equal(ch[0].scheduleId, scheduleId);
+    assert.ok((await call(ALICE, "GET", "/api/notices")).body.notices.some((n: { kind: string; taskId: string }) => n.kind === "channel_post" && n.taskId === taskId));
+    assert.equal((await call(BOB, "GET", `/api/tasks/${taskId}/posts`)).status, 404);
+    assert.equal((await call(BOB, "GET", "/api/channels")).body.channels.length, 0);
+    assert.equal((await call(ADMIN, "GET", "/api/channels?all=1")).body.channels.length, 1);
+    await idle();
+  });
+
+  await step("a wakeup on the running task: the prompt arrives as a new message", async () => {
+    const reply = await turn('call: jarvis_wakeup {"name": "live", "in": "1s", "prompt": "WAKEUP-LIVE-MARK look again"}');
+    assert.match(reply, /TOOL RESULT: Wakeup armed\. live \[armed\]/);
+    const w = (await call(ALICE, "GET", `/api/wakeups?taskId=${taskId}`)).body.wakeups;
+    assert.equal(w.length, 1);
+    assert.equal(w[0].state, "armed");
+    await idle();
+    const before = s.openrouter.chats.length;
+    await new Promise((r) => setTimeout(r, 1500));
+    await s.jarvis.tick();
+    const chat = await waitFor("the wakeup prompt at the model", seenChat("WAKEUP-LIVE-MARK", before), TURN_MS);
+    assert.match(chat.lastUser, /^\[Jarvis wakeup "live" \(timed\), set earlier by this task; now /);
+    assert.ok(chat.transcript.includes("SCHEDULED-MARK"), "in the same conversation");
+    await waitFor("the message acked", async () => !s.jarvis.ctx.db.prepare("SELECT 1 FROM inbox WHERE task_id = ? AND delivered_at IS NULL").get(taskId), 60_000);
+    assert.equal((await call(ALICE, "GET", `/api/wakeups?taskId=${taskId}`)).body.wakeups[0].state, "fired");
+    await idle();
+  });
+
+  await step("a wakeup resumes the paused task and the prompt arrives (jarvis-wakeup in the shell)", async () => {
+    const reply = await turn("run: jarvis-wakeup --name later --in 3s WAKEUP-PAUSED-MARK check the invoice");
+    assert.match(reply, /TOOL RESULT: Wakeup armed: later \[armed\]/);
+    await idle();
+    assert.equal((await call(ALICE, "POST", `/api/tasks/${taskId}/pause`)).status, 202);
+    await waitFor("paused", async () => {
+      const x = await taskOf(ALICE, taskId);
+      if (x.state !== "pausing" && x.state !== "paused") throw Object.assign(new Error(`pause failed: ${x.state} ${x.error}`), { fatal: true });
+      return x.state === "paused" && !x.busy ? x : null;
+    }, 5 * 60_000);
+    assert.equal((await s.machines.list()).filter((m) => m.metadata.jarvisTask === taskId).length, 0);
+    const before = s.openrouter.chats.length;
+    await new Promise((r) => setTimeout(r, 3000));
+    await s.jarvis.tick();
+    const v = await taskOf(ALICE, taskId);
+    assert.ok(["starting", "running"].includes(v.state), `resumed by the wakeup: ${v.state} ${v.error}`);
+    await waitFor("running again", async () => {
+      const x = await taskOf(ALICE, taskId);
+      if (x.state === "paused" && !x.busy) throw Object.assign(new Error(`resume failed: ${x.error}`), { fatal: true });
+      return x.connected ? x : null;
+    }, BOOT_MS, 2000);
+    const chat = await waitFor("the wakeup prompt at the model after the resume", seenChat("WAKEUP-PAUSED-MARK", before), TURN_MS);
+    assert.match(chat.lastUser, /^\[Jarvis wakeup "later" \(timed\)/);
+    assert.ok(chat.transcript.includes("WAKEUP-LIVE-MARK") && chat.transcript.includes("SCHEDULED-MARK"), "the restored conversation continued");
+    const m = await machineOf(taskId);
+    assert.match(await exec(m, "cat /home/jarvis/.jarvis/inbox-delivered"), /\S/);
+    await waitFor("acked", async () => !s.jarvis.ctx.db.prepare("SELECT 1 FROM inbox WHERE task_id = ? AND delivered_at IS NULL").get(taskId), 60_000);
+    const later = (await call(ALICE, "GET", `/api/wakeups?taskId=${taskId}`)).body.wakeups.find((x: { name: string }) => x.name === "later");
+    assert.equal(later.state, "fired");
+  });
+
+  await step("clean up: destroying the task cancels its wakeups; the schedule goes", async () => {
+    await idle();
+    const reply = await turn("run: jarvis-wakeup --name tomorrow --in 1d tomorrow");
+    assert.match(reply, /Wakeup armed/);
+    assert.equal((await call(ALICE, "DELETE", `/api/tasks/${taskId}`)).status, 202);
+    await waitFor("archived", async () => (await taskOf(ALICE, taskId)).state === "archived", 5 * 60_000);
+    const ws = (await call(ALICE, "GET", `/api/wakeups?taskId=${taskId}`)).body.wakeups;
+    assert.ok(ws.every((x: { state: string }) => x.state !== "armed"));
+    assert.equal((await call(ALICE, "GET", `/api/tasks/${taskId}/posts`)).body.posts.length, 1, "the channel outlives the machine");
+    assert.equal((await call(ALICE, "DELETE", `/api/schedules/${scheduleId}`)).status, 200);
+  });
+});

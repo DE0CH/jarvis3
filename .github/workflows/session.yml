@@ -33,7 +33,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - name: shell scripts parse
-        run: bash -n bin/jarvis-boot && bash -n bin/jarvis-snapshot && node --check bin/jarvis-remember && node --check bin/jarvis-web && node --check bin/jarvis-files && node --check bin/jarvis-search
+        run: bash -n bin/jarvis-boot && bash -n bin/jarvis-snapshot && node --check bin/jarvis-remember && node --check bin/jarvis-web && node --check bin/jarvis-files && node --check bin/jarvis-search && node --check bin/jarvis-wakeup && node --check bin/jarvis-post
 
   integration:
     runs-on: ubuntu-latest
