@@ -1,4 +1,4 @@
-// Wakeups, channel posts and the task inbox, session side (docs/API.md section 12):
+// Wakeups, channel posts and the task inbox, session side (docs/API.md section 15):
 //   - the request a wakeup tool call / `jarvis-wakeup` command line becomes (POST /api/session/wakeups)
 //   - wall-clock times in the owner's zone (JARVIS_TIME_ZONE) turned into instants
 //   - the inbox delivery: messages the server queued for this task go to the task's main agent as

@@ -103,7 +103,7 @@ export interface MeView extends UserDetail {
   pendingApprovals: number;
   /** Whether the caller is the instance's owner: the one who approves Tier 3 changes with a passkey. */
   isOwner: boolean;
-  /** Channel posts of the caller's own tasks not yet marked read (section 12). */
+  /** Channel posts of the caller's own tasks not yet marked read (section 15). */
   unreadPosts?: number;
   /** What this instance has switched on. */
   features?: InstanceFeatures;
@@ -118,6 +118,8 @@ export interface InstanceFeatures {
   files?: boolean;
   /** Transcript search (GET /api/search). Optional: absent on older servers. */
   search?: boolean;
+  /** Scheduled tasks, wakeups and channels (section 15). Optional: absent on older servers. */
+  schedules?: boolean;
 }
 
 /** GET /api/users (admin) */
@@ -213,7 +215,7 @@ export interface TaskView {
    * older servers.
    */
   attachments?: string[];
-  /** The schedule that started this task (section 12), or null. */
+  /** The schedule that started this task (section 15), or null. */
   scheduleId?: string | null;
 }
 
@@ -581,7 +583,7 @@ export interface NoticeView {
     | "approval_needed"
     | "approval_decided"
     | "passkey_added"
-    /** A task posted to its channel (section 12). */
+    /** A task posted to its channel (section 15). */
     | "channel_post"
     /** A scheduled run was skipped (cap, budget, the previous run still live) or could not start. */
     | "schedule_skipped"
@@ -804,7 +806,7 @@ export type SessionToServerFrame =
   | { type: "http-end"; id: string; error?: string }
   | { type: "ping" };
 
-// ---- scheduled tasks, wakeups, channels (docs/API.md section 12) ---------------------------------
+// ---- scheduled tasks, wakeups, channels (docs/API.md section 15) ---------------------------------
 
 /**
  * A scheduled task: `prompt` runs as a NEW task of the owner on a cron schedule in `timeZone`.

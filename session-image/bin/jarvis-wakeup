@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// jarvis-wakeup: ask Jarvis to wake this task later (docs/API.md section 12). The server delivers
+// jarvis-wakeup: ask Jarvis to wake this task later (docs/API.md section 15). The server delivers
 // the prompt to this task as a new message, starting the task again first if it was paused. Goes
 // through jarvis-agent's local socket, which holds the session token.
 //

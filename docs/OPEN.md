@@ -226,3 +226,45 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
     owner's data.
 63. **Offboarding keeps a person's files and transcripts** for the organisation (admins can list,
     download and search them), like their personal layer and archives.
+
+## Scheduled tasks, wakeups and channels (v0.5)
+
+64. **A scheduled run is a new task**, started like New task (DESIGN: "a prompt to run as a new
+    task"), not a message into an older task. A recurring job that should keep its conversation is
+    a recurring (`cron`) wakeup of that task instead.
+65. **One run of a schedule at a time.** A firing while the previous run's task is still starting,
+    running, idle or pausing is skipped (`skipped_overlap`), so a slow run can't pile up machines.
+    Runs that end paused stay as ordinary paused tasks; nothing deletes them. Alternative: archive a
+    run's task automatically once it posted its result.
+66. **Spend limits on schedules.** A schedule fires at most every 60 minutes (config
+    `schedules.minIntervalMinutes`), a person has at most 20, and every firing checks the owner's
+    machine-hour cap and the instance budget first (skipped runs are recorded, the owner is told
+    when the outcome changes). A missed firing (server down) runs if at most 60 minutes late, else
+    it is recorded as `missed`; there is no catch-up of several missed runs.
+67. **Condition checks run on the server, so they are declarative HTTP checks only**: HTTPS GET to
+    a public address, no credentials or headers, no redirects, plain-text conditions (no regular
+    expressions, which could stall the server). Jarvis 1 ran a session-supplied script on the
+    control plane with the session's own secrets; here the server holds Tier 3 credentials, so
+    agent-written code never runs on it. A condition that needs a credential (an email reply, a
+    private CI run) is a timed or recurring wakeup instead: the task looks, then re-arms.
+    Alternative: run check scripts in a small throwaway machine per check, at machine-hour cost.
+68. **Wakeups resume a paused task, whatever paused it** (idle, the owner pressing Pause), unless
+    a cap or the budget stops it; then the message waits and the owner is told once. A wakeup
+    belongs to its task: destroy, a failed start and offboarding cancel it.
+69. **Delivery is a new user message to the task's main agent, only between turns.** Paseo can
+    interrupt or steer a running turn but has no queue, so the session waits until the agent is
+    idle (and has no pending permission), then sends all waiting messages as one. The prompt
+    starts with a header naming the wakeup, so the agent knows where it came from. At least once:
+    the session keeps the delivered ids in its snapshot so a crash between send and ack doesn't
+    repeat it.
+70. **Channels are per task**, inside the app (no Discord). A post gives the owner a
+    `channel_post` notice; reading the channel marks both read. An admin can read every channel
+    without marking it read for its owner. No attachments yet: posts are markdown text; a file
+    goes in the task's files once those exist. At most 60 posts an hour per task.
+71. **The person's time zone comes from the app** (`X-Time-Zone` on every call, the latest kept).
+    A schedule stores its own zone (the form defaults to the device's), so moving abroad doesn't
+    move a schedule; wakeups default to the person's current zone.
+72. **Cron in a zone follows classic cron**: a wall-clock time skipped by a spring-forward change
+    doesn't fire that day, and one repeated by a fall-back change can fire twice (only for
+    schedules with minutes in the repeated hour, typically 01:00–02:00).
+

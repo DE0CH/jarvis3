@@ -157,7 +157,7 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok({
       ...users.userDetail(ctx, user),
       unreadNotices: notices.unreadCount(ctx, user.id),
-      features: { suggestions: suggestions.suggestionsEnabled(ctx), ...tools.featureFlag(ctx), files: true, search: true },
+      features: { suggestions: suggestions.suggestionsEnabled(ctx), ...tools.featureFlag(ctx), files: true, search: true, schedules: true },
       pendingApprovals: approvals.pendingCount(ctx, userOf(r.principal)),
       isOwner: approvals.isOwner(ctx, user),
       unreadPosts: posts.unreadPosts(ctx, user.id),
@@ -506,7 +506,7 @@ export function defineRoutes(ctx: Ctx): Routes {
     return { raw: { type: "text/html; charset=utf-8", body, headers: PAGE_HEADERS } };
   });
 
-  // ---- scheduled tasks (section 12) ---------------------------------------------------------------
+  // ---- scheduled tasks (section 15) ---------------------------------------------------------------
   route("GET", "/api/schedules", (r) => {
     const userId = listScope(r, "schedule list");
     return ok({ schedules: schedules.listSchedules(ctx, userId).map((x) => schedules.scheduleView(ctx, x)) } satisfies A.ScheduleList);
@@ -541,7 +541,7 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok({ run: res.run, task: res.task ? tasks.taskView(ctx, res.task) : null } satisfies A.ScheduleRunNowResult, res.task ? 201 : 200);
   });
 
-  // ---- wakeups (section 12) ---------------------------------------------------------------------------
+  // ---- wakeups (section 15) ---------------------------------------------------------------------------
   route("GET", "/api/wakeups", (r) => {
     const taskId = r.url.searchParams.get("taskId");
     if (taskId) {
@@ -558,7 +558,7 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok(wakeups.wakeupView(wakeups.cancelWakeup(ctx, w, `cancelled by ${by.id === w.user_id ? "the owner" : "an admin"}`)) satisfies A.WakeupView);
   });
 
-  // ---- channels (section 12) ---------------------------------------------------------------------------
+  // ---- channels (section 15) ---------------------------------------------------------------------------
   route("GET", "/api/channels", (r) => {
     const userId = listScope(r, "channel list");
     return ok({ channels: posts.channels(ctx, userId) } satisfies A.ChannelList);

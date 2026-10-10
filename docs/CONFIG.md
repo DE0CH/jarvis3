@@ -38,6 +38,8 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `tools` | optional; Tier 0 tools ([TOOLS.md](TOOLS.md)): `search`, `fetch`, `proxy`, each `{provider, credential?, baseUrl?, pricing?, settings?}` (`credential` names the environment variable with the organisation's key; `pricing`: `perCallUsd`, `perCreditUsd`, `perGbUsd`), and `monthlyUsd`, an instance-wide cap on search + fetch. A kind left out is off |
 | `files` | optional: `maxFileBytes` (one file, default 50 MiB; Cloudflare's free plan refuses request bodies over 100 MB), `quotaBytes` (per person, default 1 GiB), `sessionSyncBytes` (how much of a person's files a session copies at boot, default 256 MiB; the rest on demand) — docs/API.md section 13 |
 | `actions` | the broker's named actions, their policies and the environment variables holding their credentials ([ACTIONS.md](ACTIONS.md)) |
+| `schedules` | optional limits on scheduled tasks ([API.md](API.md) section 15): `maxPerUser` (default 20), `minIntervalMinutes` (the shortest gap between two firings of one schedule, default 60), `missedGraceMinutes` (a firing the server missed while down still runs if at most this late, default 60) |
+| `wakeups` | optional limits on wakeups: `maxPerTask` (armed at once, default 20), `minCheckSeconds` (shortest check interval, default 60), `minIntervalMinutes` (shortest gap of a recurring wakeup, default 15) |
 
 ## Secrets (environment)
 

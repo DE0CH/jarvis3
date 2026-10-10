@@ -1,4 +1,4 @@
-// The HTTP checks of condition wakeups (docs/API.md section 12). The server runs them itself, so
+// The HTTP checks of condition wakeups (docs/API.md section 15). The server runs them itself, so
 // they are deliberately narrow: HTTPS GET only, to a PUBLIC address (the connection's own DNS answer
 // is checked, so a name can't rebind to the cluster), no credentials or custom headers, no
 // redirects followed, 10 s, the first 256 KiB. Anything a check would need a secret for is for the

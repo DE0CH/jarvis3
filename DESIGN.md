@@ -1,7 +1,8 @@
 # Jarvis 3 — design
 
 Status: design agreed 2026-10-08; v0.1 of the server, session image, app variant and deployment is
-built (docs/), actions and approvals (docs/ACTIONS.md), the Tier 0 web tools (docs/TOOLS.md), the user's files with first-prompt attachments, and transcript search (docs/API.md sections 13 and 14). Jarvis 1 and Jarvis 2 (`DE0CH/jarvis2`) are separate projects and stay as they are;
+built (docs/), actions and approvals (docs/ACTIONS.md), the Tier 0 web tools (docs/TOOLS.md), the user's files with first-prompt attachments, transcript search (docs/API.md sections 13 and 14), and scheduled tasks, wakeups and channels
+(docs/API.md section 15). Jarvis 1 and Jarvis 2 (`DE0CH/jarvis2`) are separate projects and stay as they are;
 Jarvis 3 is a new codebase.
 
 ## What Jarvis 3 is
@@ -160,6 +161,17 @@ user's role determines what their machines hold.
   admin grants it for that session or for the role. Over time roles settle and requests become rare.
 - **Ask the boss:** for judgement calls the agent drafts a question; the admin answers in the app.
 - All approvals land in one queue in the app, plus a notification.
+
+## Scheduled tasks, wakeups and channels
+
+- **Scheduled tasks:** a person sets a prompt to run as a new task of theirs on a schedule (cron, in
+  their time zone). Each run counts against their machine-hour cap and the instance budget like a
+  task they started; one run of a schedule at a time.
+- **Wakeups:** a task asks to be woken at a time, on a schedule, or when a public web check passes;
+  the instance resumes it if it is paused and gives its agent the prompt as a new message. A wakeup
+  belongs to its task and goes with it.
+- **Channels:** each task's outbox inside the app: the agent posts results there and the owner gets
+  a notice. No Discord or other outside channel.
 
 ## Spend
 

@@ -203,9 +203,9 @@ export interface Config {
   tools?: ToolsConfig;
   /** The users' files (docs/API.md section 13). Every field has a default. */
   files?: FilesConfig;
-  /** Scheduled tasks (docs/API.md section 12). Every field optional. */
+  /** Scheduled tasks (docs/API.md section 15). Every field optional. */
   schedules?: SchedulesConfig;
-  /** Wakeups (docs/API.md section 12). Every field optional. */
+  /** Wakeups (docs/API.md section 15). Every field optional. */
   wakeups?: WakeupsConfig;
 }
 

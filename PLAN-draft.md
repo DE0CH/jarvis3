@@ -148,7 +148,8 @@ OpenCode gets all of this through generated `instructions` and skill folders, as
 - (Built in v0.4, docs/ACTIONS.md: the broker with named Tier 2/3 actions and per-action policy, the locked-policy guard plugin, the approvals queue with self-confirm, admin approval, access requests and "ask the boss" as in-app notices, and Tier 3 approval by the owner with a passkey. Still deferred: push notifications, more action types per instance.)
 - iOS distribution: the organisation's Apple organisation account, the Apple Business custom app, and TestFlight for staff. Staff use the web page.
 - (Built in v0.5, docs/API.md sections 13 and 14: the user's files tab, first-prompt attachments and transcript search.)
-- Tier 1 OAuth (staff Gmail, Drive and Calendar), scheduled tasks, wakeups and channels.
+- (Built in v0.5, docs/API.md section 15: scheduled tasks, wakeups and channels.)
+- Tier 1 OAuth (staff Gmail, Drive and Calendar).
 - Tier 0 tools other than OpenRouter (search, scraping, proxies): built after v1, metered per user by the server or capped by per-user sub-accounts (docs/TOOLS.md).
 - Reusing the Jarvis 2 secrets-controller core (DESIGN "Open").
 

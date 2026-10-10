@@ -20,6 +20,11 @@
 // organisation's keys, which never reach the machine), the local proxy relayed through the server,
 // the hard monthly cap, and who sees whose usage.
 //
+// Then scheduled tasks, wakeups and channels (docs/API.md section 15): a schedule's "Run now"
+// starts a task with the schedule's prompt; the agent posts to the task's channel (plugin tool); a
+// wakeup reaches the running task as a new message; a wakeup armed from the shell resumes the
+// paused task and its prompt arrives in the restored conversation; destroy cancels wakeups.
+//
 // Needs Docker and the session image: SESSION_IMAGE (default jarvis3-session:test), built from
 // session-image/. Run: npm test (in integration/).
 import { test, before, after } from "node:test";

@@ -12,7 +12,7 @@ Published by CI (`.github/workflows/session.yml`) as `ghcr.io/de0ch/jarvis3-sess
 
 | path | what |
 |---|---|
-| `Dockerfile` | `node:22-bookworm-slim` + git, curl, python3, ripgrep, tini; `opencode-ai` and `@getpaseo/cli` (versions are build args); trims in the same layer |
+| `Dockerfile` | `node:22-bookworm-slim` + git, curl, python3, ripgrep, tini, tzdata; `opencode-ai` and `@getpaseo/cli` (versions are build args); trims in the same layer |
 | `bin/jarvis-boot` | the entrypoint (under tini, as root): restore a snapshot, then `exec` jarvis-agent |
 | `lib/agent.mjs` | jarvis-agent: layers, the daemon, the reverse channel, first prompt, status, the local socket |
 | `lib/assemble.mjs` | LayerBundle → instructions file, skill folders, `opencode.json` (pure, unit-tested) |
@@ -22,6 +22,8 @@ Published by CI (`.github/workflows/session.yml`) as `ghcr.io/de0ch/jarvis3-sess
 | `bin/jarvis-files` | the owner's files: `list`, `get <path>`, `save <file> [<path>]` |
 | `bin/jarvis-search` | search the owner's tasks: `jarvis-search "<words>"`, `--read <task> --around <seq>` |
 | `lib/transcript.mjs` | timeline entries → transcript entries, batching, one agent's sync (unit-tested) |
+| `bin/jarvis-wakeup`, `bin/jarvis-post` | arm/list/cancel this task's wakeups; post to its channel (the shell twins of the plugin's tools) |
+| `lib/wakeups.mjs` | wakeup requests from tool arguments, wall-clock times in the owner's zone, the inbox delivery (unit-tested) |
 | `lib/opencode-plugin.mjs` | the locked-policy OpenCode plugin: guards and the `jarvis_*` tools ([ACTIONS.md](ACTIONS.md)) |
 | `lib/policy.mjs` | the plugin's logic (guard matching, the agent-socket client, waiting, outcome texts; unit-tested) |
 | `lib/web.mjs`, `bin/jarvis-web` | the Tier 0 web tools: what `web_search` / `web_fetch` and the `jarvis-web` command send, and how answers are written for the model |
@@ -84,7 +86,16 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
    inline for the first three attempts (`opencode.json` then declares the model's image input);
    later attempts leave the images out (a model without image input). Its id is kept in
    `~/.jarvis/main-agent`.
-7. **Status**: every 3 s jarvis-agent lists the daemon's agents over one local client connection;
+7. **Inbox** (after the first prompt): a long poll of `GET /api/session/inbox?wait=50`. New
+   messages (wakeup prompts, docs/API.md section 15) wait until the main agent is neither
+   `running`/`initializing` nor holding a pending permission, then go to it as **one** user
+   message (several queued ones joined), and are acked. Sending while the agent is mid-turn would
+   interrupt it (Paseo's default), and a message must never land as the answer to something the
+   agent is waiting on, so delivery only ever starts a new turn. The ids handed over are kept in
+   `~/.jarvis/inbox-delivered` (in the snapshot), so a crash between delivery and ack doesn't
+   deliver twice. With no main agent (archived, or the first prompt never made one) the message
+   starts a new main agent. The server doesn't idle-pause a task while it has an unacked message.
+8. **Status**: every 3 s jarvis-agent lists the daemon's agents over one local client connection;
    `busy` while any agent is `running`/`initializing` (or the first prompt is still being sent),
    else `idle`. A change (or a reconnect) → `POST /api/session/status`, with the main agent's id
    (on a reconnect, and when it first exists) and its title when it changed.
@@ -120,6 +131,22 @@ retried at the next run.
 `POST /api/session/notes` with the session token. The note lands in the owner's personal layer
 (`source: session`, the task id) and is in the layers of every later task (and of this task after a
 resume).
+
+## Wakeups and channel posts
+
+The plugin's `jarvis_wakeup` / `jarvis_wakeups` / `jarvis_post` tools and the `jarvis-wakeup` /
+`jarvis-post` commands go through jarvis-agent's socket like the rest:
+
+| socket route | forwards to |
+|---|---|
+| `GET /wakeups`, `POST /wakeups` | `GET` / `POST /api/session/wakeups` |
+| `DELETE /wakeups/:name` | `DELETE /api/session/wakeups/:name` |
+| `POST /posts` | `POST /api/session/posts` |
+
+Times without an offset (`2026-10-12T09:00`, `09:00` = the next one, a bare date = 09:00) are wall
+clock in `JARVIS_TIME_ZONE`, the owner's zone as their app last reported it; the daemon's env also
+has it as `TZ`, so `date` in the agent's shell is local time. The preamble tells the agent to arm a
+wakeup and end its turn rather than wait, and to post results worth keeping.
 
 ## Approvals
 
@@ -166,11 +193,14 @@ status line.
 The server sets everything (docs/API.md section 10). Optional, for tests and local runs only:
 `OPENROUTER_BASE_URL` (an OpenAI-compatible endpoint instead of OpenRouter; the local-Docker
 provider sets it from `envOverrides`), `JARVIS_STATUS_MS`, `JARVIS_TRANSCRIPT_MS`, `JARVIS_DAEMON_PORT`.
+The wakeup/post commands honour `JARVIS_AGENT_SOCKET` and `JARVIS_LIB` (their tests point them at a
+stand-in).
 
 ## Testing
 
-- `cd session-image && npm test`: assembly, the channel relay, the policy plugin and the web tools
-  against a stand-in agent socket, and the local proxy (node:test, no Docker).
+- `cd session-image && npm test`: assembly, the channel relay, the policy plugin, the web tools and
+  the wakeup/post commands and inbox delivery against a stand-in agent socket, and the local proxy
+  (node:test, no Docker).
 - `integration/`: the image end to end (the header of `integration.test.ts` lists the checks):
   `docker build -t jarvis3-session:test session-image`, then `cd server && npm ci`, then
   `cd integration && npm ci && npm test` (needs Docker; `SESSION_IMAGE` picks another tag).

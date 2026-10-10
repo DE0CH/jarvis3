@@ -119,6 +119,16 @@ Error body (every non-2xx JSON answer):
 | GET | `/api/passkeys`, DELETE `/api/passkeys/:id` | the instance owner |
 | POST | `/api/passkeys/register/options`, `/api/passkeys/register` | the instance owner, identity login only |
 | GET | `/api/pages/passkeys`, `/api/pages/approvals/:id` | the instance owner |
+| GET | `/api/schedules` | M (own); `?userId=U`: O of U, A; `?all=1`: A |
+| POST | `/api/schedules` | M (owned by the caller) |
+| POST | `/api/schedules/preview` | M |
+| GET, PATCH, DELETE | `/api/schedules/:id` | O, A |
+| POST | `/api/schedules/:id/run` | O, A |
+| GET | `/api/wakeups` | M (own tasks'); `?taskId=T`: O of T, A; `?userId=U`: O of U, A; `?all=1`: A |
+| DELETE | `/api/wakeups/:id` | O (the task's owner), A |
+| GET | `/api/channels` | M (own tasks'); `?userId=U`: O of U, A; `?all=1`: A |
+| GET | `/api/tasks/:id/posts` | O, A |
+| POST | `/api/tasks/:id/posts/read` | O, A (only the owner's read marks change) |
 | GET | `/api/admin/budget` | A |
 | POST | `/api/admin/directory/sync` | A |
 | GET | `/api/admin/tools` | A |
@@ -130,6 +140,11 @@ Error body (every non-2xx JSON answer):
 | PUT | `/api/session/files/<path>` | S (into its owner's files) |
 | GET, POST | `/api/session/transcript` | S (its own task) |
 | GET | `/api/session/search`, `/api/session/tasks/:id/transcript` | S (its owner's tasks) |
+| GET, POST | `/api/session/wakeups` | S (its own task's) |
+| DELETE | `/api/session/wakeups/:name` | S |
+| GET | `/api/session/inbox` | S |
+| POST | `/api/session/inbox/:id/ack` | S (its own task's messages) |
+| POST | `/api/session/posts` | S |
 | GET | `/api/session/actions` | S |
 | POST | `/api/session/approvals` | S |
 | GET | `/api/session/approvals/:id` | S (its own task's requests) |
@@ -151,9 +166,11 @@ passkey routes, which `server/test/approvals.test.ts` covers (anyone but the own
 ### `GET /api/me` → `MeView`
 
 A `UserDetail` plus `unreadNotices`, the number of the caller's notices not yet marked read
-(section 6), and `features` (`InstanceFeatures`): `suggestions` is true when "Suggest for
-everyone" is set up (section 7a); `files` and `search` are true on a server that has the files
-(section 13) and transcript search (section 14).
+(section 6), `unreadPosts`, the channel posts of the caller's own tasks not yet read (section 15),
+and `features` (`InstanceFeatures`): `suggestions` is true when "Suggest for everyone" is set up
+(section 7a); `files` and `search` are true on a server that has the files (section 13) and
+transcript search (section 14); `schedules` is true on a server with scheduled tasks, wakeups and
+channels (section 15).
 
 ```json
 {
@@ -369,7 +386,9 @@ changed proxy cap to the user's proxy sub-account (section 12).
 
 ### `GET /api/notices` → `NoticeList`
 The caller's last 100 notices, newest first: `{ id, kind, text, taskId, createdAt, read }`, `kind`
-one of `machine_hours_cap`, `tools_cap`, `instance_budget`, `task_failed`, `offboarded`, `suggestion`.
+one of `machine_hours_cap`, `tools_cap`, `instance_budget`, `task_failed`, `offboarded`, `suggestion`,
+`approval_needed`, `approval_decided`, `passkey_added`, `channel_post`, `schedule_skipped`, `wakeup`
+(section 15).
 
 ### `POST /api/notices/read` (`MarkNoticesReadRequest`) → `MarkNoticesReadResult`
 `{}` marks all the caller's notices read; `{ "upTo": "<notice id>" }` marks that notice and every
@@ -526,6 +545,10 @@ owner's personal layer; it can do nothing else.
 | `POST /api/session/transcript` (`SessionTranscriptRequest`) → `SessionTranscriptCursors` | part of an agent's timeline (section 14) |
 | `GET /api/session/search?q=…` → `SearchResult` | search the owner's tasks (section 14) |
 | `GET /api/session/tasks/:id/transcript` → `TranscriptPage` | read one of the owner's tasks (404 for anyone else's) |
+| `GET` / `POST /api/session/wakeups`, `DELETE /api/session/wakeups/:name` | this task's wakeups: list, arm (`SessionWakeupRequest`, 201 `WakeupView`), cancel by name (section 15) |
+| `GET /api/session/inbox?wait=<s>` → `InboxList` | messages for the task's agent not yet acked, oldest first; with `wait` (≤ 55 s) a long poll |
+| `POST /api/session/inbox/:id/ack` | the message was handed to the agent (idempotent) |
+| `POST /api/session/posts` (`SessionPostRequest`) → 201 `ChannelPostView` | post to the task's channel |
 | `POST /api/session/status` `{ "activity": "busy" \| "idle", "title"?, "agentId"? }` → `TaskView` | `idle` starts the auto-pause countdown (`idleMinutes`), `busy` stops it; `title` (≤ 120) renames the task; `agentId` (`[A-Za-z0-9._:-]{1,128}`) records the task's main agent |
 | `WS /api/session/channel` | the reverse channel (below) |
 
@@ -566,6 +589,7 @@ What the server gives a machine (env) and expects from the session image (built 
 | `JARVIS_FILES_SYNC_BYTES` | how much of the owner's files the session copies at boot (config `files.sessionSyncBytes`) |
 | `JARVIS_RESTORE_URL` | resume only: presigned GET of the snapshot (valid `presignSeconds`, default 1 h) |
 | `JARVIS_PROXY` | only with a `subuser` proxy provider and a proxy cap above 0: JSON `{host, port, username, password, targeting}` of the owner's own capped sub-account (section 12); jarvis-agent keeps it out of the agent's environment |
+| `JARVIS_TIME_ZONE` | the owner's IANA zone as their app last reported it (`X-Time-Zone`, section 15), else `UTC` |
 
 Nothing else: no organisation provider tokens, no storage credentials, no Access identity of any person.
 
@@ -752,3 +776,92 @@ server already has replaces it (the session re-sends the last one, which may hav
 `epoch` (Paseo rebuilt the timeline) replaces everything held for that agent. `jarvis-search` in
 the machine uses `GET /api/session/search` and `GET /api/session/tasks/:id/transcript`, limited to
 the owner's tasks like the app.
+## 15. Scheduled tasks, wakeups and channels
+
+Types: `ScheduleView`, `ScheduleDetail`, `ScheduleRunView`, `WakeupView`, `WakeupCheck`,
+`SessionWakeupRequest`, `InboxMessage`, `ChannelPostView`, `ChannelView` in
+`server/src/api-types.ts`. Limits are in the config (`schedules`, `wakeups`, [CONFIG.md](CONFIG.md)).
+Everything here belongs to a person (a schedule) or a task (wakeups, inbox, posts): nobody else sees
+it, an admin sees all of it, and it goes with its task (destroy, offboarding).
+
+**Time zone.** The app sends the device's IANA zone as `X-Time-Zone` on every call; the server keeps
+the latest valid one per person. Sessions get it as `JARVIS_TIME_ZONE`; a cron wakeup without a zone
+uses it.
+
+### Scheduled tasks
+
+A schedule runs its `prompt` as a **new task** of its owner on a five-field cron (`minute hour day
+month weekday`; names like `MON`, `JAN`; day-of-month and weekday restricted together match either,
+as in classic cron) in `timeZone`. At each firing the server starts the task as `POST /api/tasks`
+would, with the owner's key, layers and model; the first prompt is the schedule's prompt after one
+line saying which schedule ran and when (asking the agent to post the result with `jarvis_post`), and
+the task's title is the schedule's title plus the time. `TaskView.scheduleId` links the run back.
+
+A firing doesn't start a task, and its run records why, when: the instance budget is used up
+(`skipped_budget`), the owner's machine-hour cap is reached (`skipped_cap`), the schedule's previous
+run is still live (`skipped_overlap`: one run at a time), or the server was down and is back more
+than `missedGraceMinutes` late (`missed`); `failed` if the task couldn't be made. The owner gets a
+`schedule_skipped` notice when a run's result differs from the previous run's (an hourly schedule
+stuck at the cap tells them once). A missed run is never made up later; the schedule continues at
+its next time. Schedules of a person who isn't active don't fire.
+
+| route | does |
+|---|---|
+| `GET /api/schedules` → `ScheduleList` | newest first |
+| `POST /api/schedules` (`CreateScheduleRequest`) → 201 `ScheduleView` | 400 for a bad expression or zone, a schedule firing more often than `minIntervalMinutes`, or one that never fires; 429 past `maxPerUser` |
+| `POST /api/schedules/preview` `{cron, timeZone}` → `SchedulePreview` | `{ok, error, next: [{at, local}]}`, the next five firings, for the form |
+| `GET /api/schedules/:id` → `ScheduleDetail` | with the last 50 runs |
+| `PATCH /api/schedules/:id` (`UpdateScheduleRequest`) → `ScheduleView` | any subset; a new time or switching it on re-plans `nextRunAt`; `enabled: false` stops it |
+| `DELETE /api/schedules/:id` | the schedule and its run history; the tasks it started stay |
+| `POST /api/schedules/:id/run` → `ScheduleRunNowResult` | run now (201 with the task, or 200 with a skipped run): the same caps and one-run-at-a-time |
+
+### Wakeups
+
+A task asks to be woken (the session's `jarvis_wakeup` tool or `jarvis-wakeup` command,
+`POST /api/session/wakeups`) with a `prompt` and exactly one of:
+
+| | fires |
+|---|---|
+| `inSeconds`, `at` | once, at that time (≤ 365 days ahead) |
+| `cron` (+ `timeZone`, `until`) | at every firing, until cancelled or `until`; at most every `wakeups.minIntervalMinutes` |
+| `check` (+ `intervalSeconds`, `until`, `failPrompt`) | when an HTTP check passes; checked every `intervalSeconds` (≥ `minCheckSeconds`, default 300) until `until` (default 7 days, ≤ 30) |
+
+`name` (default `default`) is unique among a task's armed wakeups: arming it again replaces it. A
+task has at most `maxPerTask` armed. **Firing** puts the prompt, after one header line
+(`[Jarvis wakeup "<name>" (<why>), set earlier by this task; now <time>]`), in the task's **inbox**,
+and if the task is paused the server resumes it. The session hands inbox messages to the task's
+main agent as a new user message once the agent isn't mid-turn, then acks them (SESSION-IMAGE.md
+"Boot", step 6); delivery never types into anything or answers a pending question. A task with
+unacked messages isn't idle-paused. If the task can't be resumed (the owner's machine-hour cap, the
+instance budget), the message stays in the inbox, the owner gets one `wakeup` notice, and the server
+resumes the task once it can; it also arrives whenever the owner starts the task.
+
+**Checks run on the server**, so they are narrow: one HTTPS `GET` to a public address (the
+connection's own DNS answer must be public, so a name can't point it at the cluster), no
+credentials, headers, cookies or redirects, 10 s, the first 256 KiB of the body. A check passes when
+every condition given holds: `status` equals, `contains` is in the body, `absent` is not, `changed`
+(the body differs from the first check's). Plain text only: no regular expressions run on the server.
+At `until` it gives up: `failPrompt` is delivered if given, else the owner gets a `wakeup` notice.
+
+States: `armed` → `fired` (one-off, or a recurring one after its last firing) | `expired` (a check
+that gave up) | `cancelled` (by the session, the owner, an admin, a replacement, or the task's
+destroy / failed start / offboarding).
+
+| route | does |
+|---|---|
+| `GET /api/wakeups[?taskId=…]` → `WakeupList` | armed ones first (soonest first), then the latest others |
+| `DELETE /api/wakeups/:id` → `WakeupView` | cancel (409 if it isn't armed) |
+| `GET /api/session/wakeups`, `POST /api/session/wakeups`, `DELETE /api/session/wakeups/:name` | the session's own (section 9) |
+
+### Channels
+
+Each task has a channel: posts its agent makes for its owner (`jarvis_post` / `jarvis-post`, `POST
+/api/session/posts`: `text` markdown ≤ 20000, optional `title`, default the first line; at most 60
+an hour per task). Each post gives the owner a `channel_post` notice naming the task. A channel
+outlives its machine: posts stay after the task is archived.
+
+| route | does |
+|---|---|
+| `GET /api/channels` → `ChannelList` | one entry per task with posts, most recent first: counts, unread, the last post |
+| `GET /api/tasks/:id/posts` → `ChannelPostList` | newest first, up to 200 |
+| `POST /api/tasks/:id/posts/read` → `{unreadPosts}` | the owner read the channel: its posts and their `channel_post` notices are marked read. An admin reading someone else's channel changes nothing |
