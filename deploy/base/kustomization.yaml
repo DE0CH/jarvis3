@@ -22,6 +22,10 @@ configMapGenerator:
     files: [org-env-sync.sh]
   - name: github-known-hosts
     files: [known_hosts]
+  # an /etc/passwd naming uid 1000 for the git containers: alpine/git has no such user, and OpenSSH
+  # refuses to run for a uid without one ("No user exists for uid 1000"), so the ssh clone would fail
+  - name: git-passwd
+    files: [passwd]
 generatorOptions:
   disableNameSuffixHash: false
 images:

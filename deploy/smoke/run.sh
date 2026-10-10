@@ -57,6 +57,8 @@ test -n "$(k get pods -l app=cloudflared -o name)"
 step "org-env mirror"
 k exec deploy/server -c server -- git -C /data/org-env.git rev-parse --is-bare-repository | grep -q true
 k exec deploy/server -c server -- git -C /data/org-env.git cat-file -e 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
+# a real instance clones over ssh as uid 1000: OpenSSH must find that uid in /etc/passwd
+k exec deploy/server -c org-env-fetch -- ssh -G github.com >/dev/null
 
 step "network policies"
 # the probe that plays cloudflared would be adopted (and deleted) by cloudflared's ReplicaSet

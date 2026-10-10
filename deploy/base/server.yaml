@@ -63,6 +63,7 @@ spec:
             - { name: org-env-sync, mountPath: /scripts, readOnly: true }
             - { name: org-env-key, mountPath: /etc/org-env-key, readOnly: true }
             - { name: known-hosts, mountPath: /etc/known-hosts, readOnly: true }
+            - { name: git-passwd, mountPath: /etc/passwd, subPath: passwd, readOnly: true }
             - { name: tmp, mountPath: /tmp }
           securityContext: *restricted
           resources: { requests: { cpu: 10m, memory: 32Mi }, limits: { memory: 512Mi } }
@@ -110,6 +111,7 @@ spec:
         - { name: litestream, configMap: { name: litestream } }
         - { name: org-env-sync, configMap: { name: org-env-sync } }
         - { name: known-hosts, configMap: { name: github-known-hosts } }
+        - { name: git-passwd, configMap: { name: git-passwd } }
         - { name: org-env-key, secret: { secretName: org-env-deploy-key, defaultMode: 0440, optional: true } }
         - { name: tmp, emptyDir: {} }
 ---
