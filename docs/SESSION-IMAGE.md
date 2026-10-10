@@ -103,3 +103,5 @@ provider sets it from `envOverrides`), `JARVIS_STATUS_MS`, `JARVIS_DAEMON_PORT`.
 - `integration/`: the image end to end (the header of `integration.test.ts` lists the checks):
   `docker build -t jarvis3-session:test session-image`, then `cd server && npm ci`, then
   `cd integration && npm ci && npm test` (needs Docker; `SESSION_IMAGE` picks another tag).
+- `integration/fly-e2e.sh`: the same chain on real Fly Machines and a real model, run by hand
+  ([FLY-E2E.md](FLY-E2E.md)).

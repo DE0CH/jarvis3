@@ -44,7 +44,8 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
 11. **One server replica.** Session channels live in the process's memory.
 12. **Local-Docker MachineProvider** (`server/src/docker.ts`, `machines.kind: "docker"`) runs the
     integration test and local runs; it is not for production (a container is not a microVM). The
-    Fly implementation is ported from Jarvis 1 but still untested against real Fly.
+    Fly implementation has passed one manual run against real Fly ([FLY-E2E.md](FLY-E2E.md)); CI
+    still covers only Docker.
 
 ## Spend
 

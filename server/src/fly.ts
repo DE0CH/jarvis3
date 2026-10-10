@@ -1,11 +1,13 @@
 // Fly Machines implementation of MachineProvider. Ported from Jarvis 1's lib/fly.js; one Fly app
 // per instance holds the session machines. Docs: https://fly.io/docs/machines/api/
-// Not exercised against real Fly in this repo's tests (the fake provider stands in).
+// Unit tests use a fake HTTP layer; integration/fly-e2e.sh runs it against real Fly (docs/FLY-E2E.md).
 import type { ExecResult, MachineInfo, MachineProvider, MachineSpec, MachineState } from "./providers.ts";
 import { httpError } from "./errors.ts";
 
 const API = "https://api.machines.dev/v1";
 const RETRIES_429 = 4;
+/** Waits (≤ 60 s each) for a just-created machine to become startable: ~10 min for a cold image pull. */
+const START_WAITS = 10;
 
 interface FlyMachine {
   id: string;
@@ -82,7 +84,23 @@ export class FlyMachines implements MachineProvider {
     return this.#view(m);
   }
   async start(id: string): Promise<void> {
-    await this.#call("POST", `/apps/${this.#o.app}/machines/${id}/start`);
+    // A machine created with skip_launch sits in "created" while Fly pulls its image and prepares
+    // it, and Fly answers a start then with 412 ("unable to start machine from current state:
+    // 'created'"). It turns "stopped" once ready: wait for that (Fly's /wait holds up to 60 s;
+    // 408 = not yet), then start. Bounded, so a broken image fails the task instead of hanging.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.#call("POST", `/apps/${this.#o.app}/machines/${id}/start`);
+        return;
+      } catch (e) {
+        if ((e as { flyStatus?: number }).flyStatus !== 412 || attempt >= START_WAITS) throw e;
+      }
+      try {
+        await this.#call("GET", `/apps/${this.#o.app}/machines/${id}/wait?state=stopped&timeout=60`);
+      } catch (e) {
+        if ((e as { flyStatus?: number }).flyStatus !== 408) throw e;
+      }
+    }
   }
   async destroy(id: string): Promise<void> {
     try {

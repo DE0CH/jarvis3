@@ -54,7 +54,7 @@ export function dockerGateway(): string {
   return out;
 }
 
-function makeOrgRepo(dir: string): { mirror: string; commit: string } {
+export function makeOrgRepo(dir: string): { mirror: string; commit: string } {
   const work = join(dir, "org-work");
   for (const [p, text] of Object.entries(ORG_FILES)) {
     mkdirSync(dirname(join(work, p)), { recursive: true });

@@ -23,7 +23,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `bootstrapAdmins` | emails that get the first admin role whatever their groups say (suspension still wins) |
 | `roles` | role → `{openrouterMonthlyUsd, machineHoursPerMonth, admin?}`. `null` = no limit. Key order is the precedence when a user is in several mapped groups. At least one role has `admin: true` |
 | `models`, `defaultModel` | the curated OpenRouter model list (`{id, label}`) and its default |
-| `machines` | `kind: "fly"`: `app` (one per instance), `org`, `region`, session `image`, `guest` size, `rootfsGb`. `kind: "docker"` (CI and local runs only): `image`, `guest`, `socketPath`, `network`, `envOverrides`, `extraHosts` |
+| `machines` | `kind: "fly"`: `app` (one per instance, made by the operator and kept; the server never creates or deletes it, so `FLY_API_TOKEN` can be scoped to that app), `org`, `region`, session `image`, `guest` size, `rootfsGb`. `kind: "docker"` (CI and local runs only): `image`, `guest`, `socketPath`, `network`, `envOverrides`, `extraHosts` |
 | `storage` | S3 endpoint, region, bucket (Hetzner Object Storage in the instance's own project) |
 | `orgEnv.mirrorPath` | a bare mirror of the org-env repo kept fetched by the deployment (read-only deploy key); `/data/org-env.git` under the standard deployment (docs/DEPLOY.md) |
 | `orgEnv.commit` | the full 40-hex commit every new session loads; changing it is a deploy |

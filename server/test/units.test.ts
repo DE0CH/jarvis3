@@ -91,6 +91,26 @@ test("FlyMachines: create payload, 429 retry, exec, destroy of a gone machine", 
   assert.match(calls.at(-1)!.url, /machines\/m1\?force=true$/);
 });
 
+test("FlyMachines: start waits while a skip_launch machine is still 'created' (412), then starts", async () => {
+  let starts = 0;
+  const { f, calls } = fakeHttp((c) => {
+    if (c.url.endsWith("/start")) {
+      starts++;
+      return starts < 3 ? new Response('{"error":"failed_precondition: unable to start machine from current state: \'created\'"}', { status: 412 }) : Response.json({ ok: true });
+    }
+    if (c.url.includes("/wait?state=stopped")) return starts === 1 ? new Response("timeout", { status: 408 }) : Response.json({ ok: true });
+    return Response.json({});
+  });
+  const fly = new FlyMachines({ token: "t", app: "a", region: "ams", fetch: f, sleep: async () => {} });
+  await fly.start("m1");
+  assert.deepEqual(
+    calls.map((c) => c.url.replace("https://api.machines.dev/v1/apps/a/machines/m1", "")),
+    ["/start", "/wait?state=stopped&timeout=60", "/start", "/wait?state=stopped&timeout=60", "/start"],
+  );
+  const failing = fakeHttp((c) => (c.url.endsWith("/start") ? new Response("bad", { status: 500 }) : Response.json({})));
+  await assert.rejects(new FlyMachines({ token: "t", app: "a", region: "ams", fetch: failing.f }).start("m1"), /500/);
+});
+
 test("S3BlobStore: signed requests, presigned URLs carry a signature and expiry, copy uses x-amz-copy-source", async () => {
   const { f, calls } = fakeHttp((c) => (c.method === "HEAD" ? new Response(null, { status: 404 }) : new Response("", { status: 200 })));
   const real = globalThis.fetch;
