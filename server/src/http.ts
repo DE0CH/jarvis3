@@ -29,6 +29,7 @@ import * as schedules from "./schedules.ts";
 import * as wakeups from "./wakeups.ts";
 import * as inbox from "./inbox.ts";
 import * as posts from "./posts.ts";
+import * as push from "./push.ts";
 import { validTimeZone } from "./cron.ts";
 
 export const VERSION = "0.1.0";
@@ -157,7 +158,7 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok({
       ...users.userDetail(ctx, user),
       unreadNotices: notices.unreadCount(ctx, user.id),
-      features: { suggestions: suggestions.suggestionsEnabled(ctx), ...tools.featureFlag(ctx), files: true, search: true, schedules: true },
+      features: { suggestions: suggestions.suggestionsEnabled(ctx), ...tools.featureFlag(ctx), files: true, search: true, schedules: true, ...(push.pushFeature(ctx) ? { push: push.pushFeature(ctx)! } : {}) },
       pendingApprovals: approvals.pendingCount(ctx, userOf(r.principal)),
       isOwner: approvals.isOwner(ctx, user),
       unreadPosts: posts.unreadPosts(ctx, user.id),
@@ -412,6 +413,38 @@ export function defineRoutes(ctx: Ctx): Routes {
     authorize(r.principal, { kind: "member" });
     const unreadNotices = notices.markRead(ctx, userOf(r.principal).user.id, (await r.body()) as A.MarkNoticesReadRequest);
     return ok({ unreadNotices } satisfies A.MarkNoticesReadResult);
+  });
+
+  // ---- push notifications (section 16) ---------------------------------------------------------------
+  // Everything here is the caller's own: their kinds, their subscriptions. A subscription id that
+  // isn't theirs is the same 404 as one that doesn't exist (an admin may remove anyone's).
+  route("GET", "/api/push", (r) => {
+    authorize(r.principal, { kind: "member" });
+    return ok(push.settings(ctx, userOf(r.principal).user.id) satisfies A.PushSettings);
+  });
+
+  route("PUT", "/api/push/kinds", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    return ok(push.setKinds(ctx, userOf(r.principal).user.id, (await r.body()) as A.SetPushKindsRequest) satisfies A.PushSettings);
+  });
+
+  route("POST", "/api/push/subscriptions", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const p = r.principal as Extract<Principal, { kind: "user" }>;
+    return ok(push.subscribe(ctx, p.user.id, p.deviceId, (await r.body()) as A.CreatePushSubscriptionRequest) satisfies A.PushSubscriptionView, 201);
+  });
+
+  route("DELETE", "/api/push/subscriptions/:id", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const s = push.getSubscription(ctx, r.params.id!);
+    authorize(r.principal, { kind: "owned", ownerId: s ? s.user_id : "\0none", what: "subscription" });
+    push.unsubscribe(ctx, s!.id);
+    return ok({ ok: true });
+  });
+
+  route("POST", "/api/push/test", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    return ok((await push.sendTest(ctx, userOf(r.principal).user.id)) satisfies A.PushTestResult);
   });
 
   // ---- approvals ------------------------------------------------------------------------------------

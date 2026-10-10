@@ -14,6 +14,7 @@ function webDir(): string {
   mkdirSync(join(root, "_expo/static/js/web"), { recursive: true });
   writeFileSync(join(root, "_expo/static/js/web/entry-0123abcd.js"), "console.log(1)");
   writeFileSync(join(root, "favicon.ico"), "ico");
+  writeFileSync(join(root, "jarvis3-push-sw.js"), "self.addEventListener('push', () => {})");
   writeFileSync(join(root, "..", "outside-secret.txt"), "nope");
   return root;
 }
@@ -65,6 +66,10 @@ test("the web build is served at the root with a valid Access JWT; app routes ge
     assert.equal(js.text, "console.log(1)");
     assert.equal(js.headers.get("content-type"), "text/javascript; charset=utf-8");
     assert.equal(js.headers.get("cache-control"), "public, max-age=31536000, immutable");
+    // the push service worker is re-checked on every registration
+    const sw = await get(h, jwt, "/jarvis3-push-sw.js");
+    assert.equal(sw.headers.get("content-type"), "text/javascript; charset=utf-8");
+    assert.equal(sw.headers.get("cache-control"), "no-cache");
     const head = await get(h, jwt, "/favicon.ico", "HEAD");
     assert.equal(head.status, 200);
     assert.equal(head.headers.get("content-length"), "3");

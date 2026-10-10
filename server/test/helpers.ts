@@ -17,6 +17,7 @@ import { WebApp } from "../src/web.ts";
 import type { Clock } from "../src/clock.ts";
 import type { HttpChecker, OrgEnvForge } from "../src/providers.ts";
 import type { ToolProviders } from "../src/tools/types.ts";
+import type { PushSender } from "../src/push.ts";
 
 export const TEAM = "example.cloudflareaccess.com";
 export const AUD = "test-audience-tag";
@@ -121,7 +122,7 @@ export interface Harness {
 }
 
 export async function harness(
-  o: { config?: Partial<Config>; orgFiles?: Record<string, string>; webDir?: string; forge?: OrgEnvForge; actionSecrets?: Record<string, Record<string, string>>; tools?: ToolProviders; checker?: HttpChecker } = {},
+  o: { config?: Partial<Config>; orgFiles?: Record<string, string>; webDir?: string; forge?: OrgEnvForge; actionSecrets?: Record<string, Record<string, string>>; tools?: ToolProviders; checker?: HttpChecker; push?: PushSender } = {},
 ): Promise<Harness> {
   const clock = new TestClock();
   const signer = await makeSigner(clock);
@@ -135,7 +136,7 @@ export async function harness(
   const jarvis = createJarvis({
     config: testConfig(o.config),
     db: openDb(":memory:"),
-    providers: { machines, blobs, keys, directory, deviceTokens, orgEnv: new FakeOrgEnv(o.orgFiles ?? ORG_FILES), forge: o.forge ?? null, ...(o.tools ? { tools: o.tools } : {}), ...(o.checker ? { checker: o.checker } : {}) },
+    providers: { machines, blobs, keys, directory, deviceTokens, orgEnv: new FakeOrgEnv(o.orgFiles ?? ORG_FILES), forge: o.forge ?? null, ...(o.tools ? { tools: o.tools } : {}), ...(o.checker ? { checker: o.checker } : {}), ...(o.push ? { push: o.push } : {}) },
     dbKey: randomBytes(32).toString("base64"),
     sessionGateClientSecret: "gate-secret",
     clock,

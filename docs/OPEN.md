@@ -62,7 +62,7 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
     snapshot takes), from the server's own records, not from Fly's bill.
 15. **Budget rates** are Jarvis 1's Fly rates (shared/performance CPU + RAM); volumes and bandwidth
     are not counted (sessions use no volumes).
-16. **Notifications are in-app notices only** (`GET /api/notices`); no push or email yet.
+16. **Notifications are in-app notices plus push** (API.md section 16); no email.
 
 ## Layers
 
@@ -162,8 +162,8 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
     paused or destroyed (then it is cancelled). While the agent waits its turn is running, so the
     task counts as busy and is not idle-paused: the machine (and its machine hours) keeps running
     until the decision. A deadline per kind would bound that cost.
-45. **Notifications are in-app notices** (`approval_needed`, `approval_decided`); no push yet
-    (point 16).
+45. **Approvals notify through notices** (`approval_needed`, `approval_decided`), which are pushed
+    (points 75-80).
 46. **One mailbox per `smtp.send` action.** Sending as each user from their own mailbox is Tier 1
     (their own OAuth) and comes with Tier 1; until then a `self` guard on the user's own mail CLI
     covers it.
@@ -277,3 +277,25 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
     upload starts again from the beginning, and Cloudflare's 100 MB request limit still caps one
     file (#56). S3 multipart behind a chunked upload route would lift both, at the cost of
     tracking unfinished uploads.
+
+
+## Push notifications (v0.6)
+
+75. **Direct APNs and Web Push, no Expo push service.** The instance holds its own keys (APNs `.p8`,
+    VAPID) and sends itself, so nothing about an organisation's notices passes a third party
+    beyond Apple's and the browsers' own push services. The cost: an instance needs an Apple
+    developer team's APNs key for its app (DESIGN "iOS distribution").
+76. **A push carries no private content**: a fixed title per kind, a fixed body, the unread count,
+    and ids. The lock screen never shows a notice's text; the app fetches it after the tap. A
+    richer preview would need encrypted content (a Notification Service Extension on iOS).
+77. **Kinds are coarser than notice kinds** (nine push kinds), with `question` split out of
+    `approval_needed` so "ask the boss" can be muted without muting approvals. Every kind is on by
+    default; turning push on for a device is the opt-in.
+78. **A Web Push endpoint must be on a known push service** (FCM, Mozilla, Apple, Windows by
+    default), because the server POSTs to whatever a member registers. Another browser's service
+    needs `push.webPush.allowedHosts`.
+79. **One push a minute per kind and task** (in memory, so a restart may let one more through):
+    a task posting 60 times an hour doesn't buzz a phone 60 times.
+80. **Registering an address that exists moves it to the caller** rather than refusing: on a shared
+    computer or a phone that changed hands, the last person to turn push on gets the pushes. An
+    APNs token comes only from a paired device and dies with the device's revocation.

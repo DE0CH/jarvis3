@@ -7,6 +7,7 @@ import type { BlobStore, DeviceTokenIssuer, DirectoryProvider, HttpChecker, KeyP
 import type { ChannelHub } from "./channel.ts";
 import type { NoticeView } from "./api-types.ts";
 import { randomId } from "./crypto.ts";
+import { notifyPush, type PushSender } from "./push.ts";
 import type { EventEmitter } from "node:events";
 import type { ToolProviders } from "./tools/types.ts";
 
@@ -23,11 +24,14 @@ export interface Providers {
   tools?: ToolProviders;
   /** Condition wakeups' HTTP checks (default: PublicHttpChecker, public HTTPS only). */
   checker?: HttpChecker;
+  /** Push notifications (push.ts). Absent or null: notices stay in-app only. */
+  push?: PushSender | null;
 }
 
 export type Logger = (msg: string, extra?: Record<string, unknown>) => void;
 
-export interface Ctx extends Omit<Providers, "tools"> {
+export interface Ctx extends Omit<Providers, "tools" | "push"> {
+  push: PushSender | null;
   tools: ToolProviders;
   config: Config;
   db: Db;
@@ -68,8 +72,16 @@ export class OpTracker {
   }
 }
 
+/** A notice for one user; also pushed to their devices and browsers when they want this kind (push.ts). */
 export function addNotice(ctx: Ctx, userId: string, kind: NoticeView["kind"], text: string, taskId: string | null = null, approvalId: string | null = null): void {
+  const id = randomId();
   ctx.db
     .prepare("INSERT INTO notices(id, user_id, kind, text, task_id, approval_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(randomId(), userId, kind, text, taskId, approvalId, ctx.clock.now());
+    .run(id, userId, kind, text, taskId, approvalId, ctx.clock.now());
+  try {
+    notifyPush(ctx, { id, userId, kind, taskId, approvalId });
+  } catch (e) {
+    // a push problem never undoes or blocks the notice
+    ctx.log("push: not sent", { notice: id, error: (e as Error).message });
+  }
 }

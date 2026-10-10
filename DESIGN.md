@@ -1,8 +1,8 @@
 # Jarvis 3 — design
 
 Status: design agreed 2026-10-08; v0.1 of the server, session image, app variant and deployment is
-built (docs/), actions and approvals (docs/ACTIONS.md), the Tier 0 web tools (docs/TOOLS.md), the user's files with first-prompt attachments, transcript search (docs/API.md sections 13 and 14), and scheduled tasks, wakeups and channels
-(docs/API.md section 15). Jarvis 1 and Jarvis 2 (`DE0CH/jarvis2`) are separate projects and stay as they are;
+built (docs/), actions and approvals (docs/ACTIONS.md), the Tier 0 web tools (docs/TOOLS.md), the user's files with first-prompt attachments, transcript search (docs/API.md sections 13 and 14), scheduled tasks, wakeups and channels
+(docs/API.md section 15), and push notifications for notices (docs/API.md section 16). Jarvis 1 and Jarvis 2 (`DE0CH/jarvis2`) are separate projects and stay as they are;
 Jarvis 3 is a new codebase.
 
 ## What Jarvis 3 is
@@ -160,7 +160,8 @@ user's role determines what their machines hold.
 - **Asking for access:** a session that needs something its role lacks files a request with a reason. The
   admin grants it for that session or for the role. Over time roles settle and requests become rare.
 - **Ask the boss:** for judgement calls the agent drafts a question; the admin answers in the app.
-- All approvals land in one queue in the app, plus a notification.
+- All approvals land in one queue in the app, plus a notification (an in-app notice, pushed to the
+  person's phone and browsers: docs/API.md section 16).
 
 ## Scheduled tasks, wakeups and channels
 

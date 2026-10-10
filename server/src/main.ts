@@ -1,5 +1,6 @@
 // Production entry: config from JARVIS_CONFIG, secrets from the environment, state in JARVIS_DB.
-import { loadActionSecrets, loadConfig, loadSecrets, loadToolSecrets } from "./config.ts";
+import { loadActionSecrets, loadConfig, loadPushSecrets, loadSecrets, loadToolSecrets } from "./config.ts";
+import { RealPushSender } from "./push.ts";
 import { buildToolProviders } from "./tools/registry.ts";
 import { openDb } from "./db.ts";
 import { createJarvis } from "./app.ts";
@@ -43,6 +44,9 @@ const forge = sg
     })
   : null;
 
+// push notifications: only the channels the config names, with their keys from the environment
+const push = config.push && (config.push.apns || config.push.webPush) ? new RealPushSender(config.push, loadPushSecrets(config)) : null;
+
 const webDir = process.env.JARVIS_WEB_DIR;
 const jarvis = createJarvis({
   config,
@@ -69,6 +73,7 @@ const jarvis = createJarvis({
     orgEnv: new GitOrgEnv(config.orgEnv.mirrorPath, config.orgEnv.commit),
     forge,
     tools: buildToolProviders(config, loadToolSecrets(config)),
+    push,
   },
 });
 

@@ -87,6 +87,7 @@ export function createJarvis(o: JarvisOptions): Jarvis {
     approvalBus,
     inboxBus,
     checker: o.providers.checker ?? new PublicHttpChecker(),
+    push: o.providers.push ?? null,
   };
   ctxRef = ctx;
   checkToolProviders(ctx);
