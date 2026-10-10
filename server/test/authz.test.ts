@@ -24,8 +24,8 @@ import { enqueue } from "../src/inbox.ts";
 type Who = "owner" | "ownerDevice" | "other" | "admin" | "suspended" | "unknown" | "revokedDevice" | "session" | "gate" | "none";
 const WHO: Who[] = ["owner", "ownerDevice", "other", "admin", "suspended", "unknown", "revokedDevice", "session", "gate", "none"];
 
-/** Route classes: who may call them. */
-type Kind = "member" | "owned" | "admin" | "session";
+/** Route classes: who may call them. `ownerOnly`: the owner, not even an admin. */
+type Kind = "member" | "owned" | "ownerOnly" | "admin" | "session";
 
 interface R {
   kind: Kind;
@@ -135,6 +135,7 @@ const ROUTES: R[] = [
   { kind: "session", method: "GET", path: () => "/api/session/inbox" },
   { kind: "session", method: "POST", path: (i) => `/api/session/inbox/${i.inbox}/ack` },
   { kind: "session", method: "POST", path: () => "/api/session/posts", body: { text: "matrix result" } },
+  { kind: "ownerOnly", method: "POST", path: (i) => `/api/tasks/${i.task}/wakeups`, body: { at: "2026-10-09T09:00:00Z", prompt: "matrix" } },
   { kind: "owned", method: "DELETE", path: (i) => `/api/wakeups/${i.wakeup}` },
   { kind: "owned", method: "DELETE", path: (i) => `/api/schedules/${i.schedule}` },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/pause` },
@@ -149,7 +150,7 @@ function expected(who: Who, kind: Kind): number | "allowed" {
   if (who === "suspended" || who === "unknown" || who === "revokedDevice") return 403;
   if (kind === "session") return who === "session" ? "allowed" : 401;
   if (who === "session" || who === "gate") return 403;
-  if (who === "admin") return "allowed";
+  if (who === "admin") return kind === "ownerOnly" ? 404 : "allowed";
   if (kind === "member") return "allowed";
   if (kind === "admin") return 404;
   return who === "owner" || who === "ownerDevice" ? "allowed" : 404;

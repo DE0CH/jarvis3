@@ -125,6 +125,7 @@ Error body (every non-2xx JSON answer):
 | GET, PATCH, DELETE | `/api/schedules/:id` | O, A |
 | POST | `/api/schedules/:id/run` | O, A |
 | GET | `/api/wakeups` | M (own tasks'); `?taskId=T`: O of T, A; `?userId=U`: O of U, A; `?all=1`: A |
+| POST | `/api/tasks/:id/wakeups` | O only (the task's owner; an admin gets the 404) |
 | DELETE | `/api/wakeups/:id` | O (the task's owner), A |
 | GET | `/api/channels` | M (own tasks'); `?userId=U`: O of U, A; `?all=1`: A |
 | GET | `/api/tasks/:id/posts` | O, A |
@@ -155,7 +156,8 @@ Error body (every non-2xx JSON answer):
 
 ¹ `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`.
 
-`server/test/authz.test.ts` checks this whole table for ten kinds of caller, except the owner-only
+`server/test/authz.test.ts` checks this whole table for ten kinds of caller (an owner-only route as
+its own class), except the owner-only
 passkey routes, which `server/test/approvals.test.ts` covers (anyone but the owner gets 404).
 
 ## 3. Identity and devices
@@ -735,6 +737,10 @@ first prompt's attachments, and what a session saves for them. Types: `FileView`
 - **Limits:** `files.maxFileBytes` per file (default 50 MiB) and `files.quotaBytes` per person
   (default 1 GiB), checked before the upload is read and again when it is recorded (413
   `too_large`); at most 10 000 files per person.
+- **Uploads stream.** The body goes to the bucket as it arrives; the server never holds a whole
+  file. A request may take up to 2 hours (Node's default of 5 minutes would cut off a large file on
+  a slow link). The app streams too: the web sends the picked `File` itself, iOS uploads from the
+  file on disk.
 
 | route | does |
 |---|---|
@@ -846,6 +852,16 @@ every condition given holds: `status` equals, `contains` is in the body, `absent
 (the body differs from the first check's). Plain text only: no regular expressions run on the server.
 At `until` it gives up: `failPrompt` is delivered if given, else the owner gets a `wakeup` notice.
 
+**The owner can wake a task too**, from the app: `POST /api/tasks/:id/wakeups` (`ArmWakeupRequest`
+`{at, prompt?}`) → 201 `WakeupView`. Time only (once, at `at`; `cron` and `check` stay the agent's),
+the same limits (in the future, ≤ 365 days, at most `maxPerTask` armed on the task), and it fires
+the same way. Only the task's owner may: an admin's wakeup would spend the owner's machine hours and
+speak into their conversation, so anyone else gets the uniform 404. Each gets its own name
+(`app-<6 hex>`), so it never replaces one of the agent's; `prompt` defaults to a line saying the
+owner asked to be woken, and the header reads `set by your user from the app`. `WakeupView.setBy`
+is `owner` for these, `task` for the agent's. 409 `conflict` for a task that is archived, being
+destroyed or failed.
+
 States: `armed` → `fired` (one-off, or a recurring one after its last firing) | `expired` (a check
 that gave up) | `cancelled` (by the session, the owner, an admin, a replacement, or the task's
 destroy / failed start / offboarding).
@@ -853,6 +869,7 @@ destroy / failed start / offboarding).
 | route | does |
 |---|---|
 | `GET /api/wakeups[?taskId=…]` → `WakeupList` | armed ones first (soonest first), then the latest others |
+| `POST /api/tasks/:id/wakeups` (`ArmWakeupRequest`) → 201 `WakeupView` | the owner wakes the task once at `at` (above) |
 | `DELETE /api/wakeups/:id` → `WakeupView` | cancel (409 if it isn't armed) |
 | `GET /api/session/wakeups`, `POST /api/session/wakeups`, `DELETE /api/session/wakeups/:name` | the session's own (section 9) |
 

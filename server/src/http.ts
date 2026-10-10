@@ -552,6 +552,14 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok({ wakeups: wakeups.listWakeups(ctx, { userId }).map(wakeups.wakeupView) } satisfies A.WakeupList);
   });
 
+  // The owner wakes their own task at a time. Owner only: an admin's wakeup would spend the owner's
+  // machine hours and speak into their conversation, so for anyone else the task is a uniform 404.
+  route("POST", "/api/tasks/:id/wakeups", async (r) => {
+    const t = ownedTask(ctx, r);
+    if (userOf(r.principal).user.id !== t.user_id) throw httpError("not_found", "no such task");
+    return ok(wakeups.wakeupView(wakeups.armFromOwner(ctx, t, (await r.body()) as A.ArmWakeupRequest)) satisfies A.WakeupView, 201);
+  });
+
   route("DELETE", "/api/wakeups/:id", (r) => {
     const w = ownedWakeup(ctx, r);
     const by = userOf(r.principal).user;

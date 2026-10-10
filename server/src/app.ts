@@ -1,6 +1,7 @@
 // Wiring: build the server from config + state + providers. main.ts passes the real providers,
 // tests pass fakes.
 import { createServer, type Server } from "node:http";
+
 import type { JSONWebKeySet } from "jose";
 import type { Config } from "./config.ts";
 import type { Db } from "./db.ts";
@@ -22,6 +23,9 @@ import { checkToolProviders } from "./tools/registry.ts";
 import { PublicHttpChecker } from "./httpcheck.ts";
 import { wakeupTick } from "./wakeups.ts";
 import { scheduleTick } from "./schedules.ts";
+
+/** How long one request (a file upload's body) may take. */
+export const UPLOAD_TIMEOUT_MS = 2 * 3600_000;
 
 export interface JarvisOptions {
   config: Config;
@@ -97,6 +101,9 @@ export function createJarvis(o: JarvisOptions): Jarvis {
   };
   const routes = defineRoutes(ctx);
   const server = createServer(makeHandler(ctx, resolveDeps, routes, o.web ?? null));
+  // A file upload streams through to the bucket (files.ts); Node's default of 5 minutes for a
+  // whole request would cut a large file off on a slow phone link. Headers still time out at 60 s.
+  server.requestTimeout = UPLOAD_TIMEOUT_MS;
   const upgrade = makeUpgradeHandler(ctx, resolveDeps);
   server.on("upgrade", (req, socket, head) => void upgrade.handler(req, socket, head));
 

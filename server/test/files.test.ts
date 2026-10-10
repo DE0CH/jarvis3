@@ -125,6 +125,44 @@ test("limits: per file, per person, and a body needs its length", () =>
     { files: { maxFileBytes: 100, quotaBytes: 250 } },
   ));
 
+test("an upload streams to the bucket while its body is still arriving, and may take longer than Node's default", { timeout: 15_000 }, () =>
+  withUsers(async (h, u) => {
+    assert.ok(h.jarvis.server.requestTimeout >= 3600_000, "a slow upload isn't cut off after 5 minutes");
+    const alice = await asEmail(h, u.alice);
+    const half = 256 * 1024;
+    let firstChunkAt = -1;
+    let bodyEndedAt = -1;
+    let order = 0;
+    const realPut = h.blobs.putStream.bind(h.blobs);
+    h.blobs.putStream = async (key: string, body: NodeJS.ReadableStream, length: number) => {
+      body.once("data", () => (firstChunkAt = ++order));
+      return realPut(key, body, length);
+    };
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request(
+        h.base + "/api/users/me/files/big/stream.bin",
+        { method: "PUT", headers: { "cf-access-jwt-assertion": alice.jwt!, "content-length": String(2 * half), "content-type": "application/octet-stream" } },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode!);
+        },
+      );
+      req.on("error", reject);
+      req.write(new Uint8Array(half).fill(1));
+      // the second half goes only once the bucket has seen the first: nothing waits for the whole body
+      const wait = setInterval(() => {
+        if (firstChunkAt < 0) return;
+        clearInterval(wait);
+        bodyEndedAt = ++order;
+        req.end(new Uint8Array(half).fill(2));
+      }, 5);
+    });
+    assert.equal(status, 201);
+    assert.ok(firstChunkAt > 0 && firstChunkAt < bodyEndedAt, "the bucket got data before the body was complete");
+    const f = (await call(h, alice, "GET", "/api/users/me/files")).body.files[0];
+    assert.equal(f.size, 2 * half);
+  }));
+
 test("another person's files are a uniform 404; an admin sees and manages them", () =>
   withUsers(async (h, u) => {
     const alice = await asEmail(h, u.alice);

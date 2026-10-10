@@ -934,6 +934,8 @@ export interface WakeupView {
   lastError: string | null;
   checks: number;
   createdAt: IsoTime;
+  /** Who armed it: the task's agent, or its owner from the app (`POST /api/tasks/:id/wakeups`). Absent on servers before it. */
+  setBy?: "task" | "owner";
 }
 
 /**
@@ -970,6 +972,15 @@ export interface SessionWakeupRequest {
   /** check: give up after this (ISO; default 7 days, at most 30). cron: last firing before this. */
   until?: IsoTime;
   failPrompt?: string;
+}
+
+/**
+ * POST /api/tasks/:id/wakeups (the task's owner, from the app): wake the task once at `at`.
+ * `prompt` is what the agent gets then (default: a line saying the owner asked to be woken).
+ */
+export interface ArmWakeupRequest {
+  at: IsoTime;
+  prompt?: string;
 }
 
 /** A message waiting for the task's agent (GET /api/session/inbox). */

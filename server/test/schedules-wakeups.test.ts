@@ -349,6 +349,68 @@ test("wakeups: recurring (cron) re-arms; same name replaces; limits; cancel; des
     config: { ...NO_CAP, wakeups: { maxPerTask: 3 } },
   }));
 
+test("wakeups from the app: the owner wakes their task at a time; checks, limits and who may", () =>
+  world(async (w) => {
+    const { h, alice, bob, admin } = w;
+    const t = await liveTask(w);
+    const path = `/api/tasks/${t.id}/wakeups`;
+    const at = new Date(h.clock.now() + 2 * HOUR).toISOString();
+    const bad = async (body: object, re: RegExp, status = 400) => {
+      const r = await call(h, alice, "POST", path, body);
+      assert.equal(r.status, status, JSON.stringify(r.body));
+      assert.match(r.body.error.message, re);
+    };
+    await bad({}, /at is required/);
+    await bad({ at: "tomorrow" }, /ISO-8601/);
+    await bad({ at: new Date(h.clock.now() - MIN).toISOString() }, /in the past/);
+    await bad({ at: new Date(h.clock.now() + 366 * 24 * HOUR).toISOString() }, /365 days/);
+    await bad({ at, cron: "0 9 * * *" }, /only at and prompt/);
+    await bad({ at, check: { url: "https://example.org", changed: true } }, /only at and prompt/);
+    await bad({ at, prompt: "x".repeat(4001) }, /prompt must be/);
+    // someone else, and an admin, get the same 404 as a missing task
+    const missing = await call(h, alice, "POST", "/api/tasks/ffffffffffffffff/wakeups", { at });
+    for (const who of [bob, admin]) {
+      const r = await call(h, who, "POST", path, { at });
+      assert.equal(r.status, 404);
+      assert.deepEqual(r.body, missing.body);
+    }
+
+    // the owner arms two: each its own name, never replacing the agent's or each other
+    const agents = await call(h, t.session, "POST", "/api/session/wakeups", { inSeconds: 9000, prompt: "the agent's" });
+    const first = await call(h, alice, "POST", path, { at });
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    assert.equal(first.body.setBy, "owner");
+    assert.equal(first.body.kind, "time");
+    assert.equal(first.body.at, at);
+    assert.match(first.body.name, /^app-[0-9a-f]{6}$/);
+    assert.match(first.body.prompt, /asked, from the app, for this task to be woken/);
+    const second = await call(h, alice, "POST", path, { at: new Date(h.clock.now() + 3 * HOUR).toISOString(), prompt: "  Send me the draft  " });
+    assert.equal(second.body.prompt, "Send me the draft");
+    assert.notEqual(second.body.name, first.body.name);
+    const list = (await call(h, alice, "GET", `/api/wakeups?taskId=${t.id}`)).body.wakeups;
+    assert.deepEqual(list.map((x: { state: string; setBy: string }) => [x.state, x.setBy]), [["armed", "owner"], ["armed", "task"], ["armed", "owner"]], "soonest first");
+    assert.equal(agents.body.setBy, "task");
+    // the same cap as the agent's: at most maxPerTask armed on the task
+    await bad({ at }, /at most 3 armed wakeups/, 429);
+    assert.equal((await call(h, alice, "DELETE", `/api/wakeups/${second.body.id}`)).body.state, "cancelled");
+
+    // it fires like any timed wakeup: resumes the paused task, the message names the owner
+    await pauseAndWait(w, t.id);
+    h.clock.advance(2 * HOUR + MIN);
+    await h.jarvis.tick();
+    await h.jarvis.settle();
+    assert.equal((await call(h, alice, "GET", `/api/tasks/${t.id}`)).body.state, "starting", "the owner's wakeup resumed the task");
+    const s2 = await fakeSession(h, t.id);
+    const ib = await call(h, await longSession(h, s2.token), "GET", "/api/session/inbox");
+    assert.equal(ib.body.messages.length, 1);
+    assert.match(ib.body.messages[0].text, new RegExp(`^\\[Jarvis wakeup "${first.body.name}" \\(timed\\), set by your user from the app; now .+\\]\\nYour user asked`));
+
+    // an ended task can't be woken
+    await call(h, alice, "DELETE", `/api/tasks/${t.id}`);
+    await h.jarvis.settle();
+    await bad({ at: new Date(h.clock.now() + HOUR).toISOString() }, /archived/, 409);
+  }, { config: { ...NO_CAP, wakeups: { maxPerTask: 3 } } }));
+
 test("wakeups: condition checks pass, notice changes, and give up with the fail prompt or a notice", () =>
   world(async (w) => {
     const { h, alice, checker } = w;

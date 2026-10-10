@@ -12,7 +12,7 @@
 // A wakeup that can't resume its task (the owner's machine-hour cap, the instance budget) leaves
 // its message in the inbox and the owner a notice; the message arrives when the task next starts.
 import { createHash } from "node:crypto";
-import type { SessionWakeupRequest, WakeupCheck, WakeupView } from "./api-types.ts";
+import type { ArmWakeupRequest, SessionWakeupRequest, WakeupCheck, WakeupView } from "./api-types.ts";
 import type { Ctx } from "./ctx.ts";
 import { addNotice } from "./ctx.ts";
 import type { TaskRow, UserRow } from "./rows.ts";
@@ -47,6 +47,7 @@ export interface WakeupRow {
   last_error: string | null;
   created_at: number;
   updated_at: number;
+  set_by: "task" | "owner";
 }
 
 const DAY = 24 * 3600_000;
@@ -77,6 +78,7 @@ export function wakeupView(w: WakeupRow): WakeupView {
     lastError: w.last_error,
     checks: w.checks,
     createdAt: iso(w.created_at),
+    setBy: w.set_by,
   };
 }
 
@@ -104,7 +106,7 @@ export function listWakeups(ctx: Ctx, o: { userId?: string | null; taskId?: stri
     .all(...args) as unknown as WakeupRow[];
 }
 
-// ---- arming (the session) ------------------------------------------------------------------------------
+// ---- arming (the session, or the owner from the app) ------------------------------------------------------------------------------
 
 const bad = (m: string) => httpError("bad_request", m);
 
@@ -149,7 +151,29 @@ function normalizeCheck(c: unknown): WakeupCheck {
   return out;
 }
 
+/** What the agent gets from an owner's wakeup without a message of its own. */
+export const OWNER_DEFAULT_PROMPT = "Your user asked, from the app, for this task to be woken now. Pick up where you left off, or check whether anything needs doing.";
+
+/**
+ * The task's owner, from the app: wake the task once at `at` (time only; cron and checks are the
+ * agent's). Same limits as the session's: at most `maxPerTask` armed, within 365 days. Each one
+ * gets its own name, so it never replaces the agent's wakeups or an earlier one of the owner's.
+ */
+export function armFromOwner(ctx: Ctx, task: TaskRow, body: ArmWakeupRequest): WakeupRow {
+  if (!body || typeof body !== "object") throw bad("body must be a wakeup");
+  const extra = Object.keys(body).filter((k) => k !== "at" && k !== "prompt");
+  if (extra.length) throw bad(`a wakeup from the app takes only at and prompt (not ${extra.join(", ")})`);
+  if (body.at === undefined || body.at === null) throw bad("at is required");
+  if (task.state === "archived" || task.state === "destroying" || task.state === "failed") throw httpError("conflict", `the task is ${task.state}; it can't be woken`);
+  const prompt = text(body.prompt, "prompt", MAX_PROMPT, false) ?? OWNER_DEFAULT_PROMPT;
+  return arm(ctx, task, { name: `app-${randomId(3)}`, prompt, at: body.at }, "owner");
+}
+
 export function armFromSession(ctx: Ctx, task: TaskRow, body: SessionWakeupRequest): WakeupRow {
+  return arm(ctx, task, body, "task");
+}
+
+function arm(ctx: Ctx, task: TaskRow, body: SessionWakeupRequest, setBy: WakeupRow["set_by"]): WakeupRow {
   if (!body || typeof body !== "object") throw bad("body must be a wakeup");
   const lim = wakeupLimits(ctx.config);
   const now = ctx.clock.now();
@@ -162,7 +186,7 @@ export function armFromSession(ctx: Ctx, task: TaskRow, body: SessionWakeupReque
   const until = body.until === undefined || body.until === null ? null : time(body.until, "until");
   const owner = ctx.db.prepare("SELECT * FROM users WHERE id = ?").get(task.user_id) as unknown as UserRow;
 
-  let row: Omit<WakeupRow, "id" | "state" | "baseline" | "checks" | "fired_at" | "last_error" | "created_at" | "updated_at">;
+  let row: Omit<WakeupRow, "id" | "state" | "baseline" | "checks" | "fired_at" | "last_error" | "created_at" | "updated_at" | "set_by">;
   const base = { task_id: task.id, user_id: task.user_id, name, prompt, fail_prompt: null as string | null, cron: null, time_zone: null, check_spec: null, interval_seconds: null, expires_at: null };
   if (given[0] === "at" || given[0] === "inSeconds") {
     if (failPrompt) throw bad("failPrompt is only for check wakeups");
@@ -211,10 +235,10 @@ export function armFromSession(ctx: Ctx, task: TaskRow, body: SessionWakeupReque
     if (same) update(ctx, same.id, { state: "cancelled", last_error: "replaced by a wakeup with the same name" });
     ctx.db
       .prepare(
-        `INSERT INTO wakeups(id, task_id, user_id, name, kind, prompt, fail_prompt, at, cron, time_zone, check_spec, interval_seconds, expires_at, state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'armed', ?, ?)`,
+        `INSERT INTO wakeups(id, task_id, user_id, name, kind, prompt, fail_prompt, at, cron, time_zone, check_spec, interval_seconds, expires_at, state, created_at, updated_at, set_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'armed', ?, ?, ?)`,
       )
-      .run(id, row.task_id, row.user_id, row.name, row.kind, row.prompt, row.fail_prompt, row.at, row.cron, row.time_zone, row.check_spec, row.interval_seconds, row.expires_at, now, now);
+      .run(id, row.task_id, row.user_id, row.name, row.kind, row.prompt, row.fail_prompt, row.at, row.cron, row.time_zone, row.check_spec, row.interval_seconds, row.expires_at, now, now, setBy);
     ctx.db.exec("COMMIT");
   } catch (e) {
     ctx.db.exec("ROLLBACK");
@@ -244,7 +268,8 @@ export function cancelForTask(ctx: Ctx, taskId: string, why: string): void {
 // ---- firing (the tick) -------------------------------------------------------------------------------------
 
 function header(w: WakeupRow, now: number, what: string): string {
-  return `[Jarvis wakeup "${w.name}" (${what}), set earlier by this task; now ${iso(now)}]`;
+  const by = w.set_by === "owner" ? "set by your user from the app" : "set earlier by this task";
+  return `[Jarvis wakeup "${w.name}" (${what}), ${by}; now ${iso(now)}]`;
 }
 
 /** Put a message in the task's inbox and make sure the task is up to read it. */

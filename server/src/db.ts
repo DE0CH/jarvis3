@@ -338,6 +338,10 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE notices ADD COLUMN approval_id TEXT;
   `,
+  // 9: who armed a wakeup: the task itself, or its owner from the app
+  `
+  ALTER TABLE wakeups ADD COLUMN set_by TEXT NOT NULL DEFAULT 'task';
+  `,
 ];
 
 export type Db = DatabaseSync;

@@ -267,4 +267,13 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
 72. **Cron in a zone follows classic cron**: a wall-clock time skipped by a spring-forward change
     doesn't fire that day, and one repeated by a fall-back change can fire twice (only for
     schedules with minutes in the repeated hour, typically 01:00–02:00).
-
+73. **The owner can arm a wakeup from the app, time only, and only the owner** (`POST
+    /api/tasks/:id/wakeups`). Cron and condition wakeups stay the agent's: they need the agent to
+    know what it is waiting for. An admin can see and cancel a person's wakeups but not arm one, since
+    it would spend the owner's machine hours and add a message to their conversation. Alternative:
+    let admins arm too (the `owned` rule), or offer the repeat picker of the schedule form.
+74. **Uploads are one streamed request** (no chunked or resumable upload). The server streams the
+    body to the bucket and allows a request 2 hours; the app streams from the file. A cut-off
+    upload starts again from the beginning, and Cloudflare's 100 MB request limit still caps one
+    file (#56). S3 multipart behind a chunked upload route would lift both, at the cost of
+    tracking unfinished uploads.
