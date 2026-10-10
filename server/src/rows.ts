@@ -18,6 +18,7 @@ export interface UserRow {
   created_at: number;
   updated_at: number;
   status_changed_at: number;
+  time_zone: string | null;
 }
 
 export interface DeviceRow {
@@ -52,6 +53,7 @@ export interface TaskRow {
   agent_id: string | null;
   /** JSON string[]: the first prompt's attachments (paths in the owner's files), or null. */
   attachments: string | null;
+  schedule_id: string | null;
 }
 
 export interface KeyRow {

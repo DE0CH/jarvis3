@@ -257,6 +257,83 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (task_id, agent_id)
   );
   `,
+  // 7: scheduled tasks, wakeups (with the tasks' inboxes), channels (posts), the user's time zone
+  `
+  ALTER TABLE users ADD COLUMN time_zone TEXT;
+  ALTER TABLE tasks ADD COLUMN schedule_id TEXT;
+  CREATE TABLE schedules (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    model TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    time_zone TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    next_run_at INTEGER,                          -- ms; NULL when disabled or never again
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX schedules_user ON schedules(user_id);
+  CREATE INDEX schedules_due ON schedules(next_run_at);
+  CREATE TABLE schedule_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    due_at INTEGER NOT NULL,
+    ran_at INTEGER NOT NULL,
+    manual INTEGER NOT NULL DEFAULT 0,
+    result TEXT NOT NULL CHECK (result IN ('started','skipped_cap','skipped_budget','skipped_overlap','missed','failed')),
+    task_id TEXT,
+    error TEXT
+  );
+  CREATE INDEX schedule_runs_schedule ON schedule_runs(schedule_id);
+  CREATE TABLE wakeups (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    user_id TEXT NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('time','check')),
+    prompt TEXT NOT NULL,
+    fail_prompt TEXT,
+    at INTEGER,                                   -- time: next firing; check: next check
+    cron TEXT,
+    time_zone TEXT,
+    check_spec TEXT,                              -- JSON WakeupCheck
+    interval_seconds INTEGER,
+    expires_at INTEGER,
+    state TEXT NOT NULL CHECK (state IN ('armed','fired','expired','cancelled')),
+    baseline TEXT,                                -- check: sha256 of the first body (for "changed")
+    checks INTEGER NOT NULL DEFAULT 0,
+    fired_at INTEGER,
+    last_error TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX wakeups_task ON wakeups(task_id);
+  CREATE INDEX wakeups_due ON wakeups(state, at);
+  CREATE TABLE inbox (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    delivered_at INTEGER
+  );
+  CREATE INDEX inbox_task ON inbox(task_id, delivered_at);
+  CREATE TABLE posts (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    user_id TEXT NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    read_at INTEGER
+  );
+  CREATE INDEX posts_task ON posts(task_id);
+  CREATE INDEX posts_user ON posts(user_id, read_at);
+  `,
 ];
 
 export type Db = DatabaseSync;

@@ -203,6 +203,10 @@ export interface Config {
   tools?: ToolsConfig;
   /** The users' files (docs/API.md section 13). Every field has a default. */
   files?: FilesConfig;
+  /** Scheduled tasks (docs/API.md section 12). Every field optional. */
+  schedules?: SchedulesConfig;
+  /** Wakeups (docs/API.md section 12). Every field optional. */
+  wakeups?: WakeupsConfig;
 }
 
 export interface FilesConfig {
@@ -220,6 +224,35 @@ export const FILE_DEFAULTS = { maxFileBytes: 50 * 1024 * 1024, quotaBytes: 1024 
 export function filesConfig(c: Config): Required<FilesConfig> {
   return { ...FILE_DEFAULTS, ...(c.files ?? {}) };
 }
+
+export interface SchedulesConfig {
+  /** Schedules one person may have (default 20). */
+  maxPerUser?: number;
+  /** The shortest allowed gap between two firings of one schedule, minutes (default 60). */
+  minIntervalMinutes?: number;
+  /** A firing the server missed (it was down) still runs if it is at most this late, minutes (default 60). */
+  missedGraceMinutes?: number;
+}
+
+export interface WakeupsConfig {
+  /** Armed wakeups one task may have (default 20). */
+  maxPerTask?: number;
+  /** The shortest check interval, seconds (default 60). */
+  minCheckSeconds?: number;
+  /** The shortest gap between firings of a recurring wakeup, minutes (default 15). */
+  minIntervalMinutes?: number;
+}
+
+export const scheduleLimits = (c: Config) => ({
+  maxPerUser: c.schedules?.maxPerUser ?? 20,
+  minIntervalMinutes: c.schedules?.minIntervalMinutes ?? 60,
+  missedGraceMinutes: c.schedules?.missedGraceMinutes ?? 60,
+});
+export const wakeupLimits = (c: Config) => ({
+  maxPerTask: c.wakeups?.maxPerTask ?? 20,
+  minCheckSeconds: c.wakeups?.minCheckSeconds ?? 60,
+  minIntervalMinutes: c.wakeups?.minIntervalMinutes ?? 15,
+});
 
 /** Secrets come only from the environment. */
 export interface Secrets {
@@ -270,6 +303,15 @@ export function validateConfig(c: Config): Config {
     } else if (sg.auth?.kind !== "token") fail("suggestions.auth.kind must be token or app");
   }
   if (c.owner !== undefined && !/^[^@\s]+@[^@\s]+$/.test(c.owner)) fail("owner must be an email");
+  const nonNeg = (v: unknown, what: string) => {
+    if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) fail(`${what} must be a number ≥ 0`);
+  };
+  nonNeg(c.schedules?.maxPerUser, "schedules.maxPerUser");
+  nonNeg(c.schedules?.minIntervalMinutes, "schedules.minIntervalMinutes");
+  nonNeg(c.schedules?.missedGraceMinutes, "schedules.missedGraceMinutes");
+  nonNeg(c.wakeups?.maxPerTask, "wakeups.maxPerTask");
+  nonNeg(c.wakeups?.minCheckSeconds, "wakeups.minCheckSeconds");
+  nonNeg(c.wakeups?.minIntervalMinutes, "wakeups.minIntervalMinutes");
   for (const [name, a] of Object.entries(c.actions ?? {})) {
     if (!/^[a-z0-9_]{1,64}$/.test(name)) fail(`actions: bad name ${name}`);
     if (!a.type || !a.label) fail(`actions.${name}: type and label are required`);

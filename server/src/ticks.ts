@@ -1,4 +1,5 @@
-// Background loops: idle auto-pause, per-user machine-hour caps, the instance budget guard.
+// Background loops: idle auto-pause, per-user machine-hour caps, the instance budget guard
+// (wakeups.ts and schedules.ts have their own ticks, run from app.ts after these).
 // (Directory sync runs on its own interval, see app.ts.) Each tick is safe to run at any time.
 import type { Ctx } from "./ctx.ts";
 import { addNotice, isAdminRole } from "./ctx.ts";
@@ -9,6 +10,7 @@ import { applySample, budgetState, budgetThresholds, hourlyMachineCostUSD, limit
 import { listSuggestions, refreshSuggestions } from "./suggestions.ts";
 import { liveTasksOf, pauseTask } from "./tasks.ts";
 import type { TaskRow } from "./rows.ts";
+import { hasPending } from "./inbox.ts";
 
 function tryPause(ctx: Ctx, t: TaskRow, reason: "idle" | "machine_hours_cap" | "instance_budget"): boolean {
   try {
@@ -25,7 +27,8 @@ export function idleTick(ctx: Ctx): string[] {
   const cutoff = ctx.clock.now() - ctx.config.idleMinutes * 60_000;
   const paused: string[] = [];
   for (const t of liveTasksOf(ctx, null)) {
-    if (t.state === "idle" && t.idle_since !== null && t.idle_since <= cutoff && tryPause(ctx, t, "idle")) paused.push(t.id);
+    // a task with a wakeup message on its way isn't idle: it is about to get a turn
+    if (t.state === "idle" && t.idle_since !== null && t.idle_since <= cutoff && !hasPending(ctx, t.id) && tryPause(ctx, t, "idle")) paused.push(t.id);
   }
   return paused;
 }

@@ -3,7 +3,7 @@ import type { Config } from "./config.ts";
 import type { Db } from "./db.ts";
 import type { Clock } from "./clock.ts";
 import type { Sealer } from "./crypto.ts";
-import type { BlobStore, DeviceTokenIssuer, DirectoryProvider, KeyProvisioner, MachineProvider, OrgEnvForge, OrgEnvSource } from "./providers.ts";
+import type { BlobStore, DeviceTokenIssuer, DirectoryProvider, HttpChecker, KeyProvisioner, MachineProvider, OrgEnvForge, OrgEnvSource } from "./providers.ts";
 import type { ChannelHub } from "./channel.ts";
 import type { NoticeView } from "./api-types.ts";
 import { randomId } from "./crypto.ts";
@@ -21,6 +21,8 @@ export interface Providers {
   forge?: OrgEnvForge | null;
   /** Tier 0 tools (tools/registry.ts builds them from config). Absent: none. */
   tools?: ToolProviders;
+  /** Condition wakeups' HTTP checks (default: PublicHttpChecker, public HTTPS only). */
+  checker?: HttpChecker;
 }
 
 export type Logger = (msg: string, extra?: Record<string, unknown>) => void;
@@ -45,6 +47,9 @@ export interface Ctx extends Omit<Providers, "tools"> {
   actionSecrets: Record<string, Record<string, string>>;
   /** Emits the approval id whenever an approval changes (the sessions' long polls wait on it). */
   approvalBus: EventEmitter;
+  /** Emits the task id whenever a message lands in a task's inbox (the sessions' long polls wait on it). */
+  inboxBus: EventEmitter;
+  checker: HttpChecker;
 }
 
 export const isAdminRole = (config: Config, role: string): boolean => !!config.roles[role]?.admin;

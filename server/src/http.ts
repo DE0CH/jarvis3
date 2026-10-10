@@ -25,6 +25,11 @@ import * as tools from "./tools/index.ts";
 import { checkRelay, parseTarget, runTunnel } from "./tools/relay.ts";
 import * as files from "./files.ts";
 import * as transcripts from "./transcripts.ts";
+import * as schedules from "./schedules.ts";
+import * as wakeups from "./wakeups.ts";
+import * as inbox from "./inbox.ts";
+import * as posts from "./posts.ts";
+import { validTimeZone } from "./cron.ts";
 
 export const VERSION = "0.1.0";
 
@@ -94,6 +99,41 @@ function searchLimit(sp: URLSearchParams): number {
   return n;
 }
 
+function ownedSchedule(ctx: Ctx, r: Req) {
+  authorize(r.principal, { kind: "member" });
+  const s = schedules.getSchedule(ctx, r.params.id!);
+  authorize(r.principal, { kind: "owned", ownerId: s ? s.user_id : "\0none", what: "schedule" });
+  if (!s) throw httpError("not_found", "no such schedule");
+  return s;
+}
+
+function ownedWakeup(ctx: Ctx, r: Req) {
+  authorize(r.principal, { kind: "member" });
+  const w = wakeups.getWakeup(ctx, r.params.id!);
+  authorize(r.principal, { kind: "owned", ownerId: w ? w.user_id : "\0none", what: "wakeup" });
+  if (!w) throw httpError("not_found", "no such wakeup");
+  return w;
+}
+
+/**
+ * Whose things a list route shows: the caller's own; `?userId=U` (U or an admin); `?all=1` (admins,
+ * everyone's, returned as null).
+ */
+function listScope(r: Req, what: string): string | null {
+  authorize(r.principal, { kind: "member" });
+  const { user } = userOf(r.principal);
+  if (r.url.searchParams.get("all") === "1") {
+    authorize(r.principal, { kind: "admin", what });
+    return null;
+  }
+  const forUser = r.url.searchParams.get("userId");
+  if (forUser) {
+    authorize(r.principal, { kind: "owned", ownerId: forUser, what: "user" });
+    return forUser;
+  }
+  return user.id;
+}
+
 export function defineRoutes(ctx: Ctx): Routes {
   const routes: Route[] = [];
   const route = (method: string, path: string, handler: Handler, o: { auth?: boolean } = {}): void => {
@@ -120,6 +160,7 @@ export function defineRoutes(ctx: Ctx): Routes {
       features: { suggestions: suggestions.suggestionsEnabled(ctx), ...tools.featureFlag(ctx), files: true, search: true },
       pendingApprovals: approvals.pendingCount(ctx, userOf(r.principal)),
       isOwner: approvals.isOwner(ctx, user),
+      unreadPosts: posts.unreadPosts(ctx, user.id),
     } satisfies A.MeView);
   });
 
@@ -465,6 +506,71 @@ export function defineRoutes(ctx: Ctx): Routes {
     return { raw: { type: "text/html; charset=utf-8", body, headers: PAGE_HEADERS } };
   });
 
+  // ---- scheduled tasks (section 12) ---------------------------------------------------------------
+  route("GET", "/api/schedules", (r) => {
+    const userId = listScope(r, "schedule list");
+    return ok({ schedules: schedules.listSchedules(ctx, userId).map((x) => schedules.scheduleView(ctx, x)) } satisfies A.ScheduleList);
+  });
+
+  route("POST", "/api/schedules", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const s = schedules.createSchedule(ctx, userOf(r.principal).user, (await r.body()) as A.CreateScheduleRequest);
+    return ok(schedules.scheduleView(ctx, s) satisfies A.ScheduleView, 201);
+  });
+
+  route("POST", "/api/schedules/preview", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    return ok(schedules.preview(ctx, (await r.body()) as A.SchedulePreviewRequest) satisfies A.SchedulePreview);
+  });
+
+  route("GET", "/api/schedules/:id", (r) => ok(schedules.scheduleDetail(ctx, ownedSchedule(ctx, r)) satisfies A.ScheduleDetail));
+
+  route("PATCH", "/api/schedules/:id", async (r) => {
+    const s = ownedSchedule(ctx, r);
+    return ok(schedules.scheduleView(ctx, schedules.updateSchedule(ctx, s, (await r.body()) as A.UpdateScheduleRequest)) satisfies A.ScheduleView);
+  });
+
+  route("DELETE", "/api/schedules/:id", (r) => {
+    schedules.deleteSchedule(ctx, ownedSchedule(ctx, r));
+    return ok({ ok: true });
+  });
+
+  route("POST", "/api/schedules/:id/run", async (r) => {
+    const s = ownedSchedule(ctx, r);
+    const res = await schedules.runNow(ctx, s);
+    return ok({ run: res.run, task: res.task ? tasks.taskView(ctx, res.task) : null } satisfies A.ScheduleRunNowResult, res.task ? 201 : 200);
+  });
+
+  // ---- wakeups (section 12) ---------------------------------------------------------------------------
+  route("GET", "/api/wakeups", (r) => {
+    const taskId = r.url.searchParams.get("taskId");
+    if (taskId) {
+      ownedTask(ctx, { ...r, params: { id: taskId } });
+      return ok({ wakeups: wakeups.listWakeups(ctx, { taskId }).map(wakeups.wakeupView) } satisfies A.WakeupList);
+    }
+    const userId = listScope(r, "wakeup list");
+    return ok({ wakeups: wakeups.listWakeups(ctx, { userId }).map(wakeups.wakeupView) } satisfies A.WakeupList);
+  });
+
+  route("DELETE", "/api/wakeups/:id", (r) => {
+    const w = ownedWakeup(ctx, r);
+    const by = userOf(r.principal).user;
+    return ok(wakeups.wakeupView(wakeups.cancelWakeup(ctx, w, `cancelled by ${by.id === w.user_id ? "the owner" : "an admin"}`)) satisfies A.WakeupView);
+  });
+
+  // ---- channels (section 12) ---------------------------------------------------------------------------
+  route("GET", "/api/channels", (r) => {
+    const userId = listScope(r, "channel list");
+    return ok({ channels: posts.channels(ctx, userId) } satisfies A.ChannelList);
+  });
+
+  route("GET", "/api/tasks/:id/posts", (r) => ok({ posts: posts.postsOf(ctx, ownedTask(ctx, r).id).map(posts.postView) } satisfies A.ChannelPostList));
+
+  route("POST", "/api/tasks/:id/posts/read", (r) => {
+    const t = ownedTask(ctx, r);
+    return ok({ unreadPosts: posts.markRead(ctx, t, userOf(r.principal).user.id) } satisfies A.MarkPostsReadResult);
+  });
+
   // ---- admin ----------------------------------------------------------------------------------------
   route("GET", "/api/admin/budget", (r) => {
     authorize(r.principal, { kind: "admin", what: "budget" });
@@ -568,6 +674,38 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok(tasks.reportStatus(ctx, t, (await r.body()) as A.SessionStatusRequest) satisfies A.TaskView);
   });
 
+  route("GET", "/api/session/wakeups", (r) => {
+    const t = sessionTask(ctx, r);
+    return ok({ wakeups: wakeups.listWakeups(ctx, { taskId: t.id }).map(wakeups.wakeupView) } satisfies A.WakeupList);
+  });
+
+  route("POST", "/api/session/wakeups", async (r) => {
+    const t = sessionTask(ctx, r);
+    return ok(wakeups.wakeupView(wakeups.armFromSession(ctx, t, (await r.body()) as A.SessionWakeupRequest)) satisfies A.WakeupView, 201);
+  });
+
+  route("DELETE", "/api/session/wakeups/:name", (r) => {
+    const t = sessionTask(ctx, r);
+    return ok(wakeups.wakeupView(wakeups.cancelWakeup(ctx, wakeups.armedByName(ctx, t.id, r.params.name!), "cancelled by the task")) satisfies A.WakeupView);
+  });
+
+  route("GET", "/api/session/inbox", async (r) => {
+    const t = sessionTask(ctx, r);
+    const wait = Math.max(0, Math.min(55, Number(r.url.searchParams.get("wait") || 0) || 0));
+    return ok({ messages: await inbox.waitPending(ctx, t.id, wait) } satisfies A.InboxList);
+  });
+
+  route("POST", "/api/session/inbox/:id/ack", (r) => {
+    const t = sessionTask(ctx, r);
+    inbox.ack(ctx, t.id, r.params.id!);
+    return ok({ ok: true });
+  });
+
+  route("POST", "/api/session/posts", async (r) => {
+    const t = sessionTask(ctx, r);
+    return ok(posts.postView(posts.post(ctx, t, (await r.body()) as A.SessionPostRequest)) satisfies A.ChannelPostView, 201);
+  });
+
   return routes;
 }
 
@@ -579,6 +717,16 @@ export function defineRoutes(ctx: Ctx): Routes {
 function checkOrigin(ctx: Ctx, req: IncomingMessage): void {
   const origin = req.headers.origin;
   if (origin && origin !== ctx.config.publicUrl) throw httpError("forbidden", "cross-origin request refused");
+}
+
+/**
+ * The app sends the device's IANA zone as `X-Time-Zone`; the server keeps the latest one per person
+ * (sessions get it as JARVIS_TIME_ZONE, wakeups default to it).
+ */
+function noteTimeZone(ctx: Ctx, p: Principal | null, req: IncomingMessage): void {
+  const tz = req.headers["x-time-zone"];
+  if (!p || p.kind !== "user" || typeof tz !== "string" || tz === p.user.time_zone || !validTimeZone(tz)) return;
+  ctx.db.prepare("UPDATE users SET time_zone = ? WHERE id = ?").run(tz, p.user.id);
 }
 
 // ---- plumbing ------------------------------------------------------------------------------------------
@@ -678,6 +826,7 @@ export function makeHandler(ctx: Ctx, resolveDeps: ResolveDeps, routes: Routes, 
       rt.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1]!)));
       if (req.method !== "GET" && req.method !== "HEAD") checkOrigin(ctx, req);
       const principal = rt.auth ? await resolvePrincipal(req, resolveDeps) : null;
+      noteTimeZone(ctx, principal, req);
       const out = await rt.handler({ req, url, params, principal, body: () => readBody(req) });
       if (out.redirect) {
         res.writeHead(302, { location: out.redirect, "cache-control": "no-store" });

@@ -20,6 +20,7 @@ import { cancelForTask } from "./approvals.ts";
 import { ensureProxyUser } from "./tools/index.ts";
 import { checkAttachments } from "./files.ts";
 import { filesConfig } from "./config.ts";
+import { cancelForTask as cancelWakeups } from "./wakeups.ts";
 
 export type BusyKind = "creating" | "pausing" | "resuming" | "destroying";
 export type PauseReason = "user" | "idle" | "machine_hours_cap" | "instance_budget" | "offboarded";
@@ -51,6 +52,7 @@ export function taskView(ctx: Ctx, t: TaskRow): TaskView {
     connected: ctx.hub.isConnected(t.id),
     agentId: t.agent_id ?? null,
     attachments: t.attachments ? (JSON.parse(t.attachments) as string[]) : [],
+    scheduleId: t.schedule_id ?? null,
   };
 }
 
@@ -99,6 +101,8 @@ async function launch(ctx: Ctx, task: TaskRow, user: UserRow, o: { firstPrompt?:
     JARVIS_MODEL: task.model,
     PASEO_PASSWORD: ctx.sealer.open(task.daemon_password_sealed, daemonAad(task.id)),
     JARVIS_FILES_SYNC_BYTES: String(filesConfig(ctx.config).sessionSyncBytes),
+    // the owner's zone as their app last reported it: for the agent's sense of "today" and for wakeups
+    JARVIS_TIME_ZONE: user.time_zone || "UTC",
   };
   if (ctx.config.models.find((m) => m.id === task.model)?.images) env.JARVIS_MODEL_IMAGES = "1";
   if (o.firstPrompt) env.JARVIS_FIRST_PROMPT = o.firstPrompt;
@@ -183,7 +187,7 @@ export async function runSnapshot(ctx: Ctx, machineId: string, key: string): Pro
 
 // ---- operations ---------------------------------------------------------------------------------
 
-export function createTask(ctx: Ctx, user: UserRow, body: CreateTaskRequest): Promise<TaskRow> {
+export function createTask(ctx: Ctx, user: UserRow, body: CreateTaskRequest, o: { scheduleId?: string } = {}): Promise<TaskRow> {
   const prompt = body?.prompt;
   if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 16000) throw httpError("bad_request", "prompt must be 1..16000 characters");
   const model = body.model ?? ctx.config.defaultModel;
@@ -206,9 +210,9 @@ export function createTask(ctx: Ctx, user: UserRow, body: CreateTaskRequest): Pr
     const pw = mintToken();
     ctx.db
       .prepare(
-        "INSERT INTO tasks(id, user_id, title, model, state, daemon_password_sealed, request_id, attachments, created_at, updated_at) VALUES (?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?)",
+        "INSERT INTO tasks(id, user_id, title, model, state, daemon_password_sealed, request_id, attachments, schedule_id, created_at, updated_at) VALUES (?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?)",
       )
-      .run(id, user.id, title, model, ctx.sealer.seal(pw, daemonAad(id)), requestId, attachments.length ? JSON.stringify(attachments) : null, now, now);
+      .run(id, user.id, title, model, ctx.sealer.seal(pw, daemonAad(id)), requestId, attachments.length ? JSON.stringify(attachments) : null, o.scheduleId ?? null, now, now);
     const task = getTask(ctx, id)!;
     lock(ctx, id, "creating");
     ctx.ops.run(
@@ -218,6 +222,7 @@ export function createTask(ctx: Ctx, user: UserRow, body: CreateTaskRequest): Pr
         } catch (e) {
           const msg = (e as Error).message.slice(0, 300);
           update(ctx, id, { state: "failed", error: `could not start the machine: ${msg}`, session_token_hash: null });
+          cancelWakeups(ctx, id, "the task could not start");
           addNotice(ctx, user.id, "task_failed", `Task "${title}" could not start.`, id);
         } finally {
           unlock(ctx, id);
@@ -363,6 +368,7 @@ export function destroyTask(ctx: Ctx, task: TaskRow, o: { force?: boolean; offbo
           has_snapshot: keepSnapshot ? 1 : 0,
           error: archiveError ? `destroyed without an archive: ${archiveError}` : note,
         });
+        cancelWakeups(ctx, task.id, o.offboarding ? "the task's owner was offboarded" : "the task was deleted");
       } finally {
         unlock(ctx, task.id);
       }

@@ -143,3 +143,13 @@ export interface OrgEnvForge {
   openPullRequest(spec: PullRequestSpec): Promise<{ number: number; url: string }>;
   pullRequestState(number: number): Promise<PullRequestState>;
 }
+
+/** One HTTP GET for a condition wakeup (server/src/httpcheck.ts). */
+export interface CheckResponse {
+  status: number;
+  /** The first 256 KiB of the body, as UTF-8. */
+  body: string;
+}
+export interface HttpChecker {
+  get(url: string): Promise<CheckResponse>;
+}

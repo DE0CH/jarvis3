@@ -19,6 +19,9 @@ import { EventEmitter } from "node:events";
 import { checkActions } from "./actions/index.ts";
 import { proxyTick, settleStaleReservations } from "./tools/index.ts";
 import { checkToolProviders } from "./tools/registry.ts";
+import { PublicHttpChecker } from "./httpcheck.ts";
+import { wakeupTick } from "./wakeups.ts";
+import { scheduleTick } from "./schedules.ts";
 
 export interface JarvisOptions {
   config: Config;
@@ -57,6 +60,8 @@ export function createJarvis(o: JarvisOptions): Jarvis {
   checkActions(o.config.actions, o.actionSecrets ?? {});
   const approvalBus = new EventEmitter();
   approvalBus.setMaxListeners(0);
+  const inboxBus = new EventEmitter();
+  inboxBus.setMaxListeners(0);
   let ctxRef: Ctx | null = null;
   const hub = new ChannelHub({ onConnect: (taskId) => ctxRef && onSessionConnected(ctxRef, taskId) });
   const ctx: Ctx = {
@@ -76,6 +81,8 @@ export function createJarvis(o: JarvisOptions): Jarvis {
     snapshotTimeoutMs: o.snapshotTimeoutMs ?? 15 * 60_000,
     actionSecrets: o.actionSecrets ?? {},
     approvalBus,
+    inboxBus,
+    checker: o.providers.checker ?? new PublicHttpChecker(),
   };
   ctxRef = ctx;
   checkToolProviders(ctx);
@@ -105,6 +112,9 @@ export function createJarvis(o: JarvisOptions): Jarvis {
       await finishOffboarding(ctx).catch((e: Error) => log("offboarding retry failed", { error: e.message }));
       await suggestionTick(ctx).catch((e: Error) => log("suggestion check failed", { error: e.message }));
       await proxyTick(ctx).catch((e: Error) => log("proxy tick failed", { error: e.message }));
+      // after the cap and budget checks, so a firing sees this minute's state
+      await wakeupTick(ctx).catch((e: Error) => log("wakeup tick failed", { error: e.message }));
+      await scheduleTick(ctx).catch((e: Error) => log("schedule tick failed", { error: e.message }));
     } finally {
       ticking = false;
     }
