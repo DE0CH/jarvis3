@@ -13,6 +13,7 @@ import { keyRow, revokeKey, syncKeyLimit } from "./userkeys.ts";
 import { destroyTask, unarchivedTasksOf } from "./tasks.ts";
 import { getPersonal } from "./layers.ts";
 import { closeUserTunnels } from "./tools/relay.ts";
+import { forgetDevice as forgetPushDevice, forgetUser as forgetPushUser } from "./push.ts";
 import { proxyUserRow, refreshProxyUser, revokeProxyUser, userToolsView } from "./tools/index.ts";
 
 export function getUser(ctx: Ctx, id: string): UserRow | null {
@@ -194,6 +195,7 @@ export async function offboard(ctx: Ctx, userId: string): Promise<void> {
     ctx.log("offboard: proxy sub-account revoke failed (retried next tick)", { user: userId, error: (e as Error).message });
   }
   await revokeDevices(ctx, userId);
+  forgetPushUser(ctx, userId);
   await archiveLayer(ctx, userId).catch((e: Error) => ctx.log("offboard: layer archive failed (retried next tick)", { user: userId, error: e.message }));
   const n = archiveTasksOf(ctx, userId);
   const u = getUser(ctx, userId)!;
@@ -261,6 +263,7 @@ export async function finishOffboarding(ctx: Ctx): Promise<void> {
     if (keyRow(ctx, id)) await revokeKey(ctx, id).catch(() => {});
     if (proxyUserRow(ctx, id)) await revokeProxyUser(ctx, id).catch(() => {});
     await revokeDevices(ctx, id).catch(() => {});
+    forgetPushUser(ctx, id);
     await archiveLayer(ctx, id).catch(() => {});
     archiveTasksOf(ctx, id);
   }
@@ -306,6 +309,7 @@ export async function pairDevice(ctx: Ctx, user: UserRow, o: { name: string; mod
 
 export async function revokeDevice(ctx: Ctx, d: DeviceRow): Promise<void> {
   ctx.db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ?").run(ctx.clock.now(), d.id);
+  forgetPushDevice(ctx, d.id);
   await ctx.deviceTokens.revoke(d.service_token_id);
 }
 

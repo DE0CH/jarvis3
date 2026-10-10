@@ -207,7 +207,39 @@ export interface Config {
   schedules?: SchedulesConfig;
   /** Wakeups (docs/API.md section 15). Every field optional. */
   wakeups?: WakeupsConfig;
+  /** Push notifications for notices (docs/API.md section 16). Absent: notices stay in-app only. */
+  push?: PushConfig;
 }
+
+/**
+ * Push notifications. Each channel is optional; its private key is a secret in the environment
+ * (APNS_KEY_P8, VAPID_PRIVATE_KEY), never in this file.
+ */
+export interface PushConfig {
+  /** The iOS app, through Apple's push service with a token-based (.p8) key. */
+  apns?: {
+    /** The Apple developer team that owns the key and the app. */
+    teamId: string;
+    /** The .p8 key's id. */
+    keyId: string;
+    /** The iOS app's bundle id (the apns-topic). */
+    bundleId: string;
+    /** For a token that didn't say (default production: TestFlight and App Store builds). */
+    environment?: "production" | "sandbox";
+  };
+  /** Browsers and home-screen web apps, through the Web Push protocol with VAPID. */
+  webPush?: {
+    /** VAPID contact: a mailto: or https: URL of the operator. */
+    subject: string;
+    /** The VAPID public key, base64url (uncompressed P-256 point, 65 bytes). */
+    publicKey: string;
+    /** Push service hosts a subscription may point at (a host or a parent domain). Default: DEFAULT_PUSH_HOSTS. */
+    allowedHosts?: string[];
+  };
+}
+
+/** The push services of Chrome/Edge (FCM), Firefox, Safari and Windows: subscriptions elsewhere are refused (the server POSTs to them). */
+export const DEFAULT_PUSH_HOSTS = ["fcm.googleapis.com", "push.services.mozilla.com", "push.apple.com", "notify.windows.com"];
 
 export interface FilesConfig {
   /** Largest single file, bytes (default 50 MiB; Cloudflare's free plan refuses bodies over 100 MB). */
@@ -320,11 +352,39 @@ export function validateConfig(c: Config): Config {
     if (a.approval !== undefined && !["auto", "self", "admin"].includes(a.approval)) fail(`actions.${name}: approval must be auto, self or admin`);
   }
   validateTools(c, fail);
+  validatePush(c, fail);
   for (const k of ["maxFileBytes", "quotaBytes", "sessionSyncBytes"] as const) {
     const v = c.files?.[k];
     if (v !== undefined && !(Number.isInteger(v) && v > 0)) fail(`files.${k} must be a positive integer (bytes)`);
   }
   return c;
+}
+
+function validatePush(c: Config, fail: (m: string) => never): void {
+  const p = c.push;
+  if (!p) return;
+  if (p.apns) {
+    const a = p.apns;
+    if (!/^[A-Z0-9]{10}$/.test(a.teamId || "")) fail("push.apns.teamId must be a 10-character team id");
+    if (!/^[A-Z0-9]{10}$/.test(a.keyId || "")) fail("push.apns.keyId must be a 10-character key id");
+    if (!/^[A-Za-z0-9.-]+$/.test(a.bundleId || "")) fail("push.apns.bundleId must be a bundle id");
+    if (a.environment !== undefined && a.environment !== "production" && a.environment !== "sandbox") fail("push.apns.environment must be production or sandbox");
+  }
+  if (p.webPush) {
+    const w = p.webPush;
+    if (!/^(mailto:[^@\s]+@[^@\s]+|https:\/\/\S+)$/.test(w.subject || "")) fail("push.webPush.subject must be a mailto: or https: URL");
+    if (!/^[A-Za-z0-9_-]{87}$/.test(w.publicKey || "")) fail("push.webPush.publicKey must be a base64url P-256 public key (87 characters)");
+    if (w.allowedHosts !== undefined && (!Array.isArray(w.allowedHosts) || !w.allowedHosts.every((h) => typeof h === "string" && /^[a-z0-9.-]+(:\d+)?$/.test(h)))) fail("push.webPush.allowedHosts must be a list of host names");
+  }
+}
+
+/** The push channels' private keys, from the environment. A configured channel without its key = refuse to start. */
+export function loadPushSecrets(c: Config, env: NodeJS.ProcessEnv = process.env): { apnsKeyP8: string; vapidPrivateKey: string } {
+  const apnsKeyP8 = c.push?.apns ? env.APNS_KEY_P8 || "" : "";
+  const vapidPrivateKey = c.push?.webPush ? env.VAPID_PRIVATE_KEY || "" : "";
+  if (c.push?.apns && !apnsKeyP8.includes("PRIVATE KEY")) throw new Error("missing secret env APNS_KEY_P8 (push.apns): the .p8 file's contents");
+  if (c.push?.webPush && !/^[A-Za-z0-9_-]{43}$/.test(vapidPrivateKey)) throw new Error("missing secret env VAPID_PRIVATE_KEY (push.webPush): base64url, 43 characters");
+  return { apnsKeyP8, vapidPrivateKey };
 }
 
 const capOk = (v: unknown): boolean => v === null || (typeof v === "number" && Number.isFinite(v) && v >= 0);
