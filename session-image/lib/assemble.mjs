@@ -2,7 +2,7 @@
 // OpenCode loads: one instructions file (layers concatenated in the bundle's load order: org,
 // role, personal, policy — policy last), one folder per skill (names as the server assigned them,
 // renames applied to the SKILL.md front matter too), and opencode.json (OpenRouter, the task's
-// model, permission allow + the locked policy's deny rules, nothing else).
+// model, permission allow + the locked policy's deny rules, and the policy plugin).
 //
 // Pure functions + one writer; test/assemble.test.mjs covers them.
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -19,6 +19,7 @@ export const PLATFORM_PREAMBLE = (o) =>
     `Your working directory is ${o.workspace}. The organisation's environment (its scripts and reference files) is at ${o.orgDir}, read-only.`,
     "There are no permission prompts: act, but stop and ask before anything outward-facing or irreversible the instructions below don't clearly allow.",
     'When the user asks you to remember something for future tasks, save it with the shell command: jarvis-remember "<the note>" (one short sentence per note).',
+    "Outward-facing or irreversible steps go through Jarvis: jarvis_actions lists the organisation's named actions (company mail, payments, …) and jarvis_action runs one; the right person approves it in the Jarvis app while you wait. If your role lacks an action, ask with jarvis_request_access; for a judgement call, ask an admin with jarvis_ask_boss. Some tool calls are stopped by the locked policy until someone approves them; a denial is final, so tell the user rather than trying another way.",
     "",
     "The instructions below come in layers: the organisation's, then the user's role, then the user's own, and last the organisation's locked policy, which overrides everything before it.",
   ].join("\n");
@@ -98,11 +99,15 @@ export function permissions(deny) {
 /** The OpenCode model id for an OpenRouter slug. */
 export const opencodeModel = (slug) => `openrouter/${slug}`;
 
+/** The locked-policy plugin (guards + the jarvis_* tools), root-owned in the image. */
+export const POLICY_PLUGIN = "/usr/local/lib/jarvis/lib/opencode-plugin.mjs";
+
 export function opencodeConfig(o) {
   const model = opencodeModel(o.model);
   return {
     $schema: "https://opencode.ai/config.json",
     model,
+    plugin: [`file://${o.pluginPath || POLICY_PLUGIN}`],
     small_model: model,
     autoupdate: false,
     share: "disabled",
@@ -138,7 +143,7 @@ export function writeLayers(bundle, o) {
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, text);
   }
-  const cfg = opencodeConfig({ model: o.model, bundle, instructionsPath, skillsDir, baseUrl: o.baseUrl });
+  const cfg = opencodeConfig({ model: o.model, bundle, instructionsPath, skillsDir, baseUrl: o.baseUrl, pluginPath: o.pluginPath });
   mkdirSync(dirname(o.opencodeConfigPath), { recursive: true });
   writeFileSync(o.opencodeConfigPath, JSON.stringify(cfg, null, 1));
   return { instructionsPath, skillsDir, config: cfg };

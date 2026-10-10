@@ -7,6 +7,7 @@
 # installs (a later RUN can't make an earlier layer smaller).
 FROM node:22-bookworm-slim
 
+# keep @opencode-ai/plugin in package.json at the same version (the policy plugin builds on it)
 ARG OPENCODE_VERSION=1.18.35
 ARG PASEO_VERSION=0.11.1
 

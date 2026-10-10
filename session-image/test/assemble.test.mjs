@@ -87,6 +87,7 @@ test("opencode.json: the task's OpenRouter model, the key from env, instructions
   const prod = opencodeConfig({ model: "m/x", bundle: { deny: [] }, instructionsPath: "/i.md", skillsDir: "/s", baseUrl: "" });
   assert.equal(prod.provider.openrouter.options.baseURL, undefined);
   assert.equal(prod.permission, "allow");
+  assert.deepEqual(prod.plugin, ["file:///usr/local/lib/jarvis/lib/opencode-plugin.mjs"], "the locked-policy plugin is always loaded");
 });
 
 test("writeLayers writes the files and replaces old skills on the next boot", () => {

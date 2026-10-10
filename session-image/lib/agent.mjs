@@ -7,8 +7,9 @@
 //   3. channel  the reverse channel to the server, relaying the app's sockets to the daemon
 //   4. prompt   the first prompt (create only) becomes the task's main agent
 //   5. status   busy / idle (+ the main agent's id and title) to POST /api/session/status on change
-//   6. local    a unix socket for in-machine helpers: jarvis-remember posts notes through it, so
-//               the session token never enters the agent's shell
+//   6. local    a unix socket for in-machine helpers: jarvis-remember posts notes through it, and
+//               the OpenCode policy plugin (lib/opencode-plugin.mjs) files approvals and waits on
+//               them, so the session token never enters the agent's shell
 //
 // Config comes from the env the server sets (docs/API.md section 10).
 import { spawn, spawnSync } from "node:child_process";
@@ -92,8 +93,11 @@ async function server(method, path, body, { retries = 0, raw = false } = {}) {
 
 // ---- 1. layers ---------------------------------------------------------------------------------
 
+let guards = [];
+
 async function loadLayers() {
   const bundle = await server("GET", "/api/session/bundle", undefined, { retries: 8 });
+  guards = bundle.guards || [];
   const tar = await server("GET", "/api/session/org-env.tar", undefined, { retries: 8, raw: true });
   rmSync(P.org, { recursive: true, force: true });
   mkdirSync(P.org, { recursive: true });
@@ -305,6 +309,39 @@ function localApi() {
       } catch (e) {
         return reply(e.status || 502, { error: e.message });
       }
+    }
+    // the policy plugin: guards, the action catalogue, filing a request and waiting on it
+    const forward = async (method, path, body) => {
+      try {
+        return reply(method === "POST" ? 201 : 200, await server(method, path, body));
+      } catch (e) {
+        if (!e.status) return reply(502, { error: { code: "upstream", message: `the Jarvis server is unreachable: ${e.message}` } });
+        let b = e.body;
+        try {
+          b = JSON.parse(e.body);
+        } catch {
+          /* text */
+        }
+        return reply(e.status, b);
+      }
+    };
+    const url = new URL(req.url, "http://local");
+    if (req.method === "GET" && url.pathname === "/guards") return reply(200, { guards });
+    if (req.method === "GET" && url.pathname === "/actions") return forward("GET", "/api/session/actions");
+    if (req.method === "POST" && url.pathname === "/approvals") {
+      let body;
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString());
+      } catch {
+        return reply(400, { error: { code: "bad_request", message: "body must be JSON" } });
+      }
+      log("approval requested", { kind: body?.kind, action: body?.action ?? body?.rule ?? null });
+      return forward("POST", "/api/session/approvals", body);
+    }
+    const m = /^\/approvals\/([A-Za-z0-9_-]{1,64})$/.exec(url.pathname);
+    if (req.method === "GET" && m) {
+      const wait = Math.max(0, Math.min(55, Number(url.searchParams.get("wait") || 0) || 0));
+      return forward("GET", `/api/session/approvals/${m[1]}?wait=${wait}`);
     }
     reply(404, { error: "no such route" });
   });
