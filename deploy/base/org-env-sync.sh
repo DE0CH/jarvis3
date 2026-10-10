@@ -26,8 +26,10 @@ sync_once() {
 case "${1:-once}" in
   once) sync_once ;;
   loop)
+    trap 'exit 0' TERM INT # PID 1: stop at once when the pod stops
     while :; do
-      sleep "${ORG_ENV_FETCH_SECONDS:-300}"
+      sleep "${ORG_ENV_FETCH_SECONDS:-300}" &
+      wait $!
       sync_once || echo "org-env fetch failed; retrying later"
     done ;;
   *) echo "usage: org-env-sync.sh once|loop" >&2; exit 2 ;;
