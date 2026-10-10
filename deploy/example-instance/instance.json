@@ -1,0 +1,16 @@
+{
+  "name": "example",
+  "hostname": "jarvis.example.org",
+  "jarvis3": { "ref": "0000000000000000000000000000000000000000", "serverImageTag": "main" },
+  "hetzner": { "location": "fsn1", "serverType": "cx23", "image": "ubuntu-24.04" },
+  "cloudflare": {
+    "accountId": "<Cloudflare account id>",
+    "zoneId": "<zone id of example.org>",
+    "teamDomain": "example.cloudflareaccess.com",
+    "identityProvider": { "name": "Example Google Workspace", "appsDomain": "example.org" },
+    "allowedEmailDomains": ["example.org"]
+  },
+  "storage": { "endpoint": "https://fsn1.your-objectstorage.com", "region": "fsn1", "bucket": "example-jarvis", "forcePathStyle": false },
+  "github": { "instanceRepo": "example-org/example-jarvis", "branch": "main", "orgEnvRepo": "example-org/example-env" },
+  "versions": { "k3s": "v1.34.12+k3s1", "flux": "2.9.6" }
+}

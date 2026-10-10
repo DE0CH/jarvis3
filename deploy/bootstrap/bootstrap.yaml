@@ -1,0 +1,22 @@
+# Applied ONCE by infra/cloud-init.sh with the node's admin kubeconfig; NOT reconciled by Flux.
+# The instance namespace (Pod Security "restricted") and the limited identity Flux applies the instance
+# with: admin inside the `jarvis3` namespace only, nothing cluster-scoped, so a push to the instance repo
+# can't grant itself more. kustomize-controller runs with --default-service-account=default, so a Flux
+# Kustomization that names no service account can do nothing.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jarvis3
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: flux-applier, namespace: flux-system }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: flux-applier, namespace: jarvis3 }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin }
+subjects: [{ kind: ServiceAccount, name: flux-applier, namespace: flux-system }]

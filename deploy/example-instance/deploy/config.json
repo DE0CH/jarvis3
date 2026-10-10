@@ -1,0 +1,53 @@
+{
+  "instanceName": "example",
+  "publicUrl": "https://jarvis.example.org",
+  "access": {
+    "teamDomain": "example.cloudflareaccess.com",
+    "audience": "<Access application AUD tag>",
+    "sessionGateClientId": "<client id of the sessions' service token>.access"
+  },
+  "directory": {
+    "kind": "google",
+    "domain": "example.org",
+    "subject": "directory-reader@example.org",
+    "groupRoles": {
+      "jarvis-admin@example.org": "admin",
+      "jarvis-staff@example.org": "staff"
+    },
+    "intervalSeconds": 300
+  },
+  "bootstrapAdmins": ["owner@example.org"],
+  "roles": {
+    "admin": { "openrouterMonthlyUsd": 100, "machineHoursPerMonth": null, "admin": true },
+    "staff": { "openrouterMonthlyUsd": 20, "machineHoursPerMonth": 60 }
+  },
+  "models": [
+    { "id": "anthropic/claude-sonnet-4.5", "label": "Claude Sonnet" },
+    { "id": "openai/gpt-5-mini", "label": "GPT-5 mini" }
+  ],
+  "defaultModel": "anthropic/claude-sonnet-4.5",
+  "machines": {
+    "kind": "fly",
+    "app": "example-sessions",
+    "org": "example",
+    "region": "ams",
+    "image": "ghcr.io/<owner>/jarvis3-session:<tag>",
+    "guest": { "cpu_kind": "shared", "cpus": 2, "memory_mb": 2048 },
+    "rootfsGb": 16
+  },
+  "storage": {
+    "kind": "s3",
+    "endpoint": "https://fsn1.your-objectstorage.com",
+    "region": "fsn1",
+    "bucket": "example-jarvis"
+  },
+  "orgEnv": {
+    "mirrorPath": "/data/org-env.git",
+    "commit": "0000000000000000000000000000000000000000"
+  },
+  "daemonPath": "/ws",
+  "idleMinutes": 60,
+  "budget": { "monthlyUsd": 30, "warnUsd": 25 },
+  "devices": { "appScheme": "jarvis3", "cloudflareAccountId": "<Cloudflare account id>" },
+  "presignSeconds": 3600
+}

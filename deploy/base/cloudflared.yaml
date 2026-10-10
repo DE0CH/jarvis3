@@ -1,0 +1,31 @@
+# cloudflared: the instance's remotely managed tunnel (its ingress rule, <host> -> the server Service,
+# lives in Cloudflare and is set by infra/instance.py cloudflare). The box has no open inbound port; this
+# outbound connection is the only way in. Token: Secret tunnel-token (SOPS, from the instance repo).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  labels: { app: cloudflared }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: cloudflared } }
+  template:
+    metadata: { labels: { app: cloudflared } }
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
+          args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+          env: [{ name: TUNNEL_TOKEN, valueFrom: { secretKeyRef: { name: tunnel-token, key: token } } }]
+          resources: { requests: { cpu: 10m, memory: 32Mi }, limits: { memory: 256Mi } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }

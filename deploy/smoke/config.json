@@ -1,0 +1,77 @@
+{
+  "instanceName": "example",
+  "publicUrl": "https://jarvis.example.org",
+  "access": {
+    "teamDomain": "example.cloudflareaccess.com",
+    "audience": "<Access application AUD tag>",
+    "sessionGateClientId": "<client id of the sessions' service token>.access"
+  },
+  "directory": {
+    "kind": "static",
+    "users": [
+      {
+        "email": "owner@example.org",
+        "role": "admin"
+      },
+      {
+        "email": "alice@example.org",
+        "role": "staff"
+      }
+    ]
+  },
+  "bootstrapAdmins": [
+    "owner@example.org"
+  ],
+  "roles": {
+    "admin": {
+      "openrouterMonthlyUsd": 100,
+      "machineHoursPerMonth": null,
+      "admin": true
+    },
+    "staff": {
+      "openrouterMonthlyUsd": 20,
+      "machineHoursPerMonth": 60
+    }
+  },
+  "models": [
+    {
+      "id": "anthropic/claude-sonnet-4.5",
+      "label": "Claude Sonnet"
+    },
+    {
+      "id": "openai/gpt-5-mini",
+      "label": "GPT-5 mini"
+    }
+  ],
+  "defaultModel": "anthropic/claude-sonnet-4.5",
+  "machines": {
+    "kind": "docker",
+    "image": "jarvis3-session:none",
+    "guest": {
+      "cpu_kind": "shared",
+      "cpus": 1,
+      "memory_mb": 512
+    }
+  },
+  "storage": {
+    "kind": "s3",
+    "endpoint": "http://minio:9000",
+    "region": "us-east-1",
+    "bucket": "example-jarvis"
+  },
+  "orgEnv": {
+    "mirrorPath": "/data/org-env.git",
+    "commit": "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"
+  },
+  "daemonPath": "/ws",
+  "idleMinutes": 60,
+  "budget": {
+    "monthlyUsd": 30,
+    "warnUsd": 25
+  },
+  "devices": {
+    "appScheme": "jarvis3",
+    "cloudflareAccountId": "<Cloudflare account id>"
+  },
+  "presignSeconds": 3600
+}

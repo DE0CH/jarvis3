@@ -1,0 +1,30 @@
+# One Jarvis 3 instance: the server (with Litestream and the org-env mirror beside it) and the
+# Cloudflare tunnel, in the `jarvis3` namespace (made by deploy/bootstrap, Pod Security "restricted").
+# An instance's deploy repo uses this as a remote base pinned to a commit and supplies, by name:
+#   ConfigMap jarvis-config      config.json (docs/CONFIG.md)
+#   ConfigMap jarvis-instance    LITESTREAM_S3_ENDPOINT, LITESTREAM_S3_REGION, LITESTREAM_S3_BUCKET,
+#                                LITESTREAM_S3_FORCE_PATH_STYLE ("true"/"false"), ORG_ENV_URL
+#   Secret    jarvis-secrets     the server's secret env (docs/CONFIG.md "Secrets")
+#   Secret    tunnel-token       token = the Cloudflare tunnel token
+#   Secret    org-env-deploy-key identity = read-only SSH deploy key of the org-env repo
+# docs/DEPLOY.md has the whole picture.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: jarvis3
+resources:
+  - server.yaml
+  - cloudflared.yaml
+  - network.yaml
+configMapGenerator:
+  - name: litestream
+    files: [litestream.yml]
+  - name: org-env-sync
+    files: [org-env-sync.sh]
+  - name: github-known-hosts
+    files: [known_hosts]
+generatorOptions:
+  disableNameSuffixHash: false
+images:
+  - name: jarvis3-server
+    newName: ghcr.io/de0ch/jarvis3-server
+    newTag: main

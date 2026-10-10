@@ -1,0 +1,18 @@
+# CI only (.github/workflows/deploy.yml): the base on a throwaway k3d cluster with MinIO as the bucket,
+# fake secrets, a public org-env repo over https and the server image built from this commit (tag smoke).
+# Nothing here is used by a real instance.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: jarvis3
+resources:
+  - ../base
+  - minio.yaml
+  - secrets.yaml
+configMapGenerator:
+  - name: jarvis-config
+    files: [config.json]
+  - name: jarvis-instance
+    envs: [instance.env]
+images:
+  - name: ghcr.io/de0ch/jarvis3-server
+    newTag: smoke

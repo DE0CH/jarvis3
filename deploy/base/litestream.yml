@@ -1,0 +1,16 @@
+# Litestream (0.5): the server's SQLite file streamed continuously to the instance's bucket, under db/
+# (next to the server's snapshots/ and archives/). Values come from the environment (ConfigMap
+# jarvis-instance, credentials from Secret jarvis-secrets as AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY).
+dbs:
+  - path: /data/jarvis.db
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_S3_BUCKET}
+      path: db
+      endpoint: ${LITESTREAM_S3_ENDPOINT}
+      region: ${LITESTREAM_S3_REGION}
+      force-path-style: ${LITESTREAM_S3_FORCE_PATH_STYLE}
+      sync-interval: 10s
+snapshot:
+  interval: 24h
+  retention: 720h

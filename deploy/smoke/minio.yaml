@@ -1,0 +1,65 @@
+# The smoke test's bucket: MinIO plus a Job that creates the bucket (with the server image's aws4fetch,
+# so no extra client image).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: minio, labels: { app: minio } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: minio } }
+  template:
+    metadata: { labels: { app: minio } }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: minio
+          image: cgr.dev/chainguard/minio:latest
+          args: [server, /data]
+          env:
+            - { name: MINIO_ROOT_USER, value: minioadmin }
+            - { name: MINIO_ROOT_PASSWORD, value: minioadmin }
+          ports: [{ containerPort: 9000 }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+          readinessProbe: { httpGet: { path: /minio/health/ready, port: 9000 }, periodSeconds: 3 }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumes: [{ name: data, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: minio }
+spec:
+  selector: { app: minio }
+  ports: [{ port: 9000, targetPort: 9000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: minio-from-namespace }
+spec:
+  podSelector: { matchLabels: { app: minio } }
+  policyTypes: [Ingress]
+  ingress: [{ from: [{ podSelector: {} }], ports: [{ port: 9000, protocol: TCP }] }]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: { name: make-bucket }
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: mb
+          image: ghcr.io/de0ch/jarvis3-server
+          command:
+            - node
+            - -e
+            - |
+              import("aws4fetch").then(async ({ AwsClient }) => {
+                const c = new AwsClient({ accessKeyId: "minioadmin", secretAccessKey: "minioadmin", service: "s3", region: "us-east-1" });
+                const r = await c.fetch("http://minio:9000/example-jarvis", { method: "PUT" });
+                console.log("create bucket:", r.status);
+                if (!(r.ok || r.status === 409)) process.exit(1);
+              }).catch((e) => { console.error(e.message); process.exit(1); });
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
