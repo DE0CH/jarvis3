@@ -55,11 +55,19 @@ Everything is a push to the instance repo; Flux applies it within a minute.
   restarts with it.
 - **New org-env commit:** `orgEnv.commit` in `deploy/config.json`. The mirror fetches every 5 minutes;
   push the org-env commit first.
+- **An extra app's manifests:** edit `apps/<name>/app/`, commit, push (DEPLOY.md, "Extra apps").
+- **A new extra app:** add it to `instance.json` `apps`, put its manifests in `apps/<name>/app/`, run
+  `scaffold`, `cloudflare --apply` (its Access app, tunnel and DNS; the token goes to the out file),
+  `secrets REPO APP_<NAME>_TUNNEL_TOKEN=env:<var> --apply` with the token from that out file, commit,
+  push, then
+  rebuild the box: its namespace and Flux identity are made only at box creation. Back up the
+  app's own data first if it moves from elsewhere; Litestream covers only the Jarvis 3 database.
 
 ## Rotating a secret
 
 Run `instance.py secrets REPO --apply …` again with every key (it rewrites the whole file), commit and
-push. The file's hash is an annotation on every pod template (`jarvis3/secrets-rev` in
+push. An extra app's tunnel token (`APP_<NAME>_TUNNEL_TOKEN`) has a file of its own and can be
+rewritten alone. The file's hash is an annotation on every pod template (`jarvis3/secrets-rev` in
 `deploy/kustomization.yaml`), so the pods restart with the new values.
 
 - `TUNNEL_TOKEN`, `SESSION_GATE_CLIENT_SECRET`: `ROTATE=1 instance.py cloudflare … --apply` mints new

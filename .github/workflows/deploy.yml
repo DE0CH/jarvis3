@@ -70,18 +70,27 @@ jobs:
           kubectl kustomize deploy/bootstrap > "$RUNNER_TEMP/r/bootstrap.yaml"
           kubectl kustomize deploy/base > "$RUNNER_TEMP/r/base.yaml"
           kubectl kustomize deploy/smoke > "$RUNNER_TEMP/r/smoke.yaml"
+          kubectl kustomize deploy/app-base > "$RUNNER_TEMP/r/app-base.yaml"
+          kubectl kustomize deploy/smoke/app > "$RUNNER_TEMP/r/smoke-app.yaml"
+          cp deploy/example-instance/flux/bootstrap-apps.yaml "$RUNNER_TEMP/r/bootstrap-apps.yaml"
           # the example instance as Flux would see it: its SOPS file decrypted (test-only key) first
           cp -r deploy "$RUNNER_TEMP/deploy"
           E="$RUNNER_TEMP/deploy/example-instance"
           SOPS_AGE_KEY_FILE=deploy/example-instance/TEST-ONLY-age.key sops -d -i "$E/deploy/secrets.enc.yaml"
+          SOPS_AGE_KEY_FILE=deploy/example-instance/TEST-ONLY-age.key sops -d -i "$E/apps/hello/tunnel.enc.yaml"
           kubectl kustomize "$E/deploy" > "$RUNNER_TEMP/r/example.yaml"
+          kubectl kustomize "$E/apps/hello" > "$RUNNER_TEMP/r/example-app.yaml"
+          # the extra app: its own cloudflared and its Deployment, all in its own namespace
+          deps="$(awk '/^kind: Deployment/{f=1} f&&/^  name:/{print $2;f=0}' "$RUNNER_TEMP/r/example-app.yaml" | sort | tr '\n' ' ')"
+          [ "$deps" = "cloudflared whoami " ] || { echo "app Deployments: $deps"; exit 1; }
+          if grep -E '^  namespace: ' "$RUNNER_TEMP/r/example-app.yaml" | grep -v 'namespace: app-hello'; then echo "app outside its namespace"; exit 1; fi
           cp deploy/example-instance/flux/sync.yaml "$RUNNER_TEMP/r/flux-sync.yaml"
           # what Flux prunes if a commit drops it: both Deployments and the PVC must be there
           deps="$(awk '/^kind: Deployment/{f=1} f&&/^  name:/{print $2;f=0}' "$RUNNER_TEMP/r/example.yaml" | sort | tr '\n' ' ')"
           [ "$deps" = "cloudflared server " ] || { echo "Deployments: $deps"; exit 1; }
           grep -q 'kind: PersistentVolumeClaim' "$RUNNER_TEMP/r/example.yaml"
           grep -q 'image: ghcr.io/de0ch/jarvis3-server:main' "$RUNNER_TEMP/r/example.yaml"
-          if grep -n 'image: [^@]*:latest' "$RUNNER_TEMP/r/example.yaml"; then echo "unpinned image"; exit 1; fi
+          if grep -n 'image: [^@]*:latest' "$RUNNER_TEMP/r/example.yaml" "$RUNNER_TEMP/r/example-app.yaml"; then echo "unpinned image"; exit 1; fi
       - name: kubeconform
         run: |
           kubeconform -strict -summary -kubernetes-version 1.34.0 \

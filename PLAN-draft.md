@@ -34,7 +34,7 @@ Status: draft of 2026-10-08, kept up to date with what was built (v0.1: `server/
 3. **Per instance, in that organisation's own GitHub org:**
    - **The instance deploy repo** (for example `<org>-jarvis`, private): Flux manifests that use `jarvis3/deploy/base` at a tag, the instance config (hostname, Google Workspace domain, group-to-role map, model list, caps, provider IDs) and SOPS-encrypted secrets. Only admins can write to it.
    - **The org-env repo** (for example `<org>-env`): rules, skills, scripts, and the role and locked-policy folders (section 2).
-   - Keeping instance config out of `DE0CH/jarvis3` follows the "never mix organisations" rule.
+   - Instance config stays out of `DE0CH/jarvis3`: this repo is public and holds no organisation's data. The instance deploy repo can also add other multi-user apps to the instance's box (docs/DEPLOY.md, "Extra apps").
 
 ### What is reused and what is new
 

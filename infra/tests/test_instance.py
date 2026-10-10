@@ -29,7 +29,8 @@ SECRET_ENV = {
     "GOOGLE_IDP_CLIENT_ID": "idp-client-id", "CLOUDFLARE_API_TOKEN": "s3cr3t-cfapi-000", "HCLOUD_TOKEN": "s3cr3t-hc-123",
     "GITHUB_TOKEN": "s3cr3t-gh-456",
 }
-SECRETS = [v for k, v in SECRET_ENV.items() if k != "GOOGLE_IDP_CLIENT_ID"]
+APP_TUNNEL_TOKEN = "s3cr3t-apptun-tun2"
+SECRETS = [v for k, v in SECRET_ENV.items() if k != "GOOGLE_IDP_CLIENT_ID"] + [APP_TUNNEL_TOKEN]
 
 
 def no_network(*a, **k):
@@ -57,6 +58,7 @@ class FakeCloudflare:
     def __init__(self):
         self.calls = []
         self.idps, self.tokens, self.apps, self.policies, self.tunnels, self.dns = [], [], [], {}, [], []
+        self.ingresses = {}
         self.n = 0
 
     def _id(self):
@@ -105,19 +107,21 @@ class FakeCloudflare:
             a = next(x for x in self.apps if x["id"] == path.rsplit("/", 1)[1])
             a.update(body)
             return ok(a)
+        query = dict(x.split("=", 1) for x in path.split("?", 1)[1].split("&")) if "?" in path else {}
         if "/cfd_tunnel" in path:
+            tid = path.split("/cfd_tunnel/")[1].split("/")[0] if "/cfd_tunnel/" in path else None
             if path.endswith("/token"):
-                return ok(SECRET_ENV["TUNNEL_TOKEN"])
+                return ok(SECRET_ENV["TUNNEL_TOKEN"] if tid == "tun1" else f"s3cr3t-apptun-{tid}")
             if path.endswith("/configurations"):
-                self.ingress = body
+                self.ingresses[tid] = body
                 return ok({})
             if m == "GET":
-                return ok(self.tunnels)
-            self.tunnels.append({"id": "tun1", "name": body["name"]})
+                return ok([t for t in self.tunnels if t["name"] == query.get("name")])
+            self.tunnels.append({"id": f"tun{len(self.tunnels) + 1}", "name": body["name"]})
             return ok(self.tunnels[-1])
         if "/dns_records" in path:
             if m == "GET":
-                return ok(self.dns)
+                return ok([d for d in self.dns if d["name"] == query.get("name")])
             if m == "POST":
                 self.dns.append(dict(body, id=self._id()))
             return ok({})
@@ -159,8 +163,11 @@ class Scaffold(unittest.TestCase):
             shutil.copy(EXAMPLE / "age.pub", repo)
             (repo / "deploy").mkdir()
             shutil.copy(EXAMPLE / "deploy/secrets.enc.yaml", repo / "deploy")
-            run(["scaffold", str(repo), "--base", "../../base"])
-            for rel in ["deploy/kustomization.yaml", "deploy/instance.env", "flux/sync.yaml", ".sops.yaml"]:
+            (repo / "apps/hello").mkdir(parents=True)
+            shutil.copy(EXAMPLE / "apps/hello/tunnel.enc.yaml", repo / "apps/hello")
+            run(["scaffold", str(repo), "--base", "../../base", "--app-base", "../../../app-base"])
+            for rel in ["deploy/kustomization.yaml", "deploy/instance.env", "flux/sync.yaml", "flux/bootstrap-apps.yaml", ".sops.yaml",
+                        "apps/hello/kustomization.yaml"]:
                 self.assertEqual((repo / rel).read_text(), (EXAMPLE / rel).read_text(), rel)
 
     def test_real_instances_pin_the_remote_base(self):
@@ -222,14 +229,31 @@ class Cloudflare(unittest.TestCase):
             self.assertEqual([p["decision"] for p in pols], ["allow", "non_identity"])
             self.assertEqual(pols[0]["include"], [{"email_domain": {"domain": "example.org"}}])
             self.assertEqual(pols[1]["include"], [{"any_valid_service_token": {}}])
-            self.assertEqual(fake.ingress["config"]["ingress"][0]["service"], "http://server.jarvis3.svc.cluster.local:8080")
+            self.assertEqual(fake.ingresses["tun1"]["config"]["ingress"][0]["service"], "http://server.jarvis3.svc.cluster.local:8080")
             self.assertEqual(fake.dns[0]["content"], "tun1.cfargotunnel.com")
+            # the extra app: its own Access app (its emails, no service tokens), its own tunnel to its own Service
+            xapp = fake.apps[1]
+            self.assertEqual(xapp["domain"], "hello.example.org")
+            self.assertNotIn("allowed_idps", xapp)
+            xpols = fake.policies[xapp["id"]]
+            self.assertEqual([p["decision"] for p in xpols], ["allow"])
+            self.assertEqual(xpols[0]["include"], [{"email": {"email": "owner@example.org"}}, {"email": {"email": "colleague@example.org"}}])
+            self.assertEqual([t["name"] for t in fake.tunnels], ["example-jarvis3", "example-app-hello"])
+            self.assertEqual(fake.ingresses["tun2"]["config"]["ingress"][0],
+                             {"hostname": "hello.example.org", "service": "http://whoami.app-hello.svc.cluster.local:8080", "originRequest": {}})
+            self.assertEqual(fake.dns[1]["name"], "hello.example.org")
+            self.assertEqual(fake.dns[1]["content"], "tun2.cfargotunnel.com")
+            self.assertEqual(vals["APP_HELLO_TUNNEL_TOKEN"], APP_TUNNEL_TOKEN)
+            # the app's Access app exists before its DNS record
+            names = [c for c in fake.calls]
+            self.assertLess(names.index(("POST", "/accounts/<Cloudflare account id>/access/apps")), names.index(("POST", "/zones/<zone id of example.org>/dns_records")))
             # second run: idempotent, the gate token is kept (its secret is in the out file)
             run(["cloudflare", str(EXAMPLE), "--out", str(outf), "--apply"], SECRET_ENV)
             self.assertEqual(len(fake.tokens), 1)
-            self.assertEqual(len(fake.apps), 1)
+            self.assertEqual(len(fake.apps), 2)
+            self.assertEqual(len(fake.tunnels), 2)
             self.assertEqual(len(fake.policies[app["id"]]), 2)
-            self.assertEqual(len(fake.dns), 1)
+            self.assertEqual(len(fake.dns), 2)
             self.assertNotIn(("DELETE", f"/accounts/<Cloudflare account id>/access/service_tokens/{fake.tokens[0]['id']}"), fake.calls)
 
     def test_apply_needs_the_token(self):
@@ -350,3 +374,75 @@ class DeployKeys(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExtraApps(unittest.TestCase):
+    def config(self, **app):
+        c = json.loads((EXAMPLE / "instance.json").read_text())
+        c["apps"] = [dict(c["apps"][0], **app)]
+        return c
+
+    def test_origin_must_be_a_service_of_the_app_itself(self):
+        for origin in ["http://server.jarvis3.svc.cluster.local:8080", "http://whoami.app-other.svc.cluster.local", "http://10.0.0.1:80",
+                       "http://whoami.app-hello.svc.cluster.local.evil.example.org"]:
+            self.assertTrue(any("origin" in p for p in instance.validate_instance(self.config(origin=origin))), origin)
+        self.assertEqual(instance.validate_instance(self.config()), [])
+
+    def test_bad_apps_are_named(self):
+        self.assertTrue(any("hostname" in p for p in instance.validate_instance(self.config(hostname="jarvis.example.org"))))
+        self.assertTrue(any("accessEmails" in p for p in instance.validate_instance(self.config(accessEmails=[]))))
+        self.assertTrue(any(".name" in p for p in instance.validate_instance(self.config(name="Bad_Name"))))
+        c = self.config()
+        c["apps"].append(dict(c["apps"][0]))
+        self.assertTrue(any("twice" in p for p in instance.validate_instance(c)))
+
+    def test_each_app_is_applied_as_its_own_namespace_admin(self):
+        sync = (EXAMPLE / "flux/sync.yaml").read_text()
+        self.assertIn("name: app-hello, namespace: flux-system", sync)
+        self.assertIn("path: ./apps/hello", sync)
+        self.assertIn("targetNamespace: app-hello", sync)
+        self.assertIn("serviceAccountName: flux-app-hello", sync)
+        boot = (EXAMPLE / "flux/bootstrap-apps.yaml").read_text()
+        self.assertIn("name: app-hello", boot)
+        self.assertIn("pod-security.kubernetes.io/enforce: restricted", boot)
+        self.assertIn("kind: RoleBinding", boot)
+        self.assertNotIn("ClusterRoleBinding", boot)
+        self.assertIn("subjects: [{ kind: ServiceAccount, name: flux-app-hello, namespace: flux-system }]", boot)
+
+    def test_the_box_bootstrap_makes_the_app_namespaces(self):
+        c = json.loads((EXAMPLE / "instance.json").read_text())
+        ud = instance.user_data(c, EXAMPLE, "AGE-SECRET-KEY-1FAKE\n", "fake")
+        self.assertIn("flux-app-hello", ud)
+        self.assertIn("name: jarvis3", ud)
+
+    def test_real_app_kustomizations_pin_the_remote_app_base(self):
+        c = json.loads((EXAMPLE / "instance.json").read_text())
+        k = instance.render_app_kustomization(c, c["apps"][0])
+        self.assertIn(f"https://github.com/DE0CH/jarvis3//deploy/app-base?ref={c['jarvis3']['ref']}", k)
+        self.assertIn("namespace: app-hello", k)
+
+    def test_check_wants_the_apps_files_and_no_strays(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "r"
+            shutil.copytree(EXAMPLE, repo)
+            (repo / "apps/hello/tunnel.enc.yaml").unlink()
+            (repo / "apps/stray").mkdir()
+            p = instance.check(repo)
+            self.assertTrue(any("apps/hello/tunnel.enc.yaml missing" in x for x in p), p)
+            self.assertTrue(any("apps/stray/" in x for x in p), p)
+
+    def test_secrets_routes_an_app_token_to_its_own_file(self):
+        out = run(["secrets", str(EXAMPLE), "APP_HELLO_TUNNEL_TOKEN"], {"APP_HELLO_TUNNEL_TOKEN": APP_TUNNEL_TOKEN})
+        self.assertIn("would write apps/hello/tunnel.enc.yaml with tunnel-token: token", out)
+        self.assertNotIn("deploy/secrets.enc.yaml", out)
+        self.assertNotIn(APP_TUNNEL_TOKEN, out)
+        with self.assertRaises(SystemExit):
+            run(["secrets", str(EXAMPLE), "APP_NOPE_TUNNEL_TOKEN"], {"APP_NOPE_TUNNEL_TOKEN": "x"})
+
+    @unittest.skipUnless(shutil.which("sops"), "needs sops")
+    def test_committed_example_app_token_is_encrypted_to_its_key(self):
+        enc = (EXAMPLE / "apps/hello/tunnel.enc.yaml").read_text()
+        self.assertIn("\nsops:", enc)
+        dec = subprocess.run(["sops", "-d", str(EXAMPLE / "apps/hello/tunnel.enc.yaml")],
+                             env=dict(os.environ, SOPS_AGE_KEY_FILE=str(EXAMPLE / "TEST-ONLY-age.key")), check=True, capture_output=True, text=True).stdout
+        self.assertIn("name: tunnel-token", dec)

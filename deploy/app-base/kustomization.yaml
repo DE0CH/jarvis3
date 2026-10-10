@@ -1,0 +1,12 @@
+# An extra app on an instance's box (docs/DEPLOY.md, "Extra apps"): the app's own Cloudflare tunnel
+# and the network policies that keep it apart from the instance and from other apps. The instance repo's
+# apps/<name>/kustomization.yaml (written by infra/instance.py scaffold) uses this as a remote base
+# pinned to a commit, adds the app's own manifests (apps/<name>/app/) and supplies, by name:
+#   Secret tunnel-token   token = the app's Cloudflare tunnel token (apps/<name>/tunnel.enc.yaml)
+# The namespace (app-<name>, Pod Security "restricted") and the identity Flux applies it as
+# (flux-app-<name>, admin in that namespace only) are made once by the box's bootstrap.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../tunnel
+  - network.yaml

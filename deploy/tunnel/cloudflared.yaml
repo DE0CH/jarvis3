@@ -1,6 +1,7 @@
-# cloudflared: the instance's remotely managed tunnel (its ingress rule, <host> -> the server Service,
-# lives in Cloudflare and is set by infra/instance.py cloudflare). The box has no open inbound port; this
-# outbound connection is the only way in. Token: Secret tunnel-token (SOPS, from the instance repo).
+# cloudflared: a remotely managed Cloudflare tunnel (its ingress rules live in Cloudflare and are set by
+# infra/instance.py cloudflare). The box has no open inbound port; this outbound connection is the only
+# way in. Token: Secret tunnel-token (SOPS, from the instance repo). Used by deploy/base (the instance)
+# and deploy/app-base (each extra app has a tunnel of its own).
 apiVersion: apps/v1
 kind: Deployment
 metadata:

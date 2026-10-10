@@ -1,0 +1,7 @@
+# The example extra app's own manifests (written by the admin, not generated). A stand-in for any other
+# multi-user web app on the instance's box: one Deployment and the Service its tunnel points at
+# (instance.json apps[].origin). Flux sets the namespace (app-hello).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - whoami.yaml

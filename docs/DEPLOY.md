@@ -31,6 +31,7 @@ Hetzner server (firewall: no inbound rules; sshd disabled)
 |---|---|
 | Namespace, `flux-applier` (admin in `jarvis3` only) | [`deploy/bootstrap/`](../deploy/bootstrap/), applied once by cloud-init, never by Flux |
 | Server, Litestream, org-env mirror, tunnel, policies | [`deploy/base/`](../deploy/base/), used by each instance as a remote base pinned to a commit |
+| An extra app's tunnel and policies | [`deploy/app-base/`](../deploy/app-base/) (with [`deploy/tunnel/`](../deploy/tunnel/), the cloudflared shared with the base), a remote base for the instance repo's `apps/<name>/` |
 | Box creation, Cloudflare, deploy keys, SOPS secrets | [`infra/instance.py`](../infra/instance.py) + [`infra/cloud-init.sh`](../infra/cloud-init.sh) |
 | A complete fake instance repo (`example.org`) | [`deploy/example-instance/`](../deploy/example-instance/) |
 | CI-only overlay: MinIO bucket, fake secrets | [`deploy/smoke/`](../deploy/smoke/) |
@@ -59,6 +60,41 @@ cloudflared by digest in `deploy/base`; the server image by the 12-hex commit ta
   In an account shared with other services, their service tokens also pass Access for this hostname and
   are refused by the server with 403.
 
+## Extra apps
+
+An instance's box may also run other multi-user apps of the operator's (DESIGN.md, "What may share
+infrastructure"), declared in the instance repo, never in this one. Each gets:
+
+- its own namespace `app-<name>` (Pod Security "restricted") and its own Flux identity
+  `flux-app-<name>`, admin in that namespace only. Both are made by the box's cloud-init from the
+  instance repo's `flux/bootstrap-apps.yaml`, like the `jarvis3` namespace: a push can never create a
+  namespace or grant a right. **Adding an app to an existing box therefore means rebuilding the box**
+  (RUNBOOK, "Rebuilding the box"); changing an app that exists is an ordinary push;
+- its own Flux Kustomization `app-<name>` (path `./apps/<name>`, `targetNamespace: app-<name>`, SOPS),
+  so its manifests can't land anywhere else;
+- its own Cloudflare tunnel, Access app and DNS name (`instance.py cloudflare`). The Access app admits
+  the app's `accessEmails` through the account's login methods; it has nothing to do with the
+  instance's Access app or its service tokens. Its cloudflared runs in its namespace;
+- network policies from `deploy/app-base`: its pods accept connections only from its own namespace, and
+  every namespace on the box denies ingress from elsewhere, so the app and the Jarvis 3 server can't
+  reach each other's data. The metadata service is blocked there too.
+
+The app's own manifests (Deployments, Services, its own SOPS secrets as `*.enc.yaml`) go in
+`apps/<name>/app/` of the instance repo, as a kustomization without a namespace. Its tunnel's origin
+(`instance.json` `apps[].origin`) must be a Service of the app itself
+(`http://<service>.app-<name>.svc.cluster.local[:port]`). An app's persistent data is its own to back
+up: Litestream covers only the Jarvis 3 database, and a rebuilt box starts the app's volumes empty.
+
+`instance.json`:
+
+```json
+"apps": [
+  { "name": "hello", "hostname": "hello.example.org",
+    "origin": "http://whoami.app-hello.svc.cluster.local:8080",
+    "accessEmails": ["owner@example.org"] }
+]
+```
+
 ## The private instance repo
 
 Each instance has its own private repo in its organisation's GitHub org. This public repo holds no
@@ -67,13 +103,17 @@ instance's names, domains, emails or ids. The instance repo must contain exactly
 
 | Path | What | Written by |
 |---|---|---|
-| `instance.json` | infra parameters: name, hostname, the jarvis3 commit and server image tag, Hetzner location/type/image, Cloudflare account id, zone id, Access team domain, Google Workspace IdP name and domain, allowed email domains, bucket endpoint/region/name, the instance and org-env repos, k3s and Flux versions | the admin |
+| `instance.json` | infra parameters: name, hostname, the jarvis3 commit and server image tag, Hetzner location/type/image, Cloudflare account id, zone id, Access team domain, Google Workspace IdP name and domain, allowed email domains, bucket endpoint/region/name, the instance and org-env repos, k3s and Flux versions, and the extra apps (`apps`, optional) | the admin |
 | `deploy/config.json` | the server config ([CONFIG.md](CONFIG.md)); `orgEnv.mirrorPath` must be `/data/org-env.git` and `publicUrl`, `access.teamDomain`, `storage` must match `instance.json` (`instance.py check`) | the admin |
 | `deploy/kustomization.yaml` | the remote base `github.com/DE0CH/jarvis3//deploy/base?ref=<commit>`, the two ConfigMaps, the server image tag | `instance.py scaffold` |
 | `deploy/instance.env` | ConfigMap `jarvis-instance`: Litestream's bucket settings and `ORG_ENV_URL` | `instance.py scaffold` |
 | `deploy/secrets.enc.yaml` | SOPS-encrypted Secrets `jarvis-secrets` (the server's secret env, CONFIG.md), `tunnel-token`, `org-env-deploy-key` | `instance.py secrets` |
-| `flux/sync.yaml` | the Flux entry point: GitRepository `instance` + Kustomization `instance` (path `./deploy`, SOPS, `flux-applier`). Applied once by cloud-init | `instance.py scaffold` |
-| `age.pub`, `.sops.yaml` | the box's age recipient; SOPS rule encrypting `data`/`stringData` of `deploy/*.enc.yaml` | `instance.py age-key` |
+| `flux/sync.yaml` | the Flux entry point: GitRepository `instance` + Kustomization `instance` (path `./deploy`, SOPS, `flux-applier`), and one Kustomization per extra app. Applied once by cloud-init | `instance.py scaffold` |
+| `flux/bootstrap-apps.yaml` | per extra app: its namespace, `flux-app-<name>` and its RoleBinding. Applied once by cloud-init | `instance.py scaffold` |
+| `apps/<name>/kustomization.yaml` | per extra app: the remote app base `github.com/DE0CH/jarvis3//deploy/app-base?ref=<commit>`, `./app`, the tunnel token | `instance.py scaffold` |
+| `apps/<name>/app/` | per extra app: its own manifests (a kustomization) and its own `*.enc.yaml` secrets | the admin |
+| `apps/<name>/tunnel.enc.yaml` | per extra app: SOPS-encrypted Secret `tunnel-token` | `instance.py secrets` (`APP_<NAME>_TUNNEL_TOKEN`) |
+| `age.pub`, `.sops.yaml` | the box's age recipient; SOPS rule encrypting `data`/`stringData` of `deploy/*.enc.yaml` and `apps/**/*.enc.yaml` | `instance.py age-key` |
 
 Not in the repo: the age private key (the admin's password manager) and the private halves of the
 deploy keys (the Flux one goes into the box's user-data; the org-env one into `secrets.enc.yaml`).
@@ -105,12 +145,13 @@ Google Workspace service account.
   mode), scaffold reproduces the example repo, a real SOPS/age round trip, the rendered user-data
   parses; then the dry runs of every step with canary secrets in the environment.
 - `manifests`: `kubectl kustomize` of bootstrap, base, the example instance (decrypted with its
-  test-only age key, as Flux would) and the smoke overlay; `kubeconform -strict` with the Flux CRD
+  test-only age key, as Flux would), its extra app `hello`, the app base and the smoke overlays; `kubeconform -strict` with the Flux CRD
   schemas; both Deployments and the PVC present, no unpinned image.
 - `smoke`: [`deploy/smoke/run.sh`](../deploy/smoke/run.sh) on a k3d cluster at the instance's k3s
   version, with the server image built from the commit: Pod Security admission, the init containers,
   the server's health, the org-env mirror, the NetworkPolicies (cloudflared gets through, another pod
-  doesn't), and Litestream replicate-then-restore onto a new volume (same user ids after the restore).
+  doesn't), the example's extra app in its own namespace (reachable from its namespace only, and unable
+  to reach the server), and Litestream replicate-then-restore onto a new volume (same user ids after the restore).
   Runs locally too with docker, k3d and kubectl.
 
 Not tested in CI: the real cloud APIs, the cloud-init run on a real Ubuntu box, Flux itself pulling

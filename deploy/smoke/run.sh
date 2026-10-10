@@ -6,6 +6,8 @@
 #   - the server comes up behind its init containers (Litestream restore, org-env clone) and answers
 #   - the org-env mirror is a bare clone at the remote's HEAD
 #   - the NetworkPolicies: cloudflared may reach the server, any other pod may not
+#   - an extra app (the example instance's apps/hello) in its own namespace: admitted under "restricted",
+#     reachable from its own namespace only, and unable to reach the Jarvis 3 server
 #   - Litestream replicates to the bucket, and a NEW volume is restored from it (same user ids)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -61,14 +63,23 @@ step "network policies"
 k delete deploy cloudflared --wait=true
 # A probe pod labelled app=$1 fetches the server's health. kube-router applies policies to a new pod a few
 # seconds after it starts, so: "allowed" retries until a 200; "blocked" waits 15 s, then must fail 3 times.
-PROBE_JS='const go=async()=>{const f=()=>fetch("http://server:8080/api/health",{signal:AbortSignal.timeout(3000)}).then(r=>String(r.status),()=>"blocked");const w=ms=>new Promise(r=>setTimeout(r,ms));if(process.env.MODE==="allowed"){let s="";for(let i=0;i<30;i++){s=await f();if(s==="200")break;await w(1000)}console.log(s)}else{await w(15000);let s="blocked";for(let i=0;i<3;i++){const x=await f();if(x!=="blocked")s=x;await w(1000)}console.log(s)}};go()'
-probe() { # $1 = the pod's app label, $2 = allowed|blocked; prints the last HTTP status or "blocked"
-  local o
-  o=$(python3 -c 'import json,sys; print(json.dumps({"spec":{"securityContext":{"runAsNonRoot":True,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"p","image":"ghcr.io/de0ch/jarvis3-server:smoke","command":["node","-e",sys.argv[1]],"env":[{"name":"MODE","value":sys.argv[2]}],"securityContext":{"allowPrivilegeEscalation":False,"capabilities":{"drop":["ALL"]}}}]}}))' "$PROBE_JS" "$2")
-  k run "probe-$1-$RANDOM" --rm -i --quiet --restart=Never --labels="app=$1" --image=ghcr.io/de0ch/jarvis3-server:smoke --overrides="$o" | tail -1
+PROBE_JS='const go=async()=>{const f=()=>fetch(process.env.URL,{signal:AbortSignal.timeout(3000)}).then(r=>String(r.status),()=>"blocked");const w=ms=>new Promise(r=>setTimeout(r,ms));if(process.env.MODE==="allowed"){let s="";for(let i=0;i<30;i++){s=await f();if(s==="200")break;await w(1000)}console.log(s)}else{await w(15000);let s="blocked";for(let i=0;i<3;i++){const x=await f();if(x!=="blocked")s=x;await w(1000)}console.log(s)}};go()'
+probe() { # $1 = the pod's app label, $2 = allowed|blocked, [$3 = URL, $4 = namespace]; prints the last HTTP status or "blocked"
+  local o url=${3:-http://server:8080/api/health} ns=${4:-$NS}
+  o=$(python3 -c 'import json,sys; print(json.dumps({"spec":{"securityContext":{"runAsNonRoot":True,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"p","image":"ghcr.io/de0ch/jarvis3-server:smoke","command":["node","-e",sys.argv[1]],"env":[{"name":"MODE","value":sys.argv[2]},{"name":"URL","value":sys.argv[3]}],"securityContext":{"allowPrivilegeEscalation":False,"capabilities":{"drop":["ALL"]}}}]}}))' "$PROBE_JS" "$2" "$url")
+  kubectl -n "$ns" run "probe-$1-$RANDOM" --rm -i --quiet --restart=Never --labels="app=$1" --image=ghcr.io/de0ch/jarvis3-server:smoke --overrides="$o" | tail -1
 }
 r=$(probe cloudflared allowed); echo "from cloudflared: $r"; test "$r" = 200
 r=$(probe intruder blocked); echo "from another pod: $r"; test "$r" = blocked
+
+step "an extra app: its own namespace, apart from the instance"
+kubectl apply -f deploy/example-instance/flux/bootstrap-apps.yaml
+kubectl apply -k deploy/smoke/app
+kubectl -n app-hello rollout status deploy/whoami --timeout=180s
+APP=http://whoami.app-hello.svc.cluster.local:8080/
+r=$(probe neighbour allowed "$APP" app-hello); echo "app from its own namespace: $r"; test "$r" = 200
+r=$(probe cloudflared blocked "$APP"); echo "app from the instance's namespace: $r"; test "$r" = blocked
+r=$(probe cloudflared blocked http://server.jarvis3.svc.cluster.local:8080/api/health app-hello); echo "instance from the app's namespace: $r"; test "$r" = blocked
 
 step "Litestream: replicate, then restore onto a new volume"
 uid() { k exec deploy/server -c server -- node --disable-warning=ExperimentalWarning -e 'const {DatabaseSync}=require("node:sqlite");console.log(new DatabaseSync("/data/jarvis.db",{readOnly:true}).prepare("SELECT group_concat(id) AS i FROM (SELECT id FROM users ORDER BY email)").get().i)'; }

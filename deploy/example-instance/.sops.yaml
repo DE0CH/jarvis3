@@ -1,5 +1,5 @@
-# SOPS: everything under deploy/ that ends in .enc.yaml is encrypted to the box's age key (only data/stringData).
+# SOPS: everything under deploy/ and apps/ that ends in .enc.yaml is encrypted to the box's age key (only data/stringData).
 creation_rules:
-  - path_regex: deploy/.*\.enc\.yaml$
+  - path_regex: (deploy|apps)/.*\.enc\.yaml$
     encrypted_regex: ^(data|stringData)$
     age: age10aafemvcv8scpn5a4wzqfksdhlxppjfs4nkv9c4kpenwg245d5qsl9vq0h

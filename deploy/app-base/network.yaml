@@ -1,0 +1,29 @@
+# An extra app's namespace: pods accept connections only from pods of the same namespace (its own
+# cloudflared and its own parts), so nothing outside the app (the Jarvis 3 server, another app) can
+# reach its data, and it can't reach theirs (every namespace denies ingress from elsewhere). The
+# cloud metadata service is blocked: it keeps serving the box's user-data (age key, deploy key).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-ingress }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: same-namespace-only }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: {} }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: no-metadata-service }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ ipBlock: { cidr: 0.0.0.0/0, except: [169.254.169.254/32] } }]
+    - to: [{ ipBlock: { cidr: "::/0" } }]

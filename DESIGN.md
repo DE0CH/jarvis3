@@ -18,22 +18,34 @@ owner as admin). There is no special "personal" mode.
 The code lives in `DE0CH/jarvis3`. An instance deploys from it with its own config, kept in that
 organisation's private instance repo (docs/DEPLOY.md).
 
-**Never mix organisations.** One admin may run instances for more than one organisation. Each
-instance holds only its own organisation's people, data, accounts and secrets. Nothing of one
-organisation (accounts, documents, contacts, skills that name its business) goes into another's
-instance, env repo or prompts, nor into this repo.
+**User data never mixes.** An instance holds its own organisation's people, documents, sessions and
+secrets, and nothing of them reaches another instance or another app, whatever infrastructure they
+share. No organisation's data goes into this repo.
 
 ## Instance isolation
 
-Instances share code only. Each has its own:
+**What may share infrastructure.** Infrastructure for things only the operator uses (a one-person
+instance, the operator's own experiments) stays separate from everything else. Things with other
+users (a multi-user instance, another multi-user app of the operator's) may share infrastructure,
+provided user data never mixes between them: an instance's box may also run such an app, in its own
+namespace with its own data, its own tunnel hostname and Access app, and neither can reach the
+other's data (docs/DEPLOY.md, "Extra apps"). Billing may be shared (for example OpenRouter on the
+operator's own account, below).
+
+Why the line falls there: an instance with other users must be stable and well designed and must not
+break under them, while the operator's own setup is where new infrastructure gets tried, and an
+experiment may break everything. An experiment must never be able to take down the tools used to fix
+things, so the two never share infrastructure. Once Jarvis 3 is stable the operator moves onto an
+instance of it too (dogfooding); until then the operator's experimental infrastructure (Jarvis 1 and
+Jarvis 2) stays separate.
+
+By default each instance has its own:
 
 - server box and cluster, its own session-machine provider org, its own Cloudflare Access apps, its own
   GitHub org for its env repo and its own OpenRouter provisioning key (as its own accounts, or as
   separate spaces inside an operator's accounts, below);
 - identity provider (for example the organisation's Google Workspace);
-- org-env repo, secrets and archive storage.
-
-A compromise of one instance never reaches another.
+- org-env repo, secrets and backup and archive storage.
 
 **Hosting inside an operator's accounts.** An organisation's infrastructure may be hosted, for a
 while, under the provider accounts of the person who operates the instance, each piece in a space of

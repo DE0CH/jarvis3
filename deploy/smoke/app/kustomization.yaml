@@ -1,0 +1,9 @@
+# CI only: the example instance's extra app (apps/hello) on the smoke cluster, with the app base from this
+# checkout and a fake, unencrypted tunnel token in place of its SOPS file.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: app-hello
+resources:
+  - ../../app-base
+  - ../../example-instance/apps/hello/app
+  - tunnel.yaml
