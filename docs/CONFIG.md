@@ -25,7 +25,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `models`, `defaultModel` | the curated OpenRouter model list (`{id, label}`) and its default |
 | `machines` | `kind: "fly"`: `app` (one per instance), `org`, `region`, session `image`, `guest` size, `rootfsGb`. `kind: "docker"` (CI and local runs only): `image`, `guest`, `socketPath`, `network`, `envOverrides`, `extraHosts` |
 | `storage` | S3 endpoint, region, bucket (Hetzner Object Storage in the instance's own project) |
-| `orgEnv.mirrorPath` | a bare mirror of the org-env repo kept fetched by the deployment (read-only deploy key) |
+| `orgEnv.mirrorPath` | a bare mirror of the org-env repo kept fetched by the deployment (read-only deploy key); `/data/org-env.git` under the standard deployment (docs/DEPLOY.md) |
 | `orgEnv.commit` | the full 40-hex commit every new session loads; changing it is a deploy |
 | `daemonPath` | the Paseo daemon WebSocket path inside a session |
 | `idleMinutes` | auto-pause after this long reported idle (0 = off) |
@@ -57,3 +57,5 @@ Other environment: `JARVIS_DB` (SQLite path, default `/data/jarvis.db`), `PORT` 
   (paired devices and the session gate).
 - The session gate is one service token created once; its client id goes in
   `access.sessionGateClientId`, its secret in `SESSION_GATE_CLIENT_SECRET`.
+
+How an instance is deployed and operated: [`DEPLOY.md`](DEPLOY.md) and [`RUNBOOK.md`](RUNBOOK.md).

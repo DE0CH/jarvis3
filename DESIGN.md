@@ -28,7 +28,7 @@ instance, env repo or prompts, nor into this repo.
 Instances share code only. Each has its own:
 
 - server box and cluster, its own session-machine provider org, its own Cloudflare Access apps, its own
-  GitHub org for its env repo and its own OpenRouter organisation (as its own accounts, or as
+  GitHub org for its env repo and its own OpenRouter provisioning key (as its own accounts, or as
   separate spaces inside an operator's accounts, below);
 - identity provider (for example the organisation's Google Workspace);
 - org-env repo, secrets and archive storage.
@@ -38,16 +38,19 @@ A compromise of one instance never reaches another.
 **Hosting inside an operator's accounts.** An organisation's infrastructure may be hosted, for a
 while, under the provider accounts of the person who operates the instance, each piece in a space of
 its own: a GitHub org for the organisation, a separate Hetzner project, a separate Fly org (never the
-org of the operator's other workloads: budget and machine caps act per org), a separate OpenRouter
-organisation (a provisioning key can list and delete every key on its account), and Access apps for
+org of the operator's other workloads: budget and machine caps act per org), and Access apps for
 the organisation's own hostname in the operator's Cloudflare account. The instance server only ever
-gets keys scoped to those spaces, never account-wide keys. Moving to the organisation's own
+gets keys scoped to those spaces, never account-wide keys. OpenRouter is the exception: the
+instance's provisioning key may sit on the operator's own OpenRouter account (no separate
+organisation or billing), and the instance still mints each user's key with its monthly limit from
+it. That key can list and delete every key on the account, so it is held by the instance server
+only, like the other Tier 3 credentials. Moving to the organisation's own
 accounts later costs:
 
 - GitHub: add owners to the org. Hetzner: rebuild the box from git and copy the bucket and SQLite file. Fly: nothing
   to move (machines are disposable).
 - Cloudflare: every staff device signs in and pairs again once (service tokens belong to the account).
-- OpenRouter: staff keys are re-minted by the server; credit doesn't move.
+- OpenRouter: staff keys are re-minted by the server from the new account's provisioning key; credit doesn't move.
 - iOS: TestFlight builds don't transfer between developer accounts; after the app moves to the organisation's own
   account, staff install it once more.
 
