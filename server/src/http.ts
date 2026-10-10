@@ -21,6 +21,8 @@ import { archiveKey } from "./tasks.ts";
 import * as approvals from "./approvals.ts";
 import * as passkeys from "./passkeys.ts";
 import { approvalPage, PAGE_HEADERS, passkeysPage, safeReturn } from "./pages.ts";
+import * as tools from "./tools/index.ts";
+import { checkRelay, parseTarget, runTunnel } from "./tools/relay.ts";
 
 export const VERSION = "0.1.0";
 
@@ -99,7 +101,7 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok({
       ...users.userDetail(ctx, user),
       unreadNotices: notices.unreadCount(ctx, user.id),
-      features: { suggestions: suggestions.suggestionsEnabled(ctx) },
+      features: { suggestions: suggestions.suggestionsEnabled(ctx), ...tools.featureFlag(ctx) },
       pendingApprovals: approvals.pendingCount(ctx, userOf(r.principal)),
       isOwner: approvals.isOwner(ctx, user),
     } satisfies A.MeView);
@@ -399,6 +401,11 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok(budgetView(ctx) satisfies A.BudgetView);
   });
 
+  route("GET", "/api/admin/tools", (r) => {
+    authorize(r.principal, { kind: "admin", what: "route" });
+    return ok(tools.adminToolsView(ctx) satisfies A.ToolsAdminView);
+  });
+
   route("POST", "/api/admin/directory/sync", async (r) => {
     authorize(r.principal, { kind: "admin", what: "directory" });
     return ok((await users.syncDirectory(ctx)) satisfies A.SyncResult);
@@ -439,6 +446,17 @@ export function defineRoutes(ctx: Ctx): Routes {
     if (!row || row.task_id !== t.id) throw httpError("not_found", "no such approval");
     const wait = Math.max(0, Math.min(55, Number(r.url.searchParams.get("wait") || 0) || 0));
     return ok(approvals.approvalView(ctx, await approvals.waitSettled(ctx, row.id, wait), null) satisfies A.ApprovalView);
+  });
+
+  // Tier 0 tools (docs/TOOLS.md): metered on the server with the organisation's keys
+  route("GET", "/api/session/tools", (r) => ok(tools.sessionToolsView(ctx, sessionTask(ctx, r)) satisfies A.SessionToolsView));
+  route("POST", "/api/session/tools/search", async (r) => {
+    const t = sessionTask(ctx, r);
+    return ok((await tools.webSearch(ctx, t, await r.body())) satisfies A.WebSearchResponse);
+  });
+  route("POST", "/api/session/tools/fetch", async (r) => {
+    const t = sessionTask(ctx, r);
+    return ok((await tools.webFetch(ctx, t, await r.body())) satisfies A.WebFetchResponse);
   });
 
   route("POST", "/api/session/status", async (r) => {
@@ -584,9 +602,11 @@ function refuse(socket: Duplex, e: unknown): void {
 export function makeUpgradeHandler(ctx: Ctx, resolveDeps: ResolveDeps) {
   const daemonWss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024, handleProtocols: (offered) => pickClientProtocol(offered) });
   const channelWss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
+  const proxyWss = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 * 1024 });
   const close = () => {
     daemonWss.close();
     channelWss.close();
+    proxyWss.close();
   };
   const handler = async (req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> => {
     socket.on("error", () => socket.destroy());
@@ -598,6 +618,16 @@ export function makeUpgradeHandler(ctx: Ctx, resolveDeps: ResolveDeps) {
         authorize(principal, { kind: "session" });
         const task = (principal as Extract<Principal, { kind: "session" }>).task;
         channelWss.handleUpgrade(req, socket, head, (ws: WebSocket) => ctx.hub.attachSession(task.id, ws));
+        return;
+      }
+      if (url.pathname === "/api/session/proxy") {
+        authorize(principal, { kind: "session" });
+        const task = (principal as Extract<Principal, { kind: "session" }>).task;
+        const owner = users.requireUser(ctx, task.user_id);
+        if (owner.status !== "active") throw httpError("forbidden", "the task's owner is not an active member");
+        const target = parseTarget(url);
+        const p = checkRelay(ctx, owner);
+        runTunnel(ctx, proxyWss, req, socket, head, owner, task, p, target);
         return;
       }
       const m = /^\/api\/tasks\/([^/]+)\/daemon$/.exec(url.pathname);

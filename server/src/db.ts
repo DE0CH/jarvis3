@@ -178,6 +178,39 @@ const MIGRATIONS: string[] = [
     expires_at INTEGER NOT NULL
   );
   `,
+  // 5: Tier 0 tools: per-user caps, the metering ledger, per-user proxy sub-accounts
+  `
+  ALTER TABLE users ADD COLUMN tools_limit_override REAL;          -- USD/month; NULL with _set = no cap
+  ALTER TABLE users ADD COLUMN tools_limit_override_set INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE users ADD COLUMN proxy_limit_override REAL;          -- GB/month
+  ALTER TABLE users ADD COLUMN proxy_limit_override_set INTEGER NOT NULL DEFAULT 0;
+  CREATE TABLE tool_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    task_id TEXT,
+    tool TEXT NOT NULL CHECK (tool IN ('search','fetch','proxy')),
+    provider TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('reserved','done','failed')),
+    cost_usd REAL NOT NULL,                  -- reserved: the most it can cost; done: what it cost
+    bytes INTEGER NOT NULL DEFAULT 0,        -- relayed proxy traffic, both directions
+    month TEXT NOT NULL,                     -- YYYY-MM (UTC) it counts against
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX tool_usage_user_month ON tool_usage(user_id, month);
+  CREATE INDEX tool_usage_month ON tool_usage(month);
+  CREATE TABLE proxy_users (
+    user_id TEXT PRIMARY KEY REFERENCES users(id),
+    provider TEXT NOT NULL,
+    remote_id TEXT NOT NULL,                 -- the provider's sub-account id
+    login_sealed TEXT NOT NULL,              -- JSON {username, password}, AES-GCM with the server key
+    month TEXT NOT NULL,                     -- the month the allocation below was made for
+    allocated_gb REAL,                       -- the cap in force when allocated (NULL = no cap)
+    baseline_gb REAL NOT NULL DEFAULT 0,     -- the provider's used counter at the month's start
+    used_gb REAL NOT NULL DEFAULT 0,         -- used this month, last read from the provider
+    checked_at INTEGER,
+    created_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 export type Db = DatabaseSync;

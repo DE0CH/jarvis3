@@ -11,6 +11,10 @@ export interface UserRow {
   openrouter_limit_override_set: number;
   machine_hours_override: number | null;
   machine_hours_override_set: number;
+  tools_limit_override: number | null;
+  tools_limit_override_set: number;
+  proxy_limit_override: number | null;
+  proxy_limit_override_set: number;
   created_at: number;
   updated_at: number;
   status_changed_at: number;
@@ -53,5 +57,18 @@ export interface KeyRow {
   hash: string;
   key_sealed: string;
   limit_usd: number | null;
+  created_at: number;
+}
+
+export interface ProxyUserRow {
+  user_id: string;
+  provider: string;
+  remote_id: string;
+  login_sealed: string;
+  month: string;
+  allocated_gb: number | null;
+  baseline_gb: number;
+  used_gb: number;
+  checked_at: number | null;
   created_at: number;
 }

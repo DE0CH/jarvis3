@@ -12,6 +12,8 @@ import { limitsFor, machineHours, machineHoursCapReached } from "./spend.ts";
 import { keyRow, revokeKey, syncKeyLimit } from "./userkeys.ts";
 import { destroyTask, unarchivedTasksOf } from "./tasks.ts";
 import { getPersonal } from "./layers.ts";
+import { closeUserTunnels } from "./tools/relay.ts";
+import { proxyUserRow, refreshProxyUser, revokeProxyUser, userToolsView } from "./tools/index.ts";
 
 export function getUser(ctx: Ctx, id: string): UserRow | null {
   return (ctx.db.prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined) ?? null;
@@ -36,6 +38,7 @@ export function userView(ctx: Ctx, u: UserRow): UserView {
 }
 
 export function userDetail(ctx: Ctx, u: UserRow): UserDetail {
+  const tools = userToolsView(ctx, u);
   return {
     user: userView(ctx, u),
     limits: limitsFor(ctx, u),
@@ -45,6 +48,7 @@ export function userDetail(ctx: Ctx, u: UserRow): UserDetail {
       machineHoursCapReached: machineHoursCapReached(ctx, u),
       openrouterKey: !!keyRow(ctx, u.id),
     },
+    ...(tools ? { tools } : {}),
   };
 }
 
@@ -70,10 +74,22 @@ export async function setLimits(ctx: Ctx, user: UserRow, body: SetLimitsRequest)
     patch.push("machine_hours_override = ?", "machine_hours_override_set = ?");
     args.push(body.machineHoursPerMonth ?? null, body.machineHoursPerMonth === null ? 0 : 1);
   }
+  if ("toolsMonthlyUsd" in body) {
+    if (!validLimit(body.toolsMonthlyUsd)) throw httpError("bad_request", "toolsMonthlyUsd must be a number ≥ 0 or null");
+    patch.push("tools_limit_override = ?", "tools_limit_override_set = ?");
+    args.push(body.toolsMonthlyUsd ?? null, body.toolsMonthlyUsd === null ? 0 : 1);
+  }
+  if ("proxyMonthlyGb" in body) {
+    if (!validLimit(body.proxyMonthlyGb)) throw httpError("bad_request", "proxyMonthlyGb must be a number ≥ 0 or null");
+    patch.push("proxy_limit_override = ?", "proxy_limit_override_set = ?");
+    args.push(body.proxyMonthlyGb ?? null, body.proxyMonthlyGb === null ? 0 : 1);
+  }
   if (!patch.length) throw httpError("bad_request", "nothing to change");
   ctx.db.prepare(`UPDATE users SET ${patch.join(", ")}, updated_at = ? WHERE id = ?`).run(...args, ctx.clock.now(), user.id);
   const u = getUser(ctx, user.id)!;
   await syncKeyLimit(ctx, u);
+  // a changed proxy cap is pushed to the user's sub-account at once (subuser providers)
+  if ("proxyMonthlyGb" in body && proxyUserRow(ctx, u.id)) await refreshProxyUser(ctx, u, { force: true });
   return u;
 }
 
@@ -158,7 +174,7 @@ export async function syncDirectory(ctx: Ctx): Promise<SyncResult> {
 /**
  * Offboarding (DESIGN "Offboarding"), for a user just suspended or removed:
  *   1. their open daemon sockets close (4403) and the server already refuses them (status);
- *   2. their OpenRouter key is deleted and their devices' Access service tokens are revoked;
+ *   2. their OpenRouter key and proxy sub-account are deleted and their devices' Access service tokens are revoked;
  *   3. their personal layer (with its versions) is copied to archives/<userId>/ in the bucket;
  *   4. every task of theirs is archived to the bucket and its machine destroyed.
  * The tasks, archives and personal layer stay for the organisation; admins see them. Whatever
@@ -166,10 +182,16 @@ export async function syncDirectory(ctx: Ctx): Promise<SyncResult> {
  */
 export async function offboard(ctx: Ctx, userId: string): Promise<void> {
   ctx.hub.closeUser(userId, "your access was removed");
+  closeUserTunnels(ctx, userId);
   try {
     await revokeKey(ctx, userId);
   } catch (e) {
     ctx.log("offboard: key revoke failed (retried next tick)", { user: userId, error: (e as Error).message });
+  }
+  try {
+    await revokeProxyUser(ctx, userId);
+  } catch (e) {
+    ctx.log("offboard: proxy sub-account revoke failed (retried next tick)", { user: userId, error: (e as Error).message });
   }
   await revokeDevices(ctx, userId);
   await archiveLayer(ctx, userId).catch((e: Error) => ctx.log("offboard: layer archive failed (retried next tick)", { user: userId, error: e.message }));
@@ -237,6 +259,7 @@ export async function finishOffboarding(ctx: Ctx): Promise<void> {
   const inactive = ctx.db.prepare("SELECT id FROM users WHERE status != 'active'").all() as { id: string }[];
   for (const { id } of inactive) {
     if (keyRow(ctx, id)) await revokeKey(ctx, id).catch(() => {});
+    if (proxyUserRow(ctx, id)) await revokeProxyUser(ctx, id).catch(() => {});
     await revokeDevices(ctx, id).catch(() => {});
     await archiveLayer(ctx, id).catch(() => {});
     archiveTasksOf(ctx, id);

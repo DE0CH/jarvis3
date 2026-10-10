@@ -17,6 +17,7 @@ import { httpError, notFound } from "./errors.ts";
 import { ensureKey } from "./userkeys.ts";
 import { budgetCapped, machineHoursCapReached, startRun, stopRuns } from "./spend.ts";
 import { cancelForTask } from "./approvals.ts";
+import { ensureProxyUser } from "./tools/index.ts";
 
 export type BusyKind = "creating" | "pausing" | "resuming" | "destroying";
 export type PauseReason = "user" | "idle" | "machine_hours_cap" | "instance_budget" | "offboarded";
@@ -96,6 +97,10 @@ async function launch(ctx: Ctx, task: TaskRow, user: UserRow, o: { firstPrompt?:
     PASEO_PASSWORD: ctx.sealer.open(task.daemon_password_sealed, daemonAad(task.id)),
   };
   if (o.firstPrompt) env.JARVIS_FIRST_PROMPT = o.firstPrompt;
+  // Tier 0 proxy, subuser providers: the owner's own capped sub-account (jarvis-agent keeps it out
+  // of the agent's environment and serves it as a local proxy). Relay providers need nothing here.
+  const proxy = await proxyEnv(ctx, user);
+  if (proxy) env.JARVIS_PROXY = proxy;
   if (o.restore) env.JARVIS_RESTORE_URL = await ctx.blobs.presignGet(snapshotKey(task.id), ctx.config.presignSeconds ?? 3600);
   // the token must be known before the machine can dial in
   update(ctx, task.id, { session_token_hash: sha256hex(token) });
@@ -115,6 +120,20 @@ async function launch(ctx: Ctx, task: TaskRow, user: UserRow, o: { firstPrompt?:
     throw e;
   }
   startRun(ctx, task.id, user.id, m.id);
+}
+
+async function proxyEnv(ctx: Ctx, user: UserRow): Promise<string | null> {
+  const p = ctx.tools.proxy;
+  if (p?.mode !== "subuser") return null;
+  try {
+    const login = await ensureProxyUser(ctx, user);
+    if (!login) return null;
+    return JSON.stringify({ ...p.endpoint(), ...login, targeting: p.targeting() });
+  } catch (e) {
+    // a proxy provider outage must not stop the task: it starts without a proxy (logged)
+    ctx.log("proxy sub-account unavailable; the task starts without a proxy", { user: user.id, error: (e as Error).message.slice(0, 300) });
+    return null;
+  }
 }
 
 /** Tear down the machine side of a task (after its state is safe elsewhere). */

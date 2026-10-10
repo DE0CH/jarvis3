@@ -1,5 +1,6 @@
 // Production entry: config from JARVIS_CONFIG, secrets from the environment, state in JARVIS_DB.
-import { loadActionSecrets, loadConfig, loadSecrets } from "./config.ts";
+import { loadActionSecrets, loadConfig, loadSecrets, loadToolSecrets } from "./config.ts";
+import { buildToolProviders } from "./tools/registry.ts";
 import { openDb } from "./db.ts";
 import { createJarvis } from "./app.ts";
 import { FlyMachines } from "./fly.ts";
@@ -67,6 +68,7 @@ const jarvis = createJarvis({
     deviceTokens: new CloudflareDeviceTokens(secrets.cloudflareDeviceTokensApi, config.devices.cloudflareAccountId),
     orgEnv: new GitOrgEnv(config.orgEnv.mirrorPath, config.orgEnv.commit),
     forge,
+    tools: buildToolProviders(config, loadToolSecrets(config)),
   },
 });
 

@@ -8,6 +8,7 @@ import type { ChannelHub } from "./channel.ts";
 import type { NoticeView } from "./api-types.ts";
 import { randomId } from "./crypto.ts";
 import type { EventEmitter } from "node:events";
+import type { ToolProviders } from "./tools/types.ts";
 
 export interface Providers {
   machines: MachineProvider;
@@ -18,11 +19,14 @@ export interface Providers {
   orgEnv: OrgEnvSource;
   /** null: "Suggest for everyone" is not set up on this instance. */
   forge?: OrgEnvForge | null;
+  /** Tier 0 tools (tools/registry.ts builds them from config). Absent: none. */
+  tools?: ToolProviders;
 }
 
 export type Logger = (msg: string, extra?: Record<string, unknown>) => void;
 
-export interface Ctx extends Providers {
+export interface Ctx extends Omit<Providers, "tools"> {
+  tools: ToolProviders;
   config: Config;
   db: Db;
   clock: Clock;

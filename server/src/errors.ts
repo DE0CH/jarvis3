@@ -10,6 +10,7 @@ const STATUS: Record<ErrorCode, number> = {
   busy: 409,
   machine_hours_cap: 429,
   instance_budget: 429,
+  tools_cap: 429,
   too_many_requests: 429,
   capability_missing: 403,
   upstream: 502,

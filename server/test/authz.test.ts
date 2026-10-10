@@ -18,6 +18,7 @@ import {
   type Harness,
   type Cred,
 } from "./helpers.ts";
+import { FakeFetch, FakeRelayProxy, FakeSearch } from "../src/fakes/tools.ts";
 
 type Who = "owner" | "ownerDevice" | "other" | "admin" | "suspended" | "unknown" | "revokedDevice" | "session" | "gate" | "none";
 const WHO: Who[] = ["owner", "ownerDevice", "other", "admin", "suspended", "unknown", "revokedDevice", "session", "gate", "none"];
@@ -76,6 +77,8 @@ const ROUTES: R[] = [
   { kind: "admin", method: "PATCH", path: (i) => `/api/users/${i.alice}/limits`, body: { machineHoursPerMonth: 20 } },
   { kind: "admin", method: "GET", path: () => "/api/admin/budget" },
   { kind: "admin", method: "POST", path: () => "/api/admin/directory/sync" },
+  { kind: "admin", method: "GET", path: () => "/api/admin/tools" },
+  { kind: "admin", method: "PATCH", path: (i) => `/api/users/${i.alice}/limits`, body: { toolsMonthlyUsd: 3, proxyMonthlyGb: 2 } },
   { kind: "session", method: "GET", path: () => "/api/session/bundle" },
   { kind: "session", method: "GET", path: () => "/api/session/org-env.tar" },
   { kind: "session", method: "POST", path: () => "/api/session/notes", body: { text: "remember this" } },
@@ -83,6 +86,9 @@ const ROUTES: R[] = [
   { kind: "session", method: "GET", path: () => "/api/session/actions" },
   { kind: "session", method: "POST", path: () => "/api/session/approvals", body: { kind: "question", question: "matrix?" } },
   { kind: "session", method: "GET", path: (i) => `/api/session/approvals/${i.approval}` },
+  { kind: "session", method: "GET", path: () => "/api/session/tools" },
+  { kind: "session", method: "POST", path: () => "/api/session/tools/search", body: { query: "matrix" } },
+  { kind: "session", method: "POST", path: () => "/api/session/tools/fetch", body: { url: "https://example.org/" } },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/pause` },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/resume` },
   { kind: "owned", method: "DELETE", path: (i) => `/api/tasks/${i.task}` },
@@ -102,7 +108,17 @@ function expected(who: Who, kind: Kind): number | "allowed" {
 }
 
 async function setup(): Promise<{ h: Harness; ids: Ids; creds: Record<Who, Cred | null> }> {
-  const h = await harness();
+  // Tier 0 tools on (fakes), so their routes run for real; the relay points at a closed port
+  const h = await harness({
+    config: {
+      roles: {
+        admin: { openrouterMonthlyUsd: 100, machineHoursPerMonth: null, admin: true, toolsMonthlyUsd: 10, proxyMonthlyGb: 1 },
+        staff: { openrouterMonthlyUsd: 20, machineHoursPerMonth: 10, toolsMonthlyUsd: 10, proxyMonthlyGb: 1 },
+      },
+      tools: { search: { provider: "fake" }, fetch: { provider: "fake" }, proxy: { provider: "fake" } },
+    },
+    tools: { search: new FakeSearch(), fetch: new FakeFetch(), proxy: new FakeRelayProxy({ host: "127.0.0.1", port: 9 }) },
+  });
   const u = await seedUsers(h);
   const aliceCred = await asEmail(h, u.alice);
   const me = await call(h, aliceCred, "GET", "/api/me");
@@ -174,6 +190,26 @@ test("authorisation matrix: daemon proxy for every caller", async () => {
         const ws = await openWs(h, creds[who], path);
         ws.send(`hello from ${who}`);
         assert.equal(await nextMessage(ws), `echo:hello from ${who}`, who);
+        ws.close();
+      } else {
+        await assert.rejects(openWs(h, creds[who], path), (e: { status?: number }) => e.status === want, `${who} should get ${want}`);
+      }
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test("authorisation matrix: metered proxy relay for every caller", async () => {
+  const { h, creds } = await setup();
+  try {
+    for (const who of WHO) {
+      const path = "/api/session/proxy?host=example.org&port=443";
+      const want: number | "allowed" = who === "none" ? 401 : ["suspended", "unknown", "revokedDevice"].includes(who) ? 403 : who === "session" ? "allowed" : 401;
+      if (want === "allowed") {
+        const ws = await openWs(h, creds[who], path);
+        // the upstream at port 9 refuses: the tunnel reports it and closes
+        assert.equal(JSON.parse(await nextMessage(ws, 5000)).ok, false);
         ws.close();
       } else {
         await assert.rejects(openWs(h, creds[who], path), (e: { status?: number }) => e.status === want, `${who} should get ${want}`);

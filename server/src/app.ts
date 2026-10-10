@@ -17,6 +17,8 @@ import { budgetTick, capTick, idleTick, suggestionTick } from "./ticks.ts";
 import type { SyncResult } from "./api-types.ts";
 import { EventEmitter } from "node:events";
 import { checkActions } from "./actions/index.ts";
+import { proxyTick, settleStaleReservations } from "./tools/index.ts";
+import { checkToolProviders } from "./tools/registry.ts";
 
 export interface JarvisOptions {
   config: Config;
@@ -60,6 +62,7 @@ export function createJarvis(o: JarvisOptions): Jarvis {
   const ctx: Ctx = {
     ...o.providers,
     forge: o.providers.forge ?? null,
+    tools: o.providers.tools ?? { search: null, fetch: null, proxy: null },
     config: o.config,
     db: o.db,
     clock,
@@ -75,6 +78,8 @@ export function createJarvis(o: JarvisOptions): Jarvis {
     approvalBus,
   };
   ctxRef = ctx;
+  checkToolProviders(ctx);
+  settleStaleReservations(ctx);
 
   const resolveDeps: ResolveDeps = {
     db: o.db,
@@ -99,6 +104,7 @@ export function createJarvis(o: JarvisOptions): Jarvis {
       await budgetTick(ctx).catch((e: Error) => log("budget tick failed", { error: e.message }));
       await finishOffboarding(ctx).catch((e: Error) => log("offboarding retry failed", { error: e.message }));
       await suggestionTick(ctx).catch((e: Error) => log("suggestion check failed", { error: e.message }));
+      await proxyTick(ctx).catch((e: Error) => log("proxy tick failed", { error: e.message }));
     } finally {
       ticking = false;
     }

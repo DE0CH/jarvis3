@@ -10,6 +10,13 @@ export interface RoleConfig {
   machineHoursPerMonth: number | null;
   /** May act on every user's resources. Exactly the roles with admin: true are admins. */
   admin?: boolean;
+  /**
+   * Tier 0 web tools: monthly cap on search + fetch spend, USD. null = no cap. Required (a number or
+   * an explicit null) on every role once `tools.search` or `tools.fetch` is configured.
+   */
+  toolsMonthlyUsd?: number | null;
+  /** Tier 0 proxies: monthly traffic cap, GB. null = no cap. Required on every role once `tools.proxy` is configured. */
+  proxyMonthlyGb?: number | null;
 }
 
 export interface ModelConfig {
@@ -105,6 +112,39 @@ export interface ActionConfig {
   credentials?: Record<string, string>;
 }
 
+/**
+ * One Tier 0 provider. `provider` picks the adapter (server/src/tools/registry.ts); `credential`
+ * names the environment variable holding the organisation's key (read at start-up, never sent to a
+ * machine); `baseUrl` replaces the provider's API origin (tests and stubs); `pricing` overrides the
+ * adapter's list prices (what one call is charged against a user's cap); `settings` are adapter
+ * specific.
+ */
+export interface ToolProviderConfig {
+  provider: string;
+  credential?: string;
+  baseUrl?: string;
+  pricing?: ToolPricing;
+  settings?: Record<string, unknown>;
+}
+
+export interface ToolPricing {
+  /** USD per call (search providers priced per request). */
+  perCallUsd?: number;
+  /** USD per provider credit (ScrapingBee-style credit plans). */
+  perCreditUsd?: number;
+  /** USD per GB (proxies). */
+  perGbUsd?: number;
+}
+
+/** Tier 0 tools. Absent (or a kind left out): that tool is off on this instance. */
+export interface ToolsConfig {
+  search?: ToolProviderConfig;
+  fetch?: ToolProviderConfig;
+  proxy?: ToolProviderConfig;
+  /** Instance-wide monthly cap on search + fetch spend, USD (null/absent = none beyond the per-user caps). */
+  monthlyUsd?: number | null;
+}
+
 export interface Config {
   instanceName: string;
   /** https://<instance host> — no trailing slash. Sessions reach the server here. */
@@ -157,6 +197,8 @@ export interface Config {
   owner?: string;
   /** The broker's named actions (Tier 2 and 3), by name ([a-z0-9_]{1,64}). */
   actions?: Record<string, ActionConfig>;
+  /** Tier 0 tools: web search, page fetching, proxies (docs/TOOLS.md). */
+  tools?: ToolsConfig;
 }
 
 /** Secrets come only from the environment. */
@@ -215,7 +257,42 @@ export function validateConfig(c: Config): Config {
     for (const r of a.roles) if (r !== "*" && !c.roles[r]) fail(`actions.${name}: unknown role ${r}`);
     if (a.approval !== undefined && !["auto", "self", "admin"].includes(a.approval)) fail(`actions.${name}: approval must be auto, self or admin`);
   }
+  validateTools(c, fail);
   return c;
+}
+
+const capOk = (v: unknown): boolean => v === null || (typeof v === "number" && Number.isFinite(v) && v >= 0);
+
+function validateTools(c: Config, fail: (m: string) => never): void {
+  const t = c.tools;
+  if (!t) return;
+  for (const kind of ["search", "fetch", "proxy"] as const) {
+    const p = t[kind];
+    if (!p) continue;
+    if (!p.provider || typeof p.provider !== "string") fail(`tools.${kind}.provider is required`);
+    if (p.credential !== undefined && !/^[A-Z_][A-Z0-9_]*$/.test(p.credential)) fail(`tools.${kind}.credential must name an environment variable`);
+    if (p.baseUrl !== undefined && !/^https?:\/\/[^\s]+[^/]$/.test(p.baseUrl)) fail(`tools.${kind}.baseUrl must be a URL with no trailing slash`);
+    for (const [k, v] of Object.entries(p.pricing ?? {})) if (!(typeof v === "number" && Number.isFinite(v) && v >= 0)) fail(`tools.${kind}.pricing.${k} must be a number ≥ 0`);
+  }
+  if (t.monthlyUsd !== undefined && !capOk(t.monthlyUsd)) fail("tools.monthlyUsd must be a number ≥ 0 or null");
+  for (const [name, r] of Object.entries(c.roles)) {
+    // a cap must be chosen on purpose: a forgotten field must not mean "no limit"
+    if ((t.search || t.fetch) && (!("toolsMonthlyUsd" in r) || !capOk(r.toolsMonthlyUsd))) fail(`roles.${name}.toolsMonthlyUsd must be set (a number ≥ 0, or null for no cap) when tools.search or tools.fetch is configured`);
+    if (t.proxy && (!("proxyMonthlyGb" in r) || !capOk(r.proxyMonthlyGb))) fail(`roles.${name}.proxyMonthlyGb must be set (a number ≥ 0, or null for no cap) when tools.proxy is configured`);
+  }
+}
+
+/** Tier 0 provider credentials, from the environment variables the config names. Missing = refuse to start. */
+export function loadToolSecrets(c: Config, env: NodeJS.ProcessEnv = process.env): Partial<Record<"search" | "fetch" | "proxy", string>> {
+  const out: Partial<Record<"search" | "fetch" | "proxy", string>> = {};
+  for (const kind of ["search", "fetch", "proxy"] as const) {
+    const v = c.tools?.[kind]?.credential;
+    if (!v) continue;
+    const val = env[v];
+    if (!val) throw new Error(`missing secret env ${v} (tools.${kind}.credential)`);
+    out[kind] = val;
+  }
+  return out;
 }
 
 export function loadConfig(path = process.env.JARVIS_CONFIG || "/etc/jarvis/config.json"): Config {
