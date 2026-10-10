@@ -463,9 +463,13 @@ test("channels: a task posts results; only its owner (and admins) see them; read
     assert.equal((await call(h, bob, "GET", `/api/channels?userId=${aliceId}`)).status, 404);
     // the admin reads it without marking it read for alice
     assert.equal((await call(h, admin, "GET", "/api/channels?all=1")).body.channels.length, 1);
+    const forAlice = (await call(h, admin, "GET", `/api/channels?userId=${aliceId}`)).body.channels;
+    assert.deepEqual(forAlice.map((c: { taskId: string }) => c.taskId), [t.id], "the admin Users page lists a person's channels");
     assert.equal((await call(h, admin, "GET", `/api/tasks/${t.id}/posts`)).body.posts.length, 2);
     await call(h, admin, "POST", `/api/tasks/${t.id}/posts/read`);
     assert.equal((await call(h, alice, "GET", "/api/me")).body.unreadPosts, 2);
+    assert.ok((await call(h, admin, "GET", `/api/tasks/${t.id}/posts`)).body.posts.every((x: { read: boolean }) => !x.read));
+    assert.equal((await call(h, alice, "GET", "/api/notices")).body.notices.filter((n: { kind: string; read: boolean }) => n.kind === "channel_post" && !n.read).length, 2);
     // alice reads: posts and their notices are read
     const r = await call(h, alice, "POST", `/api/tasks/${t.id}/posts/read`);
     assert.equal(r.body.unreadPosts, 0);

@@ -334,6 +334,10 @@ const MIGRATIONS: string[] = [
   CREATE INDEX posts_task ON posts(task_id);
   CREATE INDEX posts_user ON posts(user_id, read_at);
   `,
+  // 8: an approval's notices name the approval (the app opens it directly)
+  `
+  ALTER TABLE notices ADD COLUMN approval_id TEXT;
+  `,
 ];
 
 export type Db = DatabaseSync;

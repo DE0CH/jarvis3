@@ -68,8 +68,8 @@ export class OpTracker {
   }
 }
 
-export function addNotice(ctx: Ctx, userId: string, kind: NoticeView["kind"], text: string, taskId: string | null = null): void {
+export function addNotice(ctx: Ctx, userId: string, kind: NoticeView["kind"], text: string, taskId: string | null = null, approvalId: string | null = null): void {
   ctx.db
-    .prepare("INSERT INTO notices(id, user_id, kind, text, task_id, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(randomId(), userId, kind, text, taskId, ctx.clock.now());
+    .prepare("INSERT INTO notices(id, user_id, kind, text, task_id, approval_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(randomId(), userId, kind, text, taskId, approvalId, ctx.clock.now());
 }

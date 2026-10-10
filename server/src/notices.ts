@@ -9,13 +9,14 @@ interface NoticeRow {
   kind: NoticeView["kind"];
   text: string;
   task_id: string | null;
+  approval_id: string | null;
   created_at: number;
   read_at: number | null;
 }
 
 export function listNotices(ctx: Ctx, userId: string): NoticeView[] {
   const rows = ctx.db.prepare("SELECT * FROM notices WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 100").all(userId) as unknown as NoticeRow[];
-  return rows.map((n) => ({ id: n.id, kind: n.kind, text: n.text, taskId: n.task_id, createdAt: iso(n.created_at), read: n.read_at !== null }));
+  return rows.map((n) => ({ id: n.id, kind: n.kind, text: n.text, taskId: n.task_id, approvalId: n.approval_id, createdAt: iso(n.created_at), read: n.read_at !== null }));
 }
 
 export function unreadCount(ctx: Ctx, userId: string): number {

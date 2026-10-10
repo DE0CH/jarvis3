@@ -385,10 +385,11 @@ changed proxy cap to the user's proxy sub-account (section 12).
 `{ month, spentUsd, capUsd, warnUsd, capped, ratePerHour, lastSampleAt }`
 
 ### `GET /api/notices` → `NoticeList`
-The caller's last 100 notices, newest first: `{ id, kind, text, taskId, createdAt, read }`, `kind`
-one of `machine_hours_cap`, `tools_cap`, `instance_budget`, `task_failed`, `offboarded`, `suggestion`,
+The caller's last 100 notices, newest first: `{ id, kind, text, taskId, approvalId, createdAt, read }`,
+`kind` one of `machine_hours_cap`, `tools_cap`, `instance_budget`, `task_failed`, `offboarded`, `suggestion`,
 `approval_needed`, `approval_decided`, `passkey_added`, `channel_post`, `schedule_skipped`, `wakeup`
-(section 15).
+(section 15). `approvalId` names the approval of an `approval_needed` / `approval_decided` notice
+(null otherwise, and on notices from before migration 8).
 
 ### `POST /api/notices/read` (`MarkNoticesReadRequest`) → `MarkNoticesReadResult`
 `{}` marks all the caller's notices read; `{ "upTo": "<notice id>" }` marks that notice and every
@@ -657,7 +658,8 @@ Newest first. Staff see their own tasks' requests, an admin everyone's; `pending
 the caller can decide now.
 
 ### `GET /api/approvals/:id` → `ApprovalView`
-`canDecide` and `decideWith` (`tap` or `passkey`) say what the caller can do.
+`canDecide` and `decideWith` (`tap` or `passkey`) say what the caller can do. `userRole` is the asking
+user's current role, which a `grantScope: "role"` grant would cover.
 
 ### `POST /api/approvals/:id/decide` (`DecideRequest`) → `ApprovalView`
 `{decision: "approve" | "deny", note?, grantScope?}`. 403 when the caller isn't the approver, 409

@@ -187,6 +187,7 @@ export function approvalView(ctx: Ctx, a: ApprovalRow, v: Viewer | null): Approv
     taskId: a.task_id,
     taskTitle: task?.title ?? null,
     user: person(owner) ?? { id: a.user_id, email: "", name: "" },
+    userRole: owner?.role ?? null,
     kind: a.kind,
     approver: a.approver,
     state: a.state,
@@ -328,7 +329,7 @@ function notifyApprovers(ctx: Ctx, a: ApprovalRow): void {
   const who: UserRow[] =
     a.approver === "self" ? [userById(ctx, a.user_id)!].filter(Boolean) : a.approver === "admin" ? activeAdmins(ctx) : a.approver === "owner" ? [ownerUser(ctx)].filter((u): u is UserRow => !!u) : [];
   const lead = a.kind === "question" ? "Question for you" : a.kind === "access" ? "Access request" : a.approver === "owner" ? "Infrastructure change to sign" : "Approval needed";
-  for (const u of who) addNotice(ctx, u.id, "approval_needed", `${lead}: ${summary}`.slice(0, 500), a.task_id);
+  for (const u of who) addNotice(ctx, u.id, "approval_needed", `${lead}: ${summary}`.slice(0, 500), a.task_id, a.id);
 }
 
 /** A session asks (POST /api/session/approvals). Auto-approved actions start running at once. */
@@ -474,7 +475,7 @@ export function finish(
   if (by.id !== row.user_id) {
     const summary = (JSON.parse(row.preview) as ApprovalPreview).summary;
     const verb = d.state === "denied" ? "Denied" : row.kind === "question" ? "Answered" : row.kind === "access" ? "Granted" : "Approved";
-    addNotice(ctx, row.user_id, "approval_decided", `${verb} by ${by.name || by.email}: ${summary}`.slice(0, 500), row.task_id);
+    addNotice(ctx, row.user_id, "approval_decided", `${verb} by ${by.name || by.email}: ${summary}`.slice(0, 500), row.task_id, row.id);
   }
   if (row.kind === "action" && d.state === "approved") startAction(ctx, row.id);
   return getApproval(ctx, row.id)!;

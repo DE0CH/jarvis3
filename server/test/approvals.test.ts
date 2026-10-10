@@ -220,6 +220,15 @@ test("admin approval and denial; a role without the action asks for access", asy
     assert.equal((await call(h, alice, "POST", `/api/approvals/${r.body.id}/decide`, { decision: "approve" })).status, 403, "staff can't approve their own admin-level request");
     const q = await call(h, admin, "GET", "/api/approvals?pending=1");
     assert.deepEqual(q.body.approvals.map((a: { id: string }) => a.id), [r.body.id]);
+    assert.equal(q.body.approvals[0].userRole, "staff", "the asking user's role, for the role grant's label");
+    assert.equal((await call(h, alice, "GET", `/api/approvals/${r.body.id}`)).body.userRole, "staff");
+    // the approver's notice names the approval; nobody else gets it, and bob can't open the approval
+    const needed = (await call(h, admin, "GET", "/api/notices")).body.notices.filter((x: { kind: string }) => x.kind === "approval_needed");
+    assert.deepEqual(needed.map((x: { approvalId: string }) => x.approvalId), [r.body.id]);
+    assert.equal(needed[0].taskId, t);
+    const bob = await asEmail(h, u.bob);
+    assert.ok(!(await call(h, bob, "GET", "/api/notices")).body.notices.some((x: { approvalId: string | null }) => x.approvalId === r.body.id));
+    assert.equal((await call(h, bob, "GET", `/api/approvals/${r.body.id}`)).status, 404);
     assert.equal((await call(h, admin, "POST", `/api/approvals/${r.body.id}/decide`, { decision: "approve" })).status, 200);
     assert.equal((await waitState(h, sess, r.body.id, ["done", "failed"])).state, "done");
     // denial: the note reaches the session and alice gets a notice
@@ -231,7 +240,8 @@ test("admin approval and denial; a role without the action asks for access", asy
     assert.equal(s2.body.decision.note, "not to this customer");
     assert.ok(!mails.some((m) => m.to.includes("y@example.net")));
     const n = await call(h, alice, "GET", "/api/notices");
-    assert.ok(n.body.notices.some((x: { kind: string; text: string }) => x.kind === "approval_decided" && /Denied/.test(x.text)));
+    assert.ok(n.body.notices.some((x: { kind: string; text: string; approvalId: string }) => x.kind === "approval_decided" && /Denied/.test(x.text) && x.approvalId === r2.body.id));
+    assert.ok(n.body.notices.every((x: { kind: string; approvalId: string | null }) => x.kind.startsWith("approval_") || x.approvalId === null));
     // pay_invoice is admin-only: capability_missing, then an access request granted for this task
     const no = await call(h, sess, "POST", "/api/session/approvals", { kind: "action", action: "pay_invoice", params: { vendor: "acme", amount: 10 } });
     assert.equal(no.status, 403);
