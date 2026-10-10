@@ -46,7 +46,9 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `CF_DEVICE_TOKENS_API` | Cloudflare API token | Access: Service Tokens edit, nothing else |
 | `SESSION_GATE_CLIENT_SECRET` | secret of the session gate service token (handed to session machines) | — |
 
-Other environment: `JARVIS_DB` (SQLite path, default `/data/jarvis.db`), `PORT` (default 8080).
+Other environment: `JARVIS_DB` (SQLite path, default `/data/jarvis.db`), `PORT` (default 8080),
+`JARVIS_WEB_DIR` (the app's web build served at `/`; `/app/web` in the server image; unset = only
+`/api`).
 
 ## Cloudflare Access setup (per instance)
 
