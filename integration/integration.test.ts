@@ -383,7 +383,7 @@ test("actions and approvals through the real policy plugin", { timeout: 20 * 60_
 
   /** A task for `email` with its main agent idle. */
   const startTask = async (email: string) => {
-    const r = await call(email, "POST", "/api/tasks", { prompt: `Hello from ${email}`, requestId: `itest-approvals-${email}` });
+    const r = await call(email, "POST", "/api/tasks", { prompt: `Hello from ${email}`, requestId: `itest-approvals-${email.split("@")[0]}` });
     assert.equal(r.status, 201, JSON.stringify(r.body));
     await waitFor(`${email}'s task running`, async () => {
       const v = await taskOf(email, r.body.id);

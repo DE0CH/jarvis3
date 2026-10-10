@@ -141,3 +141,29 @@ DESIGN.md and recorded it here. Each item can be revisited; none is hard to chan
     server re-reads open pull requests every 5 minutes and on a listing older than 60 s.
 38. **A merge doesn't reach sessions by itself**: sessions load the pinned `orgEnv.commit`, which a
     deploy moves. The notice on merge says so.
+## Actions and approvals (v0.4)
+
+39. **The guard plugin is defence in depth.** The agent's user owns `~/.config/opencode`, so a
+    determined agent could drop the plugin from its own config. What must never happen without an
+    approval goes behind a named action: its credential never enters the machine. Moving OpenCode's
+    config to a root-owned path (`OPENCODE_CONFIG`) would close the gap once OpenCode's own writes
+    there are checked.
+40. **Tier 3 requests come only from admin-role tasks**; an access request can never grant a Tier 3
+    action. Only the configured `owner` approves, with a user-verified passkey.
+41. **Passkeys are added only on an identity login** (not with a paired device's token) and only by
+    the owner; every addition leaves a notice. Recovery when the owner loses every device: an admin
+    with database access deletes the `passkeys` rows, and the owner adds a new one after signing in.
+42. **Passkey UI is two server pages** (`/api/pages/…`) rather than native code in the app: one
+    WebAuthn implementation for Safari and iOS, and the RP ID is the instance host, which needs no
+    Associated Domains per instance. A native module would need them.
+43. **An admin may approve an admin-level request from their own task** (a one-admin instance
+    needs it). Self-confirm requests can only be decided by the task's owner, not by an admin.
+44. **Waiting has no deadline.** A request stays pending until someone decides, or the task is
+    paused or destroyed (then it is cancelled). While the agent waits its turn is running, so the
+    task counts as busy and is not idle-paused: the machine (and its machine hours) keeps running
+    until the decision. A deadline per kind would bound that cost.
+45. **Notifications are in-app notices** (`approval_needed`, `approval_decided`); no push yet
+    (point 16).
+46. **One mailbox per `smtp.send` action.** Sending as each user from their own mailbox is Tier 1
+    (their own OAuth) and comes with Tier 1; until then a `self` guard on the user's own mail CLI
+    covers it.

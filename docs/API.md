@@ -106,17 +106,28 @@ Error body (every non-2xx JSON answer):
 | GET | `/api/suggestions` | M (own); `?userId=U`: O of U, A; `?all=1`: A |
 | GET | `/api/notices` | M (own notices) |
 | POST | `/api/notices/read` | M (own notices) |
+| GET | `/api/approvals` | M (requests of own tasks); A: everyone's |
+| GET | `/api/approvals/:id` | O (the task's owner), A |
+| POST | `/api/approvals/:id/decide` | whoever the request's `approver` names (section 11) |
+| POST | `/api/approvals/:id/passkey/options`, `/api/approvals/:id/passkey` | the instance owner |
+| GET | `/api/passkeys`, DELETE `/api/passkeys/:id` | the instance owner |
+| POST | `/api/passkeys/register/options`, `/api/passkeys/register` | the instance owner, identity login only |
+| GET | `/api/pages/passkeys`, `/api/pages/approvals/:id` | the instance owner |
 | GET | `/api/admin/budget` | A |
 | POST | `/api/admin/directory/sync` | A |
 | GET | `/api/session/bundle` | S |
 | GET | `/api/session/org-env.tar` | S |
 | POST | `/api/session/notes` | S |
 | POST | `/api/session/status` | S |
+| GET | `/api/session/actions` | S |
+| POST | `/api/session/approvals` | S |
+| GET | `/api/session/approvals/:id` | S (its own task's requests) |
 | WS | `/api/session/channel` | S |
 
 ¹ `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`.
 
-`server/test/authz.test.ts` checks this whole table for ten kinds of caller.
+`server/test/authz.test.ts` checks this whole table for ten kinds of caller, except the owner-only
+passkey routes, which `server/test/approvals.test.ts` covers (anyone but the owner gets 404).
 
 ## 3. Identity and devices
 
@@ -456,7 +467,7 @@ closed. A merge reaches sessions once the instance's `orgEnv.commit` is moved pa
 | 1 | org | org-env repo at the pinned commit: `AGENTS.md`, `skills/<name>/…` |
 | 2 | role | `roles/<role>/AGENTS.md`, `roles/<role>/skills/<name>/…` |
 | 3 | personal | the user's instructions, then their notes ("Things the user asked you to remember: …"), their skills |
-| 4 | policy | `policy/AGENTS.md` (prefixed with the override preamble), `policy/skills/<name>/…`, `policy/deny.json` — loaded **last** |
+| 4 | policy | `policy/AGENTS.md` (prefixed with the override preamble), `policy/skills/<name>/…`, `policy/deny.json`, `policy/guards.json` — loaded **last** |
 
 - `instructions` are in load order; the session concatenates them in that order.
 - **Skill names:** claimed in the order policy, org, role, personal. A skill whose name is already
@@ -465,6 +476,8 @@ closed. A merge reaches sessions once the instance's `orgEnv.commit` is moved pa
 - **Deny rules** (`[{ "permission": "bash", "pattern": "rm -rf *" }]`) come only from
   `policy/deny.json`; any other layer's permission settings are ignored. The session image turns them
   into OpenCode `deny` rules on top of its `allow` default.
+- **Guards** (`guards`) come only from `policy/guards.json`: tool calls that stop for an approval
+  before they run (section 11, [ACTIONS.md](ACTIONS.md)).
 
 ## 9. Session-facing routes
 
@@ -478,6 +491,9 @@ owner's personal layer; it can do nothing else.
 | `GET /api/session/bundle` → `LayerBundle` | the assembled layers for the task's owner and role |
 | `GET /api/session/org-env.tar` → `application/x-tar` | the org-env tree at the pinned commit (the "bundle"; no Git credential in the machine) |
 | `POST /api/session/notes` `{ "text" }` → 201 `PersonalNote` | "remember …": a note in the owner's personal layer (`source: "session"`, `taskId`) |
+| `GET /api/session/actions` → `ActionCatalogue` | the broker's actions as this task sees them (section 11) |
+| `POST /api/session/approvals` (`SessionApprovalRequest`) → 201 `ApprovalView` | file a request (section 11) |
+| `GET /api/session/approvals/:id?wait=<s>` → `ApprovalView` | a request of this task; with `wait` (≤ 55 s) a long poll that answers as soon as it is settled |
 | `POST /api/session/status` `{ "activity": "busy" \| "idle", "title"?, "agentId"? }` → `TaskView` | `idle` starts the auto-pause countdown (`idleMinutes`), `busy` stops it; `title` (≤ 120) renames the task; `agentId` (`[A-Za-z0-9._:-]{1,128}`) records the task's main agent |
 | `WS /api/session/channel` | the reverse channel (below) |
 
@@ -542,3 +558,73 @@ snapshots/<taskId>/state.tar.gz            the pause snapshot
 archives/<userId>/<taskId>/state.tar.gz    the final state, written by Destroy
 archives/<userId>/<taskId>/task.json       {id, userId, title, model, createdAt, archivedAt}
 ```
+
+## 11. Actions and approvals
+
+DESIGN "Secrets and capabilities" and "Actions and approvals"; how an operator configures them:
+[ACTIONS.md](ACTIONS.md). Types: `ActionView`, `ApprovalView`, `SessionApprovalRequest`,
+`DecideRequest`, `PasskeyView` in `server/src/api-types.ts`.
+
+A session files a **request**; the server decides who must answer it, puts it in the one queue,
+gives the approver(s) an in-app notice (`approval_needed`), and the session long-polls until it is
+settled. Kinds:
+
+| kind | what the session sends | who decides (`approver`) |
+|---|---|---|
+| `action` | `{action, params, reason?}`: run a named broker action | `auto` when the action's policy allows it (allow-list, threshold), else the action's `approval` (`self` / `admin`); a Tier 3 action: `owner` |
+| `guard` | `{rule, tool, input, reason?}`: a tool call matched a locked-policy guard | the rule's `approval` (`self` / `admin`); the session can't choose it |
+| `access` | `{action, reason}`: the task's role lacks an action | `admin`; approve with `grantScope: "task"` or `"role"` (never for a Tier 3 action) |
+| `question` | `{question, options?}`: "ask the boss" | `admin`; approve with the answer in `note` |
+
+`self` = the task's owner (one tap, for their own accounts); `admin` = any admin, including from
+their own task; `owner` = the instance owner (config `owner`) with a passkey.
+
+States: `pending` → `approved` → (actions) `executing` → `done` | `failed`; or `denied`; or
+`cancelled` when the task is paused or destroyed before a decision. An approved action runs on the
+server with credentials the session never sees; its `result` (or `error`) goes back to the agent.
+`preview` is exactly what will happen (summary, fields, the full body). A decision tells the task's
+owner with an `approval_decided` notice when someone else made it. `MeView.pendingApprovals` counts
+what the caller can decide now.
+
+Errors a session meets: 400 for a bad action name or parameters (the message says what to fix),
+403 `capability_missing` when the role lacks the action (file an `access` request), 409 for an
+access request the task already has.
+
+### `GET /api/approvals[?pending=1][&taskId=…]` → `ApprovalList`
+Newest first. Staff see their own tasks' requests, an admin everyone's; `pending=1` keeps only what
+the caller can decide now.
+
+### `GET /api/approvals/:id` → `ApprovalView`
+`canDecide` and `decideWith` (`tap` or `passkey`) say what the caller can do.
+
+### `POST /api/approvals/:id/decide` (`DecideRequest`) → `ApprovalView`
+`{decision: "approve" | "deny", note?, grantScope?}`. 403 when the caller isn't the approver, 409
+once decided. A Tier 3 request is denied with a tap but approved only with a passkey (400 here).
+
+### Tier 3: passkeys
+
+The owner registers a passkey per device (WebAuthn, user verification required: Face ID, Touch ID
+or the device PIN; RP ID = the `publicUrl` host), only on an identity login, so a paired device's
+token can't add one. A Tier 3 request carries `changeHash` = sha256 of the canonical JSON of
+`{v, instance, approval, action, type, params, summary}`; the WebAuthn challenge is
+`sha256("jarvis3-tier3\n" + changeHash + "\n" + nonce)`, so the signature covers exactly the change
+shown. The server recomputes the hash from the stored request before signing and keeps the assertion
+as the approval's proof.
+
+| route | does |
+|---|---|
+| `GET /api/passkeys` → `PasskeyList` | the owner's passkeys |
+| `POST /api/passkeys/register/options` → WebAuthn creation options | start adding one (challenge valid 5 min) |
+| `POST /api/passkeys/register` `{response, name?}` → 201 `PasskeyView` | finish; the owner gets a `passkey_added` notice |
+| `DELETE /api/passkeys/:id` | remove one |
+| `POST /api/approvals/:id/passkey/options` → `PasskeyApprovalOptions` | the request options, the change and its hash |
+| `POST /api/approvals/:id/passkey` `{response}` → `ApprovalView` | the signed approval; the challenge is single-use |
+
+The app doesn't call WebAuthn itself: it opens two small server pages on the instance's origin
+(the web app navigates to them, the iOS app opens them in the system sign-in sheet as pairing does):
+
+- `GET /api/pages/passkeys?return=<url>`: add a passkey on this device;
+- `GET /api/pages/approvals/:id?return=<url>`: the change, its fingerprint, Approve with Face ID or Deny.
+
+`return` must be a path on the instance or the app's scheme (`devices.appScheme`); anything else is
+dropped. The pages send `frame-ancestors 'none'` and a script-only-inline CSP.

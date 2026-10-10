@@ -19,6 +19,8 @@ Published by CI (`.github/workflows/session.yml`) as `ghcr.io/de0ch/jarvis3-sess
 | `lib/channel.mjs` | the session side of the reverse channel (unit-tested against a stand-in server and daemon) |
 | `bin/jarvis-snapshot` | the snapshot command the server execs (`start` / `status`) |
 | `bin/jarvis-remember` | the agent's "remember" command |
+| `lib/opencode-plugin.mjs` | the locked-policy OpenCode plugin: guards and the `jarvis_*` tools ([ACTIONS.md](ACTIONS.md)) |
+| `lib/policy.mjs` | the plugin's logic (guard matching, the agent-socket client, waiting, outcome texts; unit-tested) |
 
 Size: ~870 MB unpacked (CI, 2026-10-08) (CI prints it on every run and fails above 3 GB; Fly refuses ~8 GB). The
 biggest parts are OpenCode's binary (~180 MB) and the Paseo daemon with its dependencies (~300 MB).
@@ -41,7 +43,7 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
      folder name), and a `SKILL.md` without front matter gets one;
    - `~/.config/opencode/opencode.json`: `model` and `small_model` = `openrouter/$JARVIS_MODEL`,
      `instructions` = that one file, `skills.paths` = that folder, `share: disabled`,
-     `autoupdate: false`, the OpenRouter provider with `apiKey: {env:OPENROUTER_API_KEY}` (the key is
+     `autoupdate: false`, `plugin` = the root-owned policy plugin (`file:///usr/local/lib/jarvis/lib/opencode-plugin.mjs`), the OpenRouter provider with `apiKey: {env:OPENROUTER_API_KEY}` (the key is
      never written to disk) and the model declared with tool calling (so a slug models.dev lacks
      still works), and `permission`: `allow`, or with policy deny rules
      `{"*": "allow", "<perm>": {"*": "allow", "<pattern>": "deny"}}` (OpenCode: the last matching
@@ -81,6 +83,25 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
 (`source: session`, the task id) and is in the layers of every later task (and of this task after a
 resume).
 
+## Approvals
+
+The policy plugin runs inside OpenCode (user `jarvis`) and reaches the server only through
+jarvis-agent's socket, which adds the session token:
+
+| socket route | forwards to |
+|---|---|
+| `GET /guards` | the bundle's `guards` (kept in memory from boot) |
+| `GET /actions` | `GET /api/session/actions` |
+| `POST /approvals` | `POST /api/session/approvals` |
+| `GET /approvals/:id?wait=<s>` | `GET /api/session/approvals/:id?wait=<s>` (≤ 55 s) |
+
+`tool.execute.before` matches every tool call against the guards; a match files a `guard` request
+and blocks the call until it is settled: approved runs it, anything else throws, so the tool fails
+with the reason. The four tools file `action`, `access` and `question` requests the same way. The
+waits have no time limit (people take their time); stopping the agent aborts them, and a paused
+task cancels its pending requests on the server. `@opencode-ai/plugin` (for its `tool` helper and
+zod) is pinned to the image's OpenCode version.
+
 ## Snapshot
 
 `jarvis-snapshot start <run> <url>` writes `running` to `/run/jarvis/snapshots/<run>.status`,
@@ -99,7 +120,8 @@ provider sets it from `envOverrides`), `JARVIS_STATUS_MS`, `JARVIS_DAEMON_PORT`.
 
 ## Testing
 
-- `cd session-image && npm test`: assembly and the channel relay (node:test, no Docker).
+- `cd session-image && npm test`: assembly, the channel relay and the policy plugin against a
+  stand-in agent socket (node:test, no Docker).
 - `integration/`: the image end to end (the header of `integration.test.ts` lists the checks):
   `docker build -t jarvis3-session:test session-image`, then `cd server && npm ci`, then
   `cd integration && npm ci && npm test` (needs Docker; `SESSION_IMAGE` picks another tag).

@@ -17,6 +17,7 @@
     "intervalSeconds": 300
   },
   "bootstrapAdmins": ["owner@example.org"],
+  "owner": "owner@example.org",
   "roles": {
     "admin": { "openrouterMonthlyUsd": 100, "machineHoursPerMonth": null, "admin": true },
     "staff": { "openrouterMonthlyUsd": 20, "machineHoursPerMonth": 60 }

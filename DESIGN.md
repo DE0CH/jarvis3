@@ -1,7 +1,7 @@
 # Jarvis 3 — design
 
 Status: design agreed 2026-10-08; v0.1 of the server, session image, app variant and deployment is
-built (docs/). Jarvis 1 and Jarvis 2 (`DE0CH/jarvis2`) are separate projects and stay as they are;
+built (docs/), and actions and approvals (docs/ACTIONS.md). Jarvis 1 and Jarvis 2 (`DE0CH/jarvis2`) are separate projects and stay as they are;
 Jarvis 3 is a new codebase.
 
 ## What Jarvis 3 is

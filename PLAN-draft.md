@@ -127,7 +127,7 @@ Status: draft of 2026-10-08, kept up to date with what was built (v0.1: `server/
    - It is the only layer allowed to set OpenCode deny rules.
    - Its instructions say they override everything else.
    - A personal or role skill may not shadow an org skill name; a clashing name is renamed with a prefix.
-   - Real enforcement of approval-required actions comes with the broker and hook later. In v1 the locked policy is instructions plus OpenCode deny patterns.
+   - Approval-required actions are enforced by the broker and the guard plugin (v0.4, docs/ACTIONS.md); v1 had only instructions plus OpenCode deny patterns.
 
 OpenCode gets all of this through generated `instructions` and skill folders, as `opencode-instructions.py` and `workspace-layer.sh` do today.
 
@@ -145,9 +145,7 @@ OpenCode gets all of this through generated `instructions` and skill folders, as
 
 ### Deferred, explicitly
 
-- Broker and Tier 2 actions, and the named-action policy engine.
-- The approvals queue: self-confirm, admin approval, asking for access, "ask the boss", and notifications. v1 has no pause points: OpenCode runs with allow, and outward actions are limited only by what the machine holds (only Tier 0 plus the user's own key).
-- Face ID approval for Tier 3. In v1, Tier 3 is enforced only by never putting infrastructure credentials into any session, which is a hard rule in the server and the image.
+- (Built in v0.4, docs/ACTIONS.md: the broker with named Tier 2/3 actions and per-action policy, the locked-policy guard plugin, the approvals queue with self-confirm, admin approval, access requests and "ask the boss" as in-app notices, and Tier 3 approval by the owner with a passkey. Still deferred: push notifications, more action types per instance.)
 - iOS distribution: the organisation's Apple organisation account, the Apple Business custom app, and TestFlight for staff. Staff use the web page.
 - Tier 1 OAuth (staff Gmail, Drive and Calendar), the user files tab, first-prompt attachments, transcript search, scheduled tasks, wakeups and channels.
 - Tier 0 tools other than OpenRouter (search, scraping, proxies). In v1, org-level Tier 0 keys can be put in a role-scoped secret set by the admin, but per-user sub-keys come later.
