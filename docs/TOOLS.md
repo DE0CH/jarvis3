@@ -84,7 +84,14 @@ list: [CONFIG.md](CONFIG.md).
 | proxy | `evomi` (relay) | `username:password` of the org's Evomi proxy | USD 0.45/GB | no |
 | proxy | `http` (relay) | `username:password`; `settings.host`, `settings.port`, `settings.targeting` | `pricing.perGbUsd` | — |
 
-Provider facts (checked 2026-10-10): Brave, ScrapingBee, Firecrawl, ZenRows, SerpApi and Serper.dev
+**IPRoyal without the account token:** one residential sub-user for the whole instance, in relay mode:
+`{"provider": "http", "credential": "<env>", "pricing": {"perGbUsd": …}, "settings": {"host": "geo.iproyal.com",
+"port": 12321, "targeting": {"field": "password", "country": "_country-{c}", "session": "_session-{s}_lifetime-30m",
+"countryCase": "lower"}}}`. The server holds only that sub-user's login (the `iproyal` subuser mode needs the account's
+API token, which can mint and delete every sub-user); the sub-user's GB are a hard ceiling for the whole instance and
+don't refill by themselves. IPRoyal allows sub-user passwords of at most 16 characters.
+
+Provider facts (checked 2026-10-10; Exa's dashboard checked 2026-10-11: a key has a name and a QPS limit, no budget): Brave, ScrapingBee, Firecrawl, ZenRows, SerpApi and Serper.dev
 have no API for per-user keys with a cap, Evomi and Bright Data none for capped sub-users; their caps
 can only be kept on the server. Oxylabs residential sub-users (`traffic_limit`, `auto_disable`) would
 fit the `subuser` interface. OpenRouter's own `openrouter:web_search` server tool bills the user's
