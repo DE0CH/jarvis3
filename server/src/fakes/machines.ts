@@ -14,6 +14,8 @@ export class FakeMachines implements MachineProvider {
   readonly destroyed: string[] = [];
   readonly execLog: { id: string; command: string[] }[] = [];
   failCreate: string | null = null;
+  /** The provider makes the machine but the create call still fails (Fly's 408 on a slow create). */
+  failCreateAfterMaking: string | null = null;
   failSnapshot: string | null = null;
   /** While set, snapshot status stays "running" (to observe a task mid-operation). */
   hold: Promise<void> | null = null;
@@ -26,6 +28,7 @@ export class FakeMachines implements MachineProvider {
     const id = randomId(7);
     const m: FakeMachine = { id, name: spec.name, state: "created", metadata: { ...spec.metadata }, guest: spec.guest, env: { ...spec.env }, image: spec.image };
     this.machines.set(id, m);
+    if (this.failCreateAfterMaking) throw new Error(this.failCreateAfterMaking);
     return { ...m };
   }
   async start(id: string): Promise<void> {

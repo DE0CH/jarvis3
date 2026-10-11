@@ -120,13 +120,24 @@ async function launch(ctx: Ctx, task: TaskRow, user: UserRow, o: { firstPrompt?:
   if (o.restore) env.JARVIS_RESTORE_URL = await ctx.blobs.presignGet(snapshotKey(task.id), ctx.config.presignSeconds ?? 3600);
   // the token must be known before the machine can dial in
   update(ctx, task.id, { session_token_hash: sha256hex(token) });
-  const m = await ctx.machines.create({
-    name: `task-${task.id}`,
-    image: ctx.config.machines.image,
-    env,
-    metadata: { jarvisTask: task.id, jarvisUser: user.id, jarvisInstance: ctx.config.instanceName },
-    guest: ctx.config.machines.guest,
-  });
+  const name = `task-${task.id}`;
+  let m: Awaited<ReturnType<typeof ctx.machines.create>>;
+  try {
+    m = await ctx.machines.create({
+      name,
+      image: ctx.config.machines.image,
+      env,
+      metadata: { jarvisTask: task.id, jarvisUser: user.id, jarvisInstance: ctx.config.instanceName },
+      guest: ctx.config.machines.guest,
+    });
+  } catch (e) {
+    // A create can fail after the provider made the machine (Fly answers 408 when its own create
+    // times out, and the machine appears a minute later): destroy whatever carries this task's name,
+    // so no machine is left that no task knows about (seen live on 2026-10-11).
+    const left = await ctx.machines.list().catch(() => []);
+    for (const x of left) if (x.name === name || x.metadata?.jarvisTask === task.id) await ctx.machines.destroy(x.id).catch(() => {});
+    throw e;
+  }
   update(ctx, task.id, { machine_id: m.id });
   try {
     await ctx.machines.start(m.id);

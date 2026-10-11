@@ -231,6 +231,19 @@ test("a machine that can't be created: task failed with a notice; only destroy r
     assert.equal((await get(h, alice, r.body.id)).state, "archived");
   }));
 
+test("a create that fails after the provider made the machine leaves no machine behind", () =>
+  withAlice(async (h, alice) => {
+    const c = await asEmail(h, alice);
+    h.machines.failCreateAfterMaking = "Fly POST /apps/x/machines -> 408: ";
+    const r = await call(h, c, "POST", "/api/tasks", { prompt: "x" });
+    await h.jarvis.settle();
+    const t = await get(h, alice, r.body.id);
+    assert.equal(t.state, "failed");
+    assert.match(t.error, /408/);
+    assert.equal(h.machines.machines.size, 0);
+    assert.equal(h.machines.destroyed.length, 1);
+  }));
+
 test("a resume whose machine can't be created goes back to paused with the error", () =>
   withAlice(async (h, alice) => {
     const c = await asEmail(h, alice);
