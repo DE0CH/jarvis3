@@ -48,7 +48,8 @@ export class IPRoyalProxy implements SubUserProxyProvider {
   async createSubUser(name: string, gb: number): Promise<ProxySubUser> {
     // IPRoyal usernames: letters, digits, underscores
     const username = name.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40);
-    const password = randomBytes(18).toString("base64url").replace(/[-_]/g, "x");
+    // IPRoyal refuses passwords over 16 characters (422 "must not be greater than 16 characters", 2026-10-11)
+    const password = randomBytes(12).toString("base64url").replace(/[-_]/g, "x");
     const s = await this.#call<Subuser>("POST", "/residential-subusers", { username, password, traffic: gb });
     return { id: s.hash, login: { username: s.username || username, password: s.password || password } };
   }

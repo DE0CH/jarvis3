@@ -138,7 +138,7 @@ describe("proxy adapters", () => {
     assert.equal(seen[0]!.headers.authorization, `Bearer ${KEY}`);
     assert.equal(seen[0]!.body.username, "acme_user_1");
     assert.equal(seen[0]!.body.traffic, 1);
-    assert.ok(seen[0]!.body.password.length >= 20);
+    assert.match(seen[0]!.body.password, /^[A-Za-z0-9]{16}$/); // IPRoyal allows at most 16 characters
     await ip.setAvailableGb("H1", 2.5);
     assert.equal(available, 2.5);
     await ip.setAvailableGb("H1", 0.5);
