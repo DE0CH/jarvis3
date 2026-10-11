@@ -659,15 +659,31 @@ def collect(args: list[str]) -> dict[str, str]:
     return data
 
 
-def secret_docs(data: dict[str, str]) -> list[dict]:
-    known = set(SERVER_SECRETS_REQUIRED) | set(SERVER_SECRETS_OPTIONAL) | set(OTHER_SECRETS)
+def config_secret_names(repo: Path) -> list[str]:
+    """Environment variables deploy/config.json names for credentials: tools.<kind>.credential (Tier 0)
+    and actions.<name>.credentials (the broker). They go into jarvis-secrets like the fixed keys."""
+    p = repo / "deploy/config.json"
+    if not p.exists():
+        return []
+    c = json.loads(p.read_text())
+    names = [t.get("credential") for k, t in (c.get("tools") or {}).items() if isinstance(t, dict)]
+    for a in (c.get("actions") or {}).values():
+        names += list((a.get("credentials") or {}).values()) if isinstance(a, dict) else []
+    return sorted({n for n in names if isinstance(n, str) and re.fullmatch(r"[A-Z_][A-Z0-9_]*", n)})
+
+
+def secret_docs(data: dict[str, str], configured: list[str] | None = None) -> list[dict]:
+    configured = configured or []
+    known = set(SERVER_SECRETS_REQUIRED) | set(SERVER_SECRETS_OPTIONAL) | set(OTHER_SECRETS) | set(configured)
     unknown = sorted(set(data) - known)
     if unknown:
-        die("unknown keys: " + ", ".join(unknown) + " (server secrets are listed in docs/CONFIG.md)")
+        die("unknown keys: " + ", ".join(unknown) + " (server secrets are listed in docs/CONFIG.md; tool and action"
+            " credentials must be named in deploy/config.json first)")
     missing = sorted(set(SERVER_SECRETS_REQUIRED) - set(data)) + sorted(k for k in OTHER_SECRETS if k not in data)
+    missing += sorted(k for k in configured if k not in data)
     if missing:
         die("every run rewrites the whole file, so name every key; missing: " + ", ".join(missing))
-    server = {k: data[k] for k in SERVER_SECRETS_REQUIRED + SERVER_SECRETS_OPTIONAL if k in data}
+    server = {k: data[k] for k in SERVER_SECRETS_REQUIRED + SERVER_SECRETS_OPTIONAL + configured if k in data}
     docs = [{"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "jarvis-secrets"}, "type": "Opaque", "stringData": server}]
     for k, (name, field) in OTHER_SECRETS.items():
         docs.append({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": name}, "type": "Opaque", "stringData": {field: data[k]}})
@@ -702,7 +718,7 @@ def cmd_secrets(a) -> None:
     # (path, docs, kustomization to bump, rev)
     plan: list[tuple[Path, list[dict], Path, callable]] = []
     if main or not app_data:
-        plan.append((repo / "deploy/secrets.enc.yaml", secret_docs(main), repo / "deploy/kustomization.yaml", lambda: secrets_rev(repo)))
+        plan.append((repo / "deploy/secrets.enc.yaml", secret_docs(main, config_secret_names(repo)), repo / "deploy/kustomization.yaml", lambda: secrets_rev(repo)))
     for k, v in app_data.items():
         name = by_key[k]
         docs = [{"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "tunnel-token"}, "type": "Opaque", "stringData": {"token": v}}]

@@ -330,6 +330,29 @@ class Secrets(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run(["secrets", str(EXAMPLE), *self.keys, "NOT_A_SECRET"], dict(SECRET_ENV, NOT_A_SECRET="x"))
 
+    def test_credentials_named_in_config_are_secret_keys(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "r"
+            shutil.copytree(EXAMPLE, repo)
+            cfg = json.loads((repo / "deploy/config.json").read_text())
+            cfg["tools"] = {"search": {"provider": "exa", "credential": "EXA_API_KEY"}, "proxy": {"provider": "evomi", "credential": "PROXY_LOGIN"}}
+            cfg["actions"] = {"mail": {"type": "smtp.send", "label": "Mail", "roles": ["*"], "credentials": {"password": "SMTP_PASSWORD"}}}
+            (repo / "deploy/config.json").write_text(json.dumps(cfg))
+            extra = {"EXA_API_KEY": "exa-secret-1", "PROXY_LOGIN": "user:proxy-secret-2", "SMTP_PASSWORD": "smtp-secret-3"}
+            out = run(["secrets", str(repo), *self.keys, *extra], dict(SECRET_ENV, **extra))
+            self.assertIn("EXA_API_KEY", out)
+            self.assertIn("PROXY_LOGIN", out)
+            self.assertIn("SMTP_PASSWORD", out)
+            for v in extra.values():
+                self.assertNotIn(v, out)
+            # the file is rewritten whole, so a configured credential left out is refused
+            with self.assertRaises(SystemExit) as e:
+                run(["secrets", str(repo), *self.keys, "EXA_API_KEY", "PROXY_LOGIN"], dict(SECRET_ENV, **extra))
+            self.assertIn("SMTP_PASSWORD", str(e.exception))
+            # a name the config doesn't mention is still unknown
+            with self.assertRaises(SystemExit):
+                run(["secrets", str(EXAMPLE), *self.keys, "EXA_API_KEY"], dict(SECRET_ENV, **extra))
+
     @unittest.skipUnless(shutil.which("sops") and shutil.which("age-keygen"), "needs sops and age")
     def test_sops_round_trip(self):
         with tempfile.TemporaryDirectory() as td:

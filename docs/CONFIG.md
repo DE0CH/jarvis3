@@ -65,6 +65,9 @@ or sub-account of the provider where it has them).
 Each action's credentials: the environment variables its `credentials` names (Tier 2 secrets; the
 server refuses to start when one is missing).
 
+`instance.py secrets` accepts these names once `deploy/config.json` names them, and requires them from
+then on (each run rewrites the whole file): add the `tools`/`actions` entry first, then the key.
+
 Other environment: `JARVIS_DB` (SQLite path, default `/data/jarvis.db`), `PORT` (default 8080),
 `JARVIS_WEB_DIR` (the app's web build served at `/`; `/app/web` in the server image; unset = only
 `/api`).
