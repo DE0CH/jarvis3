@@ -8,7 +8,7 @@ import { FlyMachines } from "./fly.ts";
 import { DockerMachines } from "./docker.ts";
 import { S3BlobStore } from "./s3.ts";
 import { OpenRouterKeys } from "./openrouter.ts";
-import { GoogleDirectory, StaticDirectory } from "./directory-google.ts";
+import { GoogleDirectory, StaticDirectory, WithExternalMembers } from "./directory-google.ts";
 import { CloudflareDeviceTokens } from "./cloudflare-devices.ts";
 import { GitOrgEnv } from "./orgenv-git.ts";
 import { WebApp } from "./web.ts";
@@ -21,12 +21,15 @@ const db = openDb(process.env.JARVIS_DB || "/data/jarvis.db");
 
 const directory =
   config.directory.kind === "google"
-    ? new GoogleDirectory({
-        serviceAccountJson: secrets.googleServiceAccountJson,
-        domain: config.directory.domain,
-        subject: config.directory.subject,
-        groups: Object.keys(config.directory.groupRoles),
-      })
+    ? new WithExternalMembers(
+        new GoogleDirectory({
+          serviceAccountJson: secrets.googleServiceAccountJson,
+          domain: config.directory.domain,
+          subject: config.directory.subject,
+          groups: Object.keys(config.directory.groupRoles),
+        }),
+        config.directory.users || [],
+      )
     : new StaticDirectory(config.directory.users);
 
 const sg = config.suggestions;

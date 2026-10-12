@@ -279,6 +279,30 @@ class Cloudflare(unittest.TestCase):
         self.assertNotIn("require", pols[0])
         self.assertEqual(pols[1]["include"], [{"any_valid_service_token": {}}])
 
+    def test_workspace_login_with_guest_emails(self):
+        # the domain through Google (required), plus emails outside it through a one-time PIN at the same scope
+        fake = FakeCloudflare()
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(instance.urllib.request, "urlopen", fake):
+            repo = Path(td) / "repo"
+            shutil.copytree(EXAMPLE, repo)
+            c = json.loads((repo / "instance.json").read_text())
+            c["cloudflare"].update(accessScope="zone", allowedEmails=["founder@gmail.example"])
+            (repo / "instance.json").write_text(json.dumps(c))
+            run(["cloudflare", str(repo), "--out", f"{td}/cf.env", "--apply"], SECRET_ENV)
+            run(["cloudflare", str(repo), "--out", f"{td}/cf.env", "--apply"], SECRET_ENV)
+        self.assertEqual([i["type"] for i in fake.idps], ["google-apps", "onetimepin"], "made once, at the zone")
+        self.assertFalse([p for m, p in fake.calls if "/identity_providers" in p and not p.startswith("/zones/")])
+        app = fake.apps[0]
+        self.assertEqual(app["allowed_idps"], [fake.idps[0]["id"], fake.idps[1]["id"]])
+        self.assertFalse(app["auto_redirect_to_identity"])
+        pols = fake.policies[app["id"]]
+        self.assertEqual([(p["name"], p["decision"], p["precedence"]) for p in pols],
+                         [("members", "allow", 1), ("guests", "allow", 2), ("service tokens", "non_identity", 3)])
+        self.assertEqual(pols[0]["include"], [{"email_domain": {"domain": "example.org"}}])
+        self.assertEqual(pols[0]["require"], [{"login_method": {"id": fake.idps[0]["id"]}}])
+        self.assertEqual(pols[1]["include"], [{"email": {"email": "founder@gmail.example"}}])
+        self.assertNotIn("require", pols[1])
+
     def test_external_app_gets_only_its_tunnel(self):
         fake = FakeCloudflare()
         with tempfile.TemporaryDirectory() as td, mock.patch.object(instance.urllib.request, "urlopen", fake):

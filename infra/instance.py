@@ -543,6 +543,12 @@ def cmd_cloudflare(a) -> None:
         idps = call("GET", f"{aapps}/access/identity_providers")
         idp = next((i for i in idps if i.get("name") == idp_body["name"]), None)
         idp = call("PUT", f"{aapps}/access/identity_providers/{idp['id']}", idp_body) if idp else call("POST", f"{aapps}/access/identity_providers", idp_body)
+    # emails outside the Workspace (`allowedEmails` next to an identity provider) sign in with a one-time PIN,
+    # made at the same scope: once a scope has any identity provider, its built-in PIN login is no longer implied
+    otp = None
+    if idp and cf.get("allowedEmails"):
+        otp = next((i for i in idps if i.get("type") == "onetimepin"), None) or call(
+            "POST", f"{aapps}/access/identity_providers", {"name": "One-time PIN", "type": "onetimepin", "config": {}})
 
     # 2. the session gate service token (kept unless ROTATE=1 or its secret is gone)
     toks = call("GET", f"{acc}/access/service_tokens")
@@ -562,21 +568,27 @@ def cmd_cloudflare(a) -> None:
     app_body = {"name": n["access_app"], "domain": c["hostname"], "type": "self_hosted", "session_duration": "720h",
                 "app_launcher_visible": False}
     if idp:
-        app_body.update(allowed_idps=[idp["id"]], auto_redirect_to_identity=True)
+        # with guests the login page offers both methods; without, it goes straight to Google
+        app_body.update(allowed_idps=[idp["id"]] + ([otp["id"]] if otp else []), auto_redirect_to_identity=not otp)
     app = call("PUT", f"{aapps}/access/apps/{app['id']}", app_body) if app else call("POST", f"{aapps}/access/apps", app_body)
     for p in call("GET", f"{aapps}/access/apps/{app['id']}/policies"):
         call("DELETE", f"{aapps}/access/apps/{app['id']}/policies/{p['id']}")
-    members = {"name": "members", "decision": "allow", "precedence": 1,
-               "include": [{"email_domain": {"domain": d}} for d in cf.get("allowedEmailDomains", [])]
-                          + [{"email": {"email": e}} for e in cf.get("allowedEmails", [])]}
+    # the organisation's domains sign in through its identity provider; listed emails by any allowed method
+    domains = [{"email_domain": {"domain": d}} for d in cf.get("allowedEmailDomains", [])]
+    emails = [{"email": {"email": e}} for e in cf.get("allowedEmails", [])]
+    policies = []
     if idp:
-        members["require"] = [{"login_method": {"id": idp["id"]}}]
-    call("POST", f"{aapps}/access/apps/{app['id']}/policies", members)
+        if domains:
+            policies.append({"name": "members", "decision": "allow", "include": domains, "require": [{"login_method": {"id": idp["id"]}}]})
+        if emails:
+            policies.append({"name": "guests", "decision": "allow", "include": emails})
+    else:
+        policies.append({"name": "members", "decision": "allow", "include": domains + emails})
     # paired devices and the session gate: per-device tokens are minted by the server at runtime, so the
     # policy admits any service token of the account; the server accepts only the ones it knows
-    call("POST", f"{aapps}/access/apps/{app['id']}/policies", {
-        "name": "service tokens", "decision": "non_identity", "precedence": 2,
-        "include": [{"any_valid_service_token": {}}]})
+    policies.append({"name": "service tokens", "decision": "non_identity", "include": [{"any_valid_service_token": {}}]})
+    for i, pol in enumerate(policies):
+        call("POST", f"{aapps}/access/apps/{app['id']}/policies", dict(pol, precedence=i + 1))
 
     # 4. the tunnel (remotely managed) and its one ingress rule
     tunnels = call("GET", f"{acc}/cfd_tunnel?name={n['tunnel']}&is_deleted=false")

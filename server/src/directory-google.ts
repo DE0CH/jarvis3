@@ -111,3 +111,23 @@ export class StaticDirectory implements DirectoryProvider {
     return this.#users.map((u) => ({ ...u }));
   }
 }
+
+/**
+ * A Workspace directory plus members outside it (`directory.users` with kind google), each with its role.
+ * An empty answer from the Workspace stays empty, so the sync's "refusing to offboard everyone" guard
+ * still fires when Google returns nobody.
+ */
+export class WithExternalMembers implements DirectoryProvider {
+  readonly #inner: DirectoryProvider;
+  readonly #external: StaticDirectory;
+  constructor(inner: DirectoryProvider, users: { email: string; name?: string; role: string; suspended?: boolean }[]) {
+    this.#inner = inner;
+    this.#external = new StaticDirectory(users);
+  }
+  async listUsers(): Promise<DirectoryUser[]> {
+    const users = await this.#inner.listUsers();
+    if (!users.length) return users;
+    const seen = new Set(users.map((u) => u.email.toLowerCase()));
+    return [...users, ...(await this.#external.listUsers()).filter((u) => !seen.has(u.email))];
+  }
+}

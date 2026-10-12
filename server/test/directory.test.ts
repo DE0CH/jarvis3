@@ -4,7 +4,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPair, exportPKCS8 } from "jose";
 import { harness, seedUsers, call, asEmail, asService, createTask, fakeSession, openWs, closed, type Harness } from "./helpers.ts";
-import { GoogleDirectory, StaticDirectory } from "../src/directory-google.ts";
+import { GoogleDirectory, StaticDirectory, WithExternalMembers } from "../src/directory-google.ts";
+import { FakeDirectory } from "../src/fakes/directory.ts";
 
 async function run(fn: (h: Harness) => Promise<void>, config?: Parameters<typeof harness>[0]) {
   const h = await harness(config);
@@ -334,4 +335,29 @@ test("GoogleDirectory: service-account token exchange, paging, derived group mem
   ]);
   await g.listUsers();
   assert.equal(tokenRequests, 1, "the access token is cached");
+});
+
+test("google directory with members outside the Workspace: they keep their role; a Workspace user wins; an empty Workspace answer stays empty", async () => {
+  const google = new FakeDirectory();
+  google.set("staff@example.org", { name: "Staff", groups: ["jarvis-staff@example.org"] });
+  google.set("both@example.org", { name: "From Google", groups: ["jarvis-staff@example.org"] });
+  const d = new WithExternalMembers(google, [
+    { email: "Founder@Gmail.example", name: "Founder", role: "admin" },
+    { email: "both@example.org", role: "admin" },
+  ]);
+  assert.deepEqual(
+    (await d.listUsers()).map((u) => [u.email, u.role]),
+    [["staff@example.org", undefined], ["both@example.org", undefined], ["founder@gmail.example", "admin"]],
+  );
+  await run(async (h) => {
+    h.directory.users = await d.listUsers();
+    await h.jarvis.syncDirectory();
+    assert.equal((await me(h, "founder@gmail.example")).body.user.role, "admin");
+    assert.equal((await me(h, "both@example.org")).body.user.role, "staff");
+    // Google answers nobody (a misconfigured delegation): nothing is offboarded
+    h.directory.users = await new WithExternalMembers(new FakeDirectory(), [{ email: "founder@gmail.example", role: "admin" }]).listUsers();
+    const r = await h.jarvis.syncDirectory();
+    assert.equal(r.ok, false);
+    assert.equal((await me(h, "staff@example.org")).body.user.role, "staff");
+  });
 });

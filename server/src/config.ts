@@ -35,6 +35,11 @@ export type DirectoryConfig =
       subject: string;
       /** group email -> role; a user in several mapped groups gets the first role listed in `roles` order. */
       groupRoles: Record<string, string>;
+      /**
+       * Members outside the Workspace (e.g. the operator's own address from before the Workspace existed),
+       * listed with their role like a static directory. A Workspace user with the same email wins.
+       */
+      users?: { email: string; name?: string; role: string; suspended?: boolean }[];
       /** Poll interval, seconds (default 300). */
       intervalSeconds?: number;
     }
@@ -319,6 +324,7 @@ export function validateConfig(c: Config): Config {
   if (!c.models.some((m) => m.id === c.defaultModel)) fail("defaultModel must be one of models");
   if (c.directory.kind === "google") {
     for (const r of Object.values(c.directory.groupRoles)) if (!c.roles[r]) fail(`directory.groupRoles names unknown role ${r}`);
+    for (const u of c.directory.users || []) if (!c.roles[u.role]) fail(`directory.users names unknown role ${u.role}`);
   } else {
     for (const u of c.directory.users) if (!c.roles[u.role]) fail(`directory.users names unknown role ${u.role}`);
   }

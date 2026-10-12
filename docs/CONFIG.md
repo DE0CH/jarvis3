@@ -18,7 +18,7 @@ SOPS-encrypted), never in this repo. A full example with placeholders:
 | `directory.kind` | `google` (Workspace Directory API) or `static` |
 | `directory.domain`, `.subject` | (google) the Workspace domain, and the admin user the read-only service account impersonates |
 | `directory.groupRoles` | (google) group email → role |
-| `directory.users` | (static) `[{email, name?, role, suspended?}]` — for a one-person instance |
+| `directory.users` | `[{email, name?, role, suspended?}]`: (static) the member list, for a one-person instance; (google, optional) members outside the Workspace, such as the operator's own address from before the Workspace existed. A Workspace user with the same email wins. Pair it with `cloudflare.allowedEmails` in `instance.json` so Access lets them in |
 | `directory.intervalSeconds` | poll interval, default 300 |
 | `bootstrapAdmins` | emails that get the first admin role whatever their groups say (suspension still wins) |
 | `roles` | role → `{openrouterMonthlyUsd, machineHoursPerMonth, admin?, toolsMonthlyUsd?, proxyMonthlyGb?}`. `null` = no limit. `toolsMonthlyUsd` (search + fetch, USD) is required once `tools.search` or `tools.fetch` is set, `proxyMonthlyGb` once `tools.proxy` is (a number, or an explicit `null`; a `subuser` proxy needs a number). Key order is the precedence when a user is in several mapped groups. At least one role has `admin: true` |
@@ -76,7 +76,11 @@ Other environment: `JARVIS_DB` (SQLite path, default `/data/jarvis.db`), `PORT` 
 
 - One Access application for the instance hostname, with the identity provider as its login and a
   policy admitting the organisation's domain, plus a **Service Auth** policy admitting service tokens
-  (paired devices and the session gate).
+  (paired devices and the session gate). Emails outside the domain (`cloudflare.allowedEmails` next to
+  an identity provider) get a policy of their own and sign in with a one-time PIN; the login page then
+  offers both methods instead of going straight to Google. Put the identity providers at the zone
+  (`accessScope: "zone"`) when the Cloudflare account serves other Access apps: adding an identity
+  provider to the account ends the PIN login those apps get by default.
 - The session gate is one service token created once; its client id goes in
   `access.sessionGateClientId`, its secret in `SESSION_GATE_CLIENT_SECRET`.
 
