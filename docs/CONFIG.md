@@ -78,9 +78,10 @@ Other environment: `JARVIS_DB` (SQLite path, default `/data/jarvis.db`), `PORT` 
   policy admitting the organisation's domain, plus a **Service Auth** policy admitting service tokens
   (paired devices and the session gate). Emails outside the domain (`cloudflare.allowedEmails` next to
   an identity provider) get a policy of their own and sign in with a one-time PIN; the login page then
-  offers both methods instead of going straight to Google. Put the identity providers at the zone
-  (`accessScope: "zone"`) when the Cloudflare account serves other Access apps: adding an identity
-  provider to the account ends the PIN login those apps get by default.
+  offers both methods instead of going straight to Google. Cloudflare lists an identity provider on the
+  whole account even when it is made through the zone endpoint (`accessScope: "zone"`): every other
+  Access app of the account whose `allowed_idps` is empty then shows it on its login page too (its
+  policies still decide who gets in). Set `allowed_idps` on those apps if that matters.
 - The session gate is one service token created once; its client id goes in
   `access.sessionGateClientId`, its secret in `SESSION_GATE_CLIENT_SECRET`.
 

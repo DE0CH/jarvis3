@@ -543,8 +543,8 @@ def cmd_cloudflare(a) -> None:
         idps = call("GET", f"{aapps}/access/identity_providers")
         idp = next((i for i in idps if i.get("name") == idp_body["name"]), None)
         idp = call("PUT", f"{aapps}/access/identity_providers/{idp['id']}", idp_body) if idp else call("POST", f"{aapps}/access/identity_providers", idp_body)
-    # emails outside the Workspace (`allowedEmails` next to an identity provider) sign in with a one-time PIN,
-    # made at the same scope: once a scope has any identity provider, its built-in PIN login is no longer implied
+    # emails outside the Workspace (`allowedEmails` next to an identity provider) sign in with a one-time PIN:
+    # the account's PIN provider, made here when the account has none yet
     otp = None
     if idp and cf.get("allowedEmails"):
         otp = next((i for i in idps if i.get("type") == "onetimepin"), None) or call(
