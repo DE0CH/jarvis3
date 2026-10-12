@@ -42,6 +42,7 @@ interface Ids {
   schedule: string; // alice's schedule
   wakeup: string; // a wakeup of alice's task
   inbox: string; // a message in alice's task's inbox
+  project: string; // alice's private Project
 }
 
 // Destructive routes come last so the earlier ones see the resources intact.
@@ -111,6 +112,14 @@ const ROUTES: R[] = [
   { kind: "admin", method: "POST", path: () => "/api/admin/directory/sync" },
   { kind: "admin", method: "GET", path: () => "/api/admin/tools" },
   { kind: "admin", method: "PATCH", path: (i) => `/api/users/${i.alice}/limits`, body: { toolsMonthlyUsd: 3, proxyMonthlyGb: 2 } },
+  { kind: "member", method: "GET", path: () => "/api/projects" },
+  { kind: "member", method: "POST", path: () => "/api/projects", body: { name: "matrix project" } },
+  // a private Project is its owner's only: an admin gets the 404 too
+  { kind: "ownerOnly", method: "GET", path: (i) => `/api/projects/${i.project}` },
+  { kind: "ownerOnly", method: "PATCH", path: (i) => `/api/projects/${i.project}`, body: { description: "matrix" } },
+  { kind: "ownerOnly", method: "PATCH", path: (i) => `/api/tasks/${i.task}`, body: { title: "matrix rename" } },
+  { kind: "ownerOnly", method: "POST", path: (i) => `/api/tasks/${i.task}/messages`, body: { text: "matrix message" } },
+  { kind: "session", method: "GET", path: () => "/api/session/projects" },
   { kind: "session", method: "GET", path: () => "/api/session/bundle" },
   { kind: "session", method: "GET", path: () => "/api/session/org-env.tar" },
   { kind: "session", method: "POST", path: () => "/api/session/notes", body: { text: "remember this" } },
@@ -138,6 +147,7 @@ const ROUTES: R[] = [
   { kind: "ownerOnly", method: "POST", path: (i) => `/api/tasks/${i.task}/wakeups`, body: { at: "2026-10-09T09:00:00Z", prompt: "matrix" } },
   { kind: "owned", method: "DELETE", path: (i) => `/api/wakeups/${i.wakeup}` },
   { kind: "owned", method: "DELETE", path: (i) => `/api/schedules/${i.schedule}` },
+  { kind: "ownerOnly", method: "DELETE", path: (i) => `/api/projects/${i.project}` },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/pause` },
   { kind: "owned", method: "POST", path: (i) => `/api/tasks/${i.task}/resume` },
   { kind: "owned", method: "DELETE", path: (i) => `/api/tasks/${i.task}` },
@@ -207,9 +217,10 @@ async function setup(): Promise<{ h: Harness; ids: Ids; creds: Record<Who, Cred 
   const wake = await call(h, creds.session, "POST", "/api/session/wakeups", { name: "seed", inSeconds: 3000, prompt: "seed" });
   const inboxId = enqueue(h.jarvis.ctx, task, "wakeup", wake.body.id, "seed message");
   await call(h, creds.session, "POST", "/api/session/posts", { text: "seed post" });
+  const project = await call(h, aliceCred, "POST", "/api/projects", { name: "Seed project", secrets: { SEED: "seed" } });
   return {
     h,
-    ids: { task, alice: aliceId, device: dev.id, note: note.body.id, approval: q.body.id, schedule: sched.body.id, wakeup: wake.body.id, inbox: inboxId },
+    ids: { task, alice: aliceId, device: dev.id, note: note.body.id, approval: q.body.id, schedule: sched.body.id, wakeup: wake.body.id, inbox: inboxId, project: project.body.id },
     creds,
   };
 }

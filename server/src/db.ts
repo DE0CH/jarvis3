@@ -369,6 +369,35 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (user_id, kind)
   );
   `,
+  // 11: chats (rename, messages from the app, last activity) and Projects (repos + sealed secrets)
+  `
+  ALTER TABLE tasks ADD COLUMN last_activity_at INTEGER;
+  ALTER TABLE tasks ADD COLUMN title_set_by_user INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE tasks ADD COLUMN projects TEXT;           -- JSON ProjectRef[] picked at creation
+  UPDATE tasks SET last_activity_at = max(created_at, COALESCE((SELECT max(at) FROM transcript_entries e WHERE e.task_id = tasks.id), 0));
+  ALTER TABLE inbox ADD COLUMN request_id TEXT;         -- user messages: the app's requestId (idempotency)
+  CREATE UNIQUE INDEX inbox_request ON inbox(task_id, request_id) WHERE request_id IS NOT NULL;
+  CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    shared INTEGER NOT NULL,
+    roles TEXT NOT NULL DEFAULT '[]',                   -- JSON string[] (shared only)
+    owner_id TEXT REFERENCES users(id),                 -- private only
+    repos TEXT NOT NULL DEFAULT '[]',                   -- JSON ProjectRepo[]
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK ((shared = 1 AND owner_id IS NULL) OR (shared = 0 AND owner_id IS NOT NULL))
+  );
+  CREATE INDEX projects_owner ON projects(owner_id);
+  CREATE TABLE project_secrets (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    value_sealed TEXT NOT NULL,                         -- AES-GCM with the server key, AAD project:<id>:<key>
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, key)
+  );
+  `,
 ];
 
 export type Db = DatabaseSync;

@@ -85,7 +85,7 @@ export function capNotice(ctx: Ctx, user: UserRow, what: "web" | "proxy" | "inst
     return;
   }
   const label = what === "web" ? `web search and page fetching (USD ${cap} a month)` : `proxy traffic (${cap} GB a month)`;
-  addNotice(ctx, user.id, "tools_cap", `You have used this month's ${label}. Your tasks can't use it again until next month or until an admin raises your limit.`);
+  addNotice(ctx, user.id, "tools_cap", `You have used this month's ${label}. Your chats can't use it again until next month or until an admin raises your limit.`);
   for (const a of admins) if (a.id !== user.id) addNotice(ctx, a.id, "tools_cap", `${user.email} reached their monthly cap on ${label}. You can raise it on the Users page.`);
 }
 

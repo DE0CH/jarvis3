@@ -178,7 +178,7 @@ export async function refreshSuggestions(ctx: Ctx, rows: SuggestionRow[], olderT
     ctx.db.prepare("UPDATE suggestions SET state = ?, checked_at = ?, updated_at = ? WHERE id = ?").run(state, t, t, s.id);
     const text =
       state === "merged"
-        ? `Your suggestion was accepted for everyone: ${s.title}. It reaches new tasks once the instance loads the new org-env commit.`
+        ? `Your suggestion was accepted for everyone: ${s.title}. It reaches new chats once the instance loads the new org-env commit.`
         : `Your suggestion was closed without being merged: ${s.title}.`;
     addNotice(ctx, s.user_id, "suggestion", `${text} — ${s.pr_url}`);
   }

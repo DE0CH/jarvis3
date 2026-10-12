@@ -7,7 +7,7 @@
 //   snapshots/<taskId>/state.tar.gz           the pause snapshot (overwritten by each pause)
 //   archives/<userId>/<taskId>/state.tar.gz   the final state, written by Destroy
 //   archives/<userId>/<taskId>/task.json      the task record at Destroy
-import type { CreateTaskRequest, TaskState, TaskView } from "./api-types.ts";
+import type { CreateTaskRequest, SendMessageRequest, SendMessageResult, TaskState, TaskView, UpdateTaskRequest } from "./api-types.ts";
 import type { Ctx } from "./ctx.ts";
 import { addNotice } from "./ctx.ts";
 import type { TaskRow, UserRow } from "./rows.ts";
@@ -21,6 +21,8 @@ import { ensureProxyUser } from "./tools/index.ts";
 import { checkAttachments } from "./files.ts";
 import { filesConfig } from "./config.ts";
 import { cancelForTask as cancelWakeups } from "./wakeups.ts";
+import { checkStartable, checkTaskProjects, taskProjectRefs } from "./projects.ts";
+import { enqueue, hasPending } from "./inbox.ts";
 
 export type BusyKind = "creating" | "pausing" | "resuming" | "destroying";
 export type PauseReason = "user" | "idle" | "machine_hours_cap" | "instance_budget" | "offboarded";
@@ -53,6 +55,9 @@ export function taskView(ctx: Ctx, t: TaskRow): TaskView {
     agentId: t.agent_id ?? null,
     attachments: t.attachments ? (JSON.parse(t.attachments) as string[]) : [],
     scheduleId: t.schedule_id ?? null,
+    lastActivityAt: iso(t.last_activity_at ?? t.created_at),
+    projects: taskProjectRefs(t),
+    titleSetByUser: !!t.title_set_by_user,
   };
 }
 
@@ -88,6 +93,8 @@ function checkCaps(ctx: Ctx, user: UserRow): void {
 // ---- machines --------------------------------------------------------------------------------
 
 async function launch(ctx: Ctx, task: TaskRow, user: UserRow, o: { firstPrompt?: string; attachments?: string[]; restore: boolean }): Promise<void> {
+  // the Projects' secrets as they are now: a clash that appeared since the task was made stops the start
+  checkStartable(ctx, getTask(ctx, task.id) ?? task);
   const key = await ensureKey(ctx, user);
   const token = mintToken();
   const env: Record<string, string> = {
@@ -217,6 +224,7 @@ export function createTask(ctx: Ctx, user: UserRow, body: CreateTaskRequest, o: 
     const dup = ctx.db.prepare("SELECT * FROM tasks WHERE user_id = ? AND request_id = ?").get(user.id, requestId) as TaskRow | undefined;
     if (dup) return Promise.resolve(dup);
   }
+  const projects = checkTaskProjects(ctx, user, body.projects);
   checkCaps(ctx, user);
   return (async () => {
     // the key first, in the request: an OpenRouter failure is the caller's 502, and no task is left behind
@@ -227,9 +235,22 @@ export function createTask(ctx: Ctx, user: UserRow, body: CreateTaskRequest, o: 
     const pw = mintToken();
     ctx.db
       .prepare(
-        "INSERT INTO tasks(id, user_id, title, model, state, daemon_password_sealed, request_id, attachments, schedule_id, created_at, updated_at) VALUES (?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO tasks(id, user_id, title, model, state, daemon_password_sealed, request_id, attachments, schedule_id, projects, last_activity_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(id, user.id, title, model, ctx.sealer.seal(pw, daemonAad(id)), requestId, attachments.length ? JSON.stringify(attachments) : null, o.scheduleId ?? null, now, now);
+      .run(
+        id,
+        user.id,
+        title,
+        model,
+        ctx.sealer.seal(pw, daemonAad(id)),
+        requestId,
+        attachments.length ? JSON.stringify(attachments) : null,
+        o.scheduleId ?? null,
+        projects.length ? JSON.stringify(projects) : null,
+        now,
+        now,
+        now,
+      );
     const task = getTask(ctx, id)!;
     lock(ctx, id, "creating");
     ctx.ops.run(
@@ -240,7 +261,7 @@ export function createTask(ctx: Ctx, user: UserRow, body: CreateTaskRequest, o: 
           const msg = (e as Error).message.slice(0, 300);
           update(ctx, id, { state: "failed", error: `could not start the machine: ${msg}`, session_token_hash: null });
           cancelWakeups(ctx, id, "the task could not start");
-          addNotice(ctx, user.id, "task_failed", `Task "${title}" could not start.`, id);
+          addNotice(ctx, user.id, "task_failed", `Chat "${title}" could not start.`, id);
         } finally {
           unlock(ctx, id);
         }
@@ -286,17 +307,39 @@ export function pauseTask(ctx: Ctx, task: TaskRow, reason: PauseReason, o: { for
       } finally {
         unlock(ctx, task.id);
       }
+      resumeIfMail(ctx, task.id);
     })(),
     ctx.log,
     `pause ${task.id}`,
   );
 }
 
-export function resumeTask(ctx: Ctx, task: TaskRow): void {
-  if (task.state !== "paused") throw httpError("conflict", `a ${task.state} task can't be resumed`);
+/** The checks a resume makes before anything happens: an active owner, the caps and the budget. */
+function checkResumable(ctx: Ctx, task: TaskRow): UserRow {
   const user = userRow(ctx, task.user_id);
   if (user.status !== "active") throw httpError("conflict", "the task's owner is not an active member");
   checkCaps(ctx, user);
+  return user;
+}
+
+/**
+ * A task that finished pausing while a message (from its owner or a wakeup) waited in its inbox is
+ * started again at once; refused by a cap or the budget, the message waits (the wakeup tick retries).
+ */
+function resumeIfMail(ctx: Ctx, taskId: string): void {
+  const t = getTask(ctx, taskId);
+  if (!t || t.state !== "paused" || ctx.locks.has(taskId) || !hasPending(ctx, taskId)) return;
+  try {
+    resumeTask(ctx, t);
+    ctx.log("a message arrived while pausing: resuming", { task: taskId });
+  } catch (e) {
+    ctx.log("a message waits, the task could not resume", { task: taskId, error: (e as Error).message });
+  }
+}
+
+export function resumeTask(ctx: Ctx, task: TaskRow): void {
+  if (task.state !== "paused") throw httpError("conflict", `a ${task.state} task can't be resumed`);
+  const user = checkResumable(ctx, task);
   lock(ctx, task.id, "resuming");
   update(ctx, task.id, { state: "starting", error: null, paused_reason: null });
   ctx.ops.run(
@@ -409,7 +452,8 @@ export function reportStatus(ctx: Ctx, task: TaskRow, body: { activity?: unknown
     throw httpError("bad_request", "agentId must match [A-Za-z0-9._:-]{1,128}");
   }
   const patch: Partial<TaskRow> = {};
-  if (typeof body.title === "string" && body.title.trim()) patch.title = body.title.trim();
+  // once the owner renamed the task, the agent's titles (Paseo's) no longer overwrite their name
+  if (typeof body.title === "string" && body.title.trim() && !task.title_set_by_user) patch.title = body.title.trim();
   if (typeof body.agentId === "string" && body.agentId !== task.agent_id) patch.agent_id = body.agentId;
   if (task.state === "starting" || task.state === "running" || task.state === "idle") {
     if (body.activity === "idle") {
@@ -422,6 +466,52 @@ export function reportStatus(ctx: Ctx, task: TaskRow, body: { activity?: unknown
   }
   update(ctx, task.id, patch);
   return taskView(ctx, getTask(ctx, task.id)!);
+}
+
+// ---- chat: rename, messages from the app ------------------------------------------------------------
+
+/** PATCH /api/tasks/:id: the owner renames the task; the session's titles are ignored from then on. */
+export function renameTask(ctx: Ctx, task: TaskRow, body: UpdateTaskRequest): TaskRow {
+  const title = typeof body?.title === "string" ? body.title.trim() : "";
+  if (!title || title.length > 120) throw httpError("bad_request", "title must be 1..120 characters");
+  if (task.state === "archived" || task.state === "destroying") throw httpError("conflict", `a ${task.state} task can't be renamed`);
+  update(ctx, task.id, { title, title_set_by_user: 1 });
+  return getTask(ctx, task.id)!;
+}
+
+/** Inbox states in which a message is queued and the task needs nothing else. */
+const QUEUE_STATES: ReadonlySet<TaskState> = new Set<TaskState>(["starting", "running", "idle", "pausing"]);
+
+/**
+ * POST /api/tasks/:id/messages: the owner's text goes to the task's inbox (source "user") and on to
+ * its main agent as a new user message, exactly as written. A paused task is resumed (refused by a
+ * cap, the budget or an inactive owner: nothing is queued). A repeat of a requestId returns the
+ * first result.
+ */
+export function sendMessage(ctx: Ctx, task: TaskRow, body: SendMessageRequest): SendMessageResult {
+  const text = body?.text;
+  if (typeof text !== "string" || !text.trim() || text.length > 16000) throw httpError("bad_request", "text must be 1..16000 characters");
+  const requestId = body.requestId ?? null;
+  if (requestId !== null && (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(requestId))) throw httpError("bad_request", "requestId must be [A-Za-z0-9_-]{1,64}");
+  if (requestId) {
+    const dup = ctx.db.prepare("SELECT id FROM inbox WHERE task_id = ? AND request_id = ?").get(task.id, requestId) as { id: string } | undefined;
+    if (dup) return { task: taskView(ctx, getTask(ctx, task.id)!), messageId: dup.id };
+  }
+  const paused = task.state === "paused";
+  if (!paused && !QUEUE_STATES.has(task.state)) throw httpError("conflict", `a ${task.state} task can't take messages`);
+  // checked before anything is queued, so the app can show the refusal and keep the text
+  if (paused) checkResumable(ctx, task);
+  const messageId = enqueue(ctx, task.id, "user", task.user_id, text, requestId);
+  update(ctx, task.id, { last_activity_at: ctx.clock.now() });
+  if (paused && !ctx.locks.has(task.id)) {
+    try {
+      resumeTask(ctx, getTask(ctx, task.id)!);
+    } catch (e) {
+      // queued already: the wakeup tick resumes it (a cap or budget refusal was checked above)
+      ctx.log("message queued, the resume was refused", { task: task.id, error: (e as Error).message });
+    }
+  }
+  return { task: taskView(ctx, getTask(ctx, task.id)!), messageId };
 }
 
 // ---- queries ------------------------------------------------------------------------------------------

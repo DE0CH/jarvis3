@@ -31,6 +31,7 @@ import * as inbox from "./inbox.ts";
 import * as posts from "./posts.ts";
 import * as push from "./push.ts";
 import { validTimeZone } from "./cron.ts";
+import * as projects from "./projects.ts";
 
 export const VERSION = "0.1.0";
 
@@ -158,7 +159,7 @@ export function defineRoutes(ctx: Ctx): Routes {
     return ok({
       ...users.userDetail(ctx, user),
       unreadNotices: notices.unreadCount(ctx, user.id),
-      features: { suggestions: suggestions.suggestionsEnabled(ctx), ...tools.featureFlag(ctx), files: true, search: true, schedules: true, ...(push.pushFeature(ctx) ? { push: push.pushFeature(ctx)! } : {}) },
+      features: { suggestions: suggestions.suggestionsEnabled(ctx), ...tools.featureFlag(ctx), files: true, search: true, schedules: true, projects: true, ...(push.pushFeature(ctx) ? { push: push.pushFeature(ctx)! } : {}) },
       pendingApprovals: approvals.pendingCount(ctx, userOf(r.principal)),
       isOwner: approvals.isOwner(ctx, user),
       unreadPosts: posts.unreadPosts(ctx, user.id),
@@ -229,6 +230,20 @@ export function defineRoutes(ctx: Ctx): Routes {
 
   route("GET", "/api/tasks/:id", (r) => ok(tasks.taskView(ctx, ownedTask(ctx, r)) satisfies A.TaskView));
 
+  // Rename and messages are the owner's own: an admin's would speak into someone else's conversation
+  // (and spend their machine hours), so for anyone else the task is the uniform 404.
+  route("PATCH", "/api/tasks/:id", async (r) => {
+    const t = ownedTask(ctx, r);
+    if (userOf(r.principal).user.id !== t.user_id) throw httpError("not_found", "no such task");
+    return ok(tasks.taskView(ctx, tasks.renameTask(ctx, t, (await r.body()) as A.UpdateTaskRequest)) satisfies A.TaskView);
+  });
+
+  route("POST", "/api/tasks/:id/messages", async (r) => {
+    const t = ownedTask(ctx, r);
+    if (userOf(r.principal).user.id !== t.user_id) throw httpError("not_found", "no such task");
+    return ok(tasks.sendMessage(ctx, t, (await r.body()) as A.SendMessageRequest) satisfies A.SendMessageResult, 202);
+  });
+
   route("POST", "/api/tasks/:id/pause", (r) => {
     const t = ownedTask(ctx, r);
     tasks.pauseTask(ctx, t, "user");
@@ -255,6 +270,36 @@ export function defineRoutes(ctx: Ctx): Routes {
     const t = ownedTask(ctx, r);
     tasks.destroyTask(ctx, t, { force: r.url.searchParams.get("force") === "1" });
     return ok(tasks.taskView(ctx, tasks.getTask(ctx, t.id)!) satisfies A.TaskView, 202);
+  });
+
+  // ---- projects (section 17) -------------------------------------------------------------------
+  route("GET", "/api/projects", (r) => {
+    authorize(r.principal, { kind: "member" });
+    return ok(projects.listProjects(ctx, userOf(r.principal)) satisfies A.ProjectList);
+  });
+
+  route("POST", "/api/projects", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const v = userOf(r.principal);
+    return ok(projects.projectView(ctx, projects.createProject(ctx, v, (await r.body()) as A.CreateProjectRequest), v) satisfies A.ProjectView, 201);
+  });
+
+  route("GET", "/api/projects/:id", (r) => {
+    authorize(r.principal, { kind: "member" });
+    const v = userOf(r.principal);
+    return ok(projects.projectView(ctx, projects.visibleProject(ctx, r.params.id!, v), v) satisfies A.ProjectView);
+  });
+
+  route("PATCH", "/api/projects/:id", async (r) => {
+    authorize(r.principal, { kind: "member" });
+    const v = userOf(r.principal);
+    return ok(projects.projectView(ctx, projects.updateProject(ctx, v, r.params.id!, (await r.body()) as A.UpdateProjectRequest), v) satisfies A.ProjectView);
+  });
+
+  route("DELETE", "/api/projects/:id", (r) => {
+    authorize(r.principal, { kind: "member" });
+    projects.deleteProject(ctx, userOf(r.principal), r.params.id!);
+    return ok({ ok: true });
   });
 
   // ---- users (admin) and limits ------------------------------------------------------------------
@@ -634,6 +679,8 @@ export function defineRoutes(ctx: Ctx): Routes {
     const owner = users.requireUser(ctx, t.user_id);
     return ok((await layers.bundleFor(ctx, owner.id, owner.role)) satisfies A.LayerBundle);
   });
+
+  route("GET", "/api/session/projects", (r) => ok(projects.sessionProjects(ctx, sessionTask(ctx, r)) satisfies A.SessionProjects));
 
   route("GET", "/api/session/org-env.tar", async (r) => {
     sessionTask(ctx, r);

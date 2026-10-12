@@ -54,6 +54,10 @@ export interface TaskRow {
   /** JSON string[]: the first prompt's attachments (paths in the owner's files), or null. */
   attachments: string | null;
   schedule_id: string | null;
+  last_activity_at: number | null;
+  title_set_by_user: number;
+  /** JSON ProjectRef[]: the Projects picked at creation, or null. */
+  projects: string | null;
 }
 
 export interface KeyRow {

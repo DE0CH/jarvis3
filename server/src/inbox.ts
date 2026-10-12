@@ -1,4 +1,5 @@
-// A task's inbox: messages the server has for the task's agent (wakeups). The session long-polls
+// A task's inbox: messages the server has for the task's agent (wakeups, and what the owner sends
+// from the app through POST /api/tasks/:id/messages). The session long-polls
 // GET /api/session/inbox, hands each message to the task's main agent as a new user message once
 // the agent is not mid-turn, then acks it. Never typed into anything, never an answer to a pending
 // question (lessons from Jarvis 1, lessons/52). Delivery is at least once: the session keeps the ids
@@ -12,7 +13,7 @@ import { httpError } from "./errors.ts";
 interface InboxRow {
   id: string;
   task_id: string;
-  source: "wakeup";
+  source: "wakeup" | "user";
   source_id: string;
   text: string;
   created_at: number;
@@ -21,9 +22,12 @@ interface InboxRow {
 
 const view = (r: InboxRow): InboxMessage => ({ id: r.id, source: r.source, sourceId: r.source_id, text: r.text, createdAt: iso(r.created_at) });
 
-export function enqueue(ctx: Ctx, taskId: string, source: "wakeup", sourceId: string, text: string): string {
+/** sourceId: the wakeup's id, or the user's id for a message from the app (with its requestId, if any). */
+export function enqueue(ctx: Ctx, taskId: string, source: "wakeup" | "user", sourceId: string, text: string, requestId: string | null = null): string {
   const id = randomId(8);
-  ctx.db.prepare("INSERT INTO inbox(id, task_id, source, source_id, text, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(id, taskId, source, sourceId, text, ctx.clock.now());
+  ctx.db
+    .prepare("INSERT INTO inbox(id, task_id, source, source_id, text, request_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(id, taskId, source, sourceId, text, requestId, ctx.clock.now());
   ctx.inboxBus.emit("message", taskId);
   return id;
 }

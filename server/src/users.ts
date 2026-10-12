@@ -206,7 +206,7 @@ export async function offboard(ctx: Ctx, userId: string): Promise<void> {
       ctx,
       a.id,
       "offboarded",
-      `${u.email} was offboarded (${u.status} in the directory): their key and devices were revoked and ${n} task${n === 1 ? "" : "s"} are being archived. Their personal layer and archives are kept.`,
+      `${u.email} was offboarded (${u.status} in the directory): their key and devices were revoked and ${n} chat${n === 1 ? "" : "s"} ${n === 1 ? "is" : "are"} being archived. Their personal layer and archives are kept.`,
     );
   }
 }

@@ -96,6 +96,10 @@ export interface Stack {
   s3: AwsClient;
   bucketUrl: string;
   machines: DockerMachines;
+  /** Extra env for every new session machine (read at each create). */
+  machineEnv: Record<string, string>;
+  /** The Docker bridge gateway: how a container reaches a server in this process. */
+  gateway: string;
   jwt(email: string): Promise<string>;
   close(): Promise<void>;
 }
@@ -215,6 +219,8 @@ export async function startStack(o: StackOptions): Promise<Stack> {
     s3,
     bucketUrl,
     machines,
+    machineEnv: envOverrides,
+    gateway: gw,
     jwt: (email) => sign({ email, sub: `sub-${email}`, type: "app" }),
     async close() {
       await jarvis.settle().catch(() => {});

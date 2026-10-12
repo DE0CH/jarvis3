@@ -83,10 +83,16 @@ export function ingest(ctx: Ctx, task: TaskRow, body: SessionTranscriptRequest):
        ON CONFLICT(task_id, agent_id, seq) DO UPDATE SET role = excluded.role, text = excluded.text, at = excluded.at
        WHERE transcript_entries.text <> excluded.text OR transcript_entries.role <> excluded.role`,
     );
+    let latest = 0;
     for (const e of entries) {
-      if (e.text.trim()) up.run(task.id, task.user_id, agentId, e.seq, e.role, e.text, e.at);
-      else ctx.db.prepare("DELETE FROM transcript_entries WHERE task_id = ? AND agent_id = ? AND seq = ?").run(task.id, agentId, e.seq);
+      if (e.text.trim()) {
+        up.run(task.id, task.user_id, agentId, e.seq, e.role, e.text, e.at);
+        latest = Math.max(latest, e.at);
+      } else ctx.db.prepare("DELETE FROM transcript_entries WHERE task_id = ? AND agent_id = ? AND seq = ?").run(task.id, agentId, e.seq);
     }
+    // the chat's last activity (TaskView.lastActivityAt): the newest entry, never in the future
+    latest = Math.min(latest, now);
+    if (latest) ctx.db.prepare("UPDATE tasks SET last_activity_at = ? WHERE id = ? AND (last_activity_at IS NULL OR last_activity_at < ?)").run(latest, task.id, latest);
   });
   return cursors(ctx, task.id);
 }

@@ -25,7 +25,8 @@ To ship a newer app, change `APP_COMMIT` to a commit whose jarvis3-app CI is gre
 | `src/http.ts` | routes, the HTTP relay to the daemon, and WebSocket upgrades |
 | `src/web.ts` | the app's web build at the root (`JARVIS_WEB_DIR`) |
 | `src/notices.ts` | in-app notices and their read marks |
-| `src/tasks.ts` | task lifecycle: create, pause (snapshot → destroy), resume, destroy (archive first) |
+| `src/tasks.ts` | task lifecycle: create, pause (snapshot → destroy), resume, destroy (archive first); rename and messages from the app |
+| `src/projects.ts` | Projects: repos + sealed secrets, who sees and changes them, what a task's machine gets |
 | `src/channel.ts` | session reverse channel + daemon proxy |
 | `src/users.ts` | directory sync, offboarding, devices, limits |
 | `src/userkeys.ts` | per-user OpenRouter keys |

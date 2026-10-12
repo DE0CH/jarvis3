@@ -295,7 +295,7 @@ export function wake(ctx: Ctx, taskId: string, inboxId: string | null): void {
     if (kvGet<boolean>(ctx.db, flag)) return;
     kvSet(ctx.db, flag, true);
     const why = he?.code === "machine_hours_cap" ? "your machine hours for this month are used up" : he?.code === "instance_budget" ? "the instance's machine budget for this month is used up" : (he?.message ?? (e as Error).message);
-    addNotice(ctx, t.user_id, "wakeup", `Task "${t.title}" has a wakeup waiting but could not start: ${why}. It will get the message when it next starts.`, t.id);
+    addNotice(ctx, t.user_id, "wakeup", `Chat "${t.title}" has a message waiting but could not start: ${why}. It will get the message when it next starts.`, t.id);
   }
 }
 
@@ -320,7 +320,7 @@ async function runCheck(ctx: Ctx, w: WakeupRow, now: number): Promise<void> {
     if (w.fail_prompt) deliver(ctx, w, `${header(w, now, `condition check gave up after ${w.checks} checks of ${check.url}`)}\n${w.fail_prompt}`);
     else {
       const t = getTask(ctx, w.task_id);
-      addNotice(ctx, w.user_id, "wakeup", `The wakeup "${w.name}" of task "${t?.title ?? w.task_id}" gave up: its condition on ${check.url} never held.`, w.task_id);
+      addNotice(ctx, w.user_id, "wakeup", `The wakeup "${w.name}" of chat "${t?.title ?? w.task_id}" gave up: its condition on ${check.url} never held.`, w.task_id);
     }
     return;
   }

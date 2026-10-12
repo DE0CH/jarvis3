@@ -41,6 +41,13 @@ test("instructions: platform preamble first, then the layers exactly in bundle o
   assert.match(text, /<!-- jarvis layer: policy \(policy\/AGENTS.md\) -->/);
 });
 
+test("instructions: the task's Projects section comes after the preamble, before the layers", () => {
+  const text = renderInstructions(bundle, { ...o, projectsText: "## Projects\n\nPROJECTS-MARK" });
+  assert.ok(text.indexOf("PROJECTS-MARK") > text.indexOf("# Jarvis session"));
+  assert.ok(text.indexOf("PROJECTS-MARK") < text.indexOf("ORG-MARK"));
+  assert.ok(!renderInstructions(bundle, o).includes("## Projects"));
+});
+
 test("skills: one folder per assembled name; a renamed skill's front matter follows the new name", () => {
   const files = skillFiles(bundle);
   assert.deepEqual([...files.keys()].sort(), ["notes/SKILL.md", "role-search/SKILL.md", "search/SKILL.md", "search/refs/a.md", "send-mail/SKILL.md"]);

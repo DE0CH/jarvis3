@@ -85,6 +85,8 @@ Error body (every non-2xx JSON answer):
 | POST | `/api/tasks` | M (creates a task owned by the caller) |
 | GET | `/api/tasks` | M (own); `?userId=U`: O of U, A; `?all=1`: A |
 | GET | `/api/tasks/:id` | O, A |
+| PATCH | `/api/tasks/:id` | O only (an admin gets the 404) |
+| POST | `/api/tasks/:id/messages` | O only (an admin gets the 404) |
 | GET | `/api/tasks/:id/archive` | O, A |
 | GET | `/api/tasks/:id/transcript` | O, A |
 | POST | `/api/tasks/:id/pause` | O, A |
@@ -133,10 +135,15 @@ Error body (every non-2xx JSON answer):
 | GET | `/api/channels` | M (own tasks'); `?userId=U`: O of U, A; `?all=1`: A |
 | GET | `/api/tasks/:id/posts` | O, A |
 | POST | `/api/tasks/:id/posts/read` | O, A (only the owner's read marks change) |
+| GET | `/api/projects` | M (own private Projects + shared ones open to the caller's role; A: every shared one) |
+| POST | `/api/projects` | M (a private Project of the caller); `shared: true`: A (else 403) |
+| GET | `/api/projects/:id` | whoever sees it (above); anyone else 404 |
+| PATCH, DELETE | `/api/projects/:id` | private: O only (an admin gets the 404); shared: A (staff who see it get 403) |
 | GET | `/api/admin/budget` | A |
 | POST | `/api/admin/directory/sync` | A |
 | GET | `/api/admin/tools` | A |
 | GET | `/api/session/bundle` | S |
+| GET | `/api/session/projects` | S (its own task's Projects, with their secret values) |
 | GET | `/api/session/org-env.tar` | S |
 | POST | `/api/session/notes` | S |
 | POST | `/api/session/status` | S |
@@ -222,7 +229,10 @@ instance's curated list.
 
 ## 5. Tasks
 
-A task is one session machine running OpenCode under a Paseo daemon. States (`TaskState`):
+A task is one session machine running OpenCode under a Paseo daemon. The app calls a task a
+**chat** and shows no machine state: it lists chats by `lastActivityAt`, and sending a message to a
+paused chat (`POST /api/tasks/:id/messages`) resumes it. Tasks still pause on idle as before.
+States (`TaskState`):
 
 ```
             create                 channel connects        status idle
@@ -250,7 +260,8 @@ and destroy answer **202** at once with the task in its transitional state; poll
 {
   "id": "7ce0326a5435ab61", "userId": "1bb0e5661a4b5508", "title": "Write the weekly report",
   "model": "anthropic/claude-…", "state": "running", "busy": null, "error": null, "pausedReason": null,
-  "createdAt": "…", "updatedAt": "…", "connected": true, "agentId": "a3f1…"
+  "createdAt": "…", "updatedAt": "…", "connected": true, "agentId": "a3f1…",
+  "lastActivityAt": "…", "projects": [{ "id": "4f2a…", "name": "Website" }], "titleSetByUser": false
 }
 ```
 
@@ -261,6 +272,14 @@ and destroy answer **202** at once with the task in its transitional state; poll
   went to), as the session reports it; null until then. It stays the same across pause and resume,
   because a resumed daemon keeps its agents. The app opens this agent's chat.
 - `attachments`: the paths (in the owner's files) attached to the first prompt; `[]` when none.
+- `lastActivityAt`: the time of the latest message in the chat: the creation, the latest message the
+  owner sent through `POST /api/tasks/:id/messages`, or the newest transcript entry the session
+  reported (section 14; never later than the server's clock), whichever is newest. Pause, resume,
+  idle and every other state change leave it alone. The app sorts and groups its chat list by it.
+- `projects`: the Projects picked at creation (section 17), `{id, name}` with the name as it was
+  then; fixed for the task's life, kept when a Project is renamed or deleted. `[]` when none.
+- `titleSetByUser`: true once the owner renamed the task; from then on titles the session reports
+  are ignored.
 
 ### `POST /api/tasks` (`CreateTaskRequest`) → 201 `TaskView`
 
@@ -279,6 +298,9 @@ and destroy answer **202** at once with the task in its transitional state; poll
   `~/workspace/attachments/`, names them at the end of the first message, and, when the model takes
   image input (config `models[].images`), sends images (PNG, JPEG, GIF, WebP up to 5 MiB, at most 5)
   to the model inline as well.
+- `projects`: optional, at most 10 Project ids (section 17), each visible to the caller (else 400).
+  A secret key with different values in two picked Projects refuses the create with 400 naming the
+  key and both Projects (no pick at random); the same value twice is fine.
 
 On the user's first task the server mints their OpenRouter key here (an OpenRouter failure = **502**,
 no task is created). Refused with **429** when the user's machine-hour cap or the instance budget is
@@ -289,6 +311,35 @@ session dials in, or `failed` (with a notice) when no machine could be made.
 Newest first. The caller's own tasks; `?userId=U` (that user or an admin); `?all=1` (admin).
 
 ### `GET /api/tasks/:id` → `TaskView`
+
+### `PATCH /api/tasks/:id` (`UpdateTaskRequest`) → `TaskView`
+`{ "title": "Q3 suppliers" }`: rename. The owner only; anyone else, admins included, gets the
+uniform 404 (a rename is the owner's word about their own conversation). `title` is trimmed and
+must be 1..120 characters (400). Any state but `archived` and `destroying` (409 `conflict`). Sets
+`titleSetByUser`: the titles the session reports in `POST /api/session/status` (Paseo's agent title)
+no longer change the task's title.
+
+### `POST /api/tasks/:id/messages` (`SendMessageRequest`) → 202 `SendMessageResult`
+`{ "text": "…", "requestId": "m-81f2" }` → `{ "task": TaskView, "messageId": "…" }`. How the app
+sends a message to a chat whose machine isn't connected (paused, starting, pausing); while it is
+connected the app talks to the agent through the daemon proxy. The owner only (uniform 404 for
+anyone else, admins included).
+
+- `text`: 1..16000 characters. It goes into the task's inbox as source `"user"` and reaches the
+  task's main agent as a new user message exactly as written (no header line), the way wakeup
+  prompts do, once the agent is not mid-turn (section 15). Several user messages delivered together
+  are joined with a blank line.
+- `requestId`: optional `[A-Za-z0-9_-]{1,64}`; a repeat for the same task returns the first result
+  and queues nothing.
+- `paused`: queued, then the task is resumed, with the checks of `POST /resume`: 429
+  `machine_hours_cap` / `instance_budget`, 409 when the owner is not active. When one of those
+  refuses, **nothing is queued**, so the app can show the error and keep the text in its box.
+- `starting`, `running`, `idle`, `pausing`, or busy resuming: queued. A task that finishes pausing
+  with an undelivered message is resumed at once (and by the wakeup tick, every minute, if that
+  resume is refused).
+- `failed`, `destroying`, `archived`: 409 `conflict`.
+
+The message moves `lastActivityAt`. A task with undelivered messages is never idle-paused.
 
 ### `POST /api/tasks/:id/pause` → 202 `TaskView`
 Allowed from `starting`, `running`, `idle` (else 409 `conflict`). Snapshot to the bucket, then the
@@ -540,6 +591,7 @@ owner's personal layer; it can do nothing else.
 | route | does |
 |---|---|
 | `GET /api/session/bundle` → `LayerBundle` | the assembled layers for the task's owner and role |
+| `GET /api/session/projects` → `SessionProjects` | the task's Projects as they are now, with their repos and secret values (section 17); 409 when their secrets clash |
 | `GET /api/session/org-env.tar` → `application/x-tar` | the org-env tree at the pinned commit (the "bundle"; no Git credential in the machine) |
 | `POST /api/session/notes` `{ "text" }` → 201 `PersonalNote` | "remember …": a note in the owner's personal layer (`source: "session"`, `taskId`) |
 | `GET /api/session/actions` → `ActionCatalogue` | the broker's actions as this task sees them (section 11) |
@@ -553,10 +605,10 @@ owner's personal layer; it can do nothing else.
 | `GET /api/session/search?q=…` → `SearchResult` | search the owner's tasks (section 14) |
 | `GET /api/session/tasks/:id/transcript` → `TranscriptPage` | read one of the owner's tasks (404 for anyone else's) |
 | `GET` / `POST /api/session/wakeups`, `DELETE /api/session/wakeups/:name` | this task's wakeups: list, arm (`SessionWakeupRequest`, 201 `WakeupView`), cancel by name (section 15) |
-| `GET /api/session/inbox?wait=<s>` → `InboxList` | messages for the task's agent not yet acked, oldest first; with `wait` (≤ 55 s) a long poll |
+| `GET /api/session/inbox?wait=<s>` → `InboxList` | messages for the task's agent not yet acked, oldest first (`source`: `wakeup`, or `user` for the owner's messages from the app); with `wait` (≤ 55 s) a long poll |
 | `POST /api/session/inbox/:id/ack` | the message was handed to the agent (idempotent) |
 | `POST /api/session/posts` (`SessionPostRequest`) → 201 `ChannelPostView` | post to the task's channel |
-| `POST /api/session/status` `{ "activity": "busy" \| "idle", "title"?, "agentId"? }` → `TaskView` | `idle` starts the auto-pause countdown (`idleMinutes`), `busy` stops it; `title` (≤ 120) renames the task; `agentId` (`[A-Za-z0-9._:-]{1,128}`) records the task's main agent |
+| `POST /api/session/status` `{ "activity": "busy" \| "idle", "title"?, "agentId"? }` → `TaskView` | `idle` starts the auto-pause countdown (`idleMinutes`), `busy` stops it; `title` (≤ 120) renames the task, unless its owner renamed it (`titleSetByUser`); `agentId` (`[A-Za-z0-9._:-]{1,128}`) records the task's main agent |
 | `WS /api/session/channel` | the reverse channel (below) |
 
 ### The reverse channel
@@ -600,11 +652,15 @@ What the server gives a machine (env) and expects from the session image (built 
 | `JARVIS_TIME_ZONE` | the owner's IANA zone as their app last reported it (`X-Time-Zone`, section 15), else `UTC` |
 
 Nothing else: no organisation provider tokens, no storage credentials, no Access identity of any person.
+A task's Project secrets are not in this env either (a provider shows a machine's env in its
+config): the session fetches them at boot from `GET /api/session/projects`.
 
 The local-Docker provider (CI and local runs only) can set or replace env values per machine
 (`machines.envOverrides`): `JARVIS_URL` as the containers reach the server, and
 `OPENROUTER_BASE_URL`, which the image honours as an OpenAI-compatible endpoint in place of
-OpenRouter (the integration test's stub). A production machine never gets it.
+OpenRouter (the integration test's stub), and `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
+`GIT_CONFIG_VALUE_n`, which jarvis-agent passes to its Project clones (the integration test rewrites
+a Project's https URL to a repo it serves over plain HTTP). A production machine never gets it.
 
 The image's side (boot sequence, layout, what is kept in a snapshot) is in
 [`SESSION-IMAGE.md`](SESSION-IMAGE.md).
@@ -844,10 +900,12 @@ task has at most `maxPerTask` armed. **Firing** puts the prompt, after one heade
 (`[Jarvis wakeup "<name>" (<why>), set earlier by this task; now <time>]`), in the task's **inbox**,
 and if the task is paused the server resumes it. The session hands inbox messages to the task's
 main agent as a new user message once the agent isn't mid-turn, then acks them (SESSION-IMAGE.md
-"Boot", step 6); delivery never types into anything or answers a pending question. A task with
+"Boot", step 8); delivery never types into anything or answers a pending question. A task with
 unacked messages isn't idle-paused. If the task can't be resumed (the owner's machine-hour cap, the
 instance budget), the message stays in the inbox, the owner gets one `wakeup` notice, and the server
 resumes the task once it can; it also arrives whenever the owner starts the task.
+The owner's own messages from the app (`POST /api/tasks/:id/messages`, section 5) use the same
+inbox with source `user`, without a header line.
 
 **Checks run on the server**, so they are narrow: one HTTPS `GET` to a public address (the
 connection's own DNS answer must be public, so a name can't point it at the cluster), no
@@ -943,3 +1001,84 @@ The owner (or an admin). Someone else's id is a 404.
 ### `POST /api/push/test` → `PushTestResult`
 Sends "Test notification" to each of the caller's subscriptions and answers once the push services
 have: `{ results: [{ id, ok, error }] }`.
+
+## 17. Projects
+
+A Project is one or more git repos plus a secret store (named key/values). A person picks Projects
+when making a task (`CreateTaskRequest.projects`); every machine start of that task (create and
+resume) clones the repos into its workspace and puts the secrets in the agent's environment, on top of
+the layers (org, role, personal, policy), which load as before. `MeView.features.projects` is true.
+
+**Who.** Anyone makes their own Projects, private to them. Admins also make **shared** Projects and
+choose which roles may use each (`roles`, at least one).
+
+- Visibility (`GET /api/projects`): the caller's own private Projects, plus the shared ones whose
+  `roles` include the caller's role. Admins: their own private ones plus every shared one. Nobody,
+  admins included, sees another person's private Project (the uniform 404).
+- Changes (`PATCH`, `DELETE`): a private Project's owner; any admin for a shared one. Someone who sees
+  a Project but can't change it (staff on a shared one) gets 403 `forbidden`.
+- No route returns a secret value; `ProjectView.secrets` lists keys and their `updatedAt`.
+- An offboarded person's private Projects stay in the database as the organisation's record, like the
+  personal layer; nobody can use them (their owner can't sign in, nobody else can see them). A
+  returning member has them again.
+
+**Limits.** `name` 1..80 characters (trimmed); `description` ≤ 2000; ≤ 10 repos; ≤ 50 secrets; a key
+matches `^[A-Z_][A-Z0-9_]{0,63}$` and is not one the machine sets itself (`JARVIS_*`, `PASEO_*`,
+`OPENROUTER_*`, `OPENCODE_*`, `CF_ACCESS_*`, `GIT_*`, `LC_*`, `LD_*`, `HOME`, `USER`, `LOGNAME`, `PATH`,
+`SHELL`, `LANG`, `LANGUAGE`, `TZ`, `PWD`, `OLDPWD`, `TERM`, `HOSTNAME`, `SHLVL`, `NODE_OPTIONS`,
+`TMPDIR`, `MAIL`); a value is 1..16384 bytes. At most 50 private Projects per person and 200 shared
+ones per instance (409 beyond).
+
+**Repos** (`ProjectRepo`): `url` is `https://` only, without credentials in it (`user:pass@` or a
+token in the URL is refused), no query or fragment. `ref` is a branch or tag
+(`[A-Za-z0-9._/-]{1,200}`, not starting with `-`, no `..`), or null for the default branch.
+`tokenSecret` names one of the Project's own secrets holding a token for a private repo (GitHub: a
+fine-grained PAT, sent as the `x-access-token` password over https); it must name a key that exists
+after the change (400), so such a secret can't be deleted while a repo uses it.
+
+**Secrets** are sealed at rest with the server key (AES-GCM, associated data
+`project:<projectId>:<key>`) and leave the server only to a machine of a task that picked the
+Project.
+
+### `GET /api/projects` → `ProjectList`
+`{ "projects": ProjectView[], "roles"?: string[] }`, by name. `roles` (admins only): the instance's
+role names, for the shared-Project form.
+
+### `POST /api/projects` (`CreateProjectRequest`) → 201 `ProjectView`
+```json
+{ "name": "Website", "description": "The company site",
+  "repos": [{ "url": "https://github.com/example/site.git", "ref": "main", "tokenSecret": "GH_TOKEN" }],
+  "secrets": { "GH_TOKEN": "github_pat_…", "CMS_API_KEY": "…" } }
+```
+`shared: true` (with `roles`) is for admins only (403); a private Project takes no roles (400).
+
+### `GET /api/projects/:id` → `ProjectView`
+404 unless the caller sees it.
+
+### `PATCH /api/projects/:id` (`UpdateProjectRequest`) → `ProjectView`
+A field left out is unchanged; `repos` replaces the list. In `secrets`, a value sets or replaces that
+key, `null` deletes it, and a key left out is kept. `roles`: shared Projects only (at least one).
+Whether a Project is shared can't change.
+
+### `DELETE /api/projects/:id` → `{ "ok": true }`
+Its secrets go with it. Tasks that picked it keep it in their `projects`; their next machine start no
+longer gets it.
+
+### Tasks with Projects
+
+- At create: each id must be visible to the caller (else 400), at most 10. The same key with
+  different values in two picked Projects refuses the create with 400, naming the key and both
+  Projects; the same value twice is fine.
+- At every machine start (create and resume) the Projects are loaded as they are then: current
+  values, repos and names; a deleted Project, or a shared one no longer open to the owner's role, is
+  left out. A clash that appeared since the task was made fails that start: a resume leaves the task
+  `paused` with `error` naming the key (a create: `failed`).
+- `GET /api/session/projects` (session token) →
+  `{ projects: [{ id, name, repos: [{ url, ref, dir, token?, tokenEnv? }], secrets: [names] }], env }`.
+  `dir` is the folder under `~/workspace`: the URL's last path segment without `.git`, made safe
+  (`[A-Za-z0-9._-]`) and unique across the task's repos (`site`, `site-2`; `attachments` becomes
+  `attachments-repo`). `token` is the value of the repo's `tokenSecret`, `tokenEnv` its name. `env`
+  is every picked Project's secrets merged. 409 when the secrets clash now.
+- The session image clones and wires them at boot (SESSION-IMAGE.md, "Boot"). The values are never in
+  the machine's provider env.
+

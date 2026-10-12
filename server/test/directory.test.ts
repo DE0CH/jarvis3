@@ -111,7 +111,7 @@ test("suspension: 403 at once, sockets closed, key and devices revoked, sessions
     assert.equal(userJson.status, "suspended");
     // admins are told
     const notices = (await call(h, a, "GET", "/api/notices")).body.notices;
-    assert.ok(notices.some((n: { kind: string; text: string }) => n.kind === "offboarded" && n.text.includes(alice) && n.text.includes("2 tasks")));
+    assert.ok(notices.some((n: { kind: string; text: string }) => n.kind === "offboarded" && n.text.includes(alice) && n.text.includes("2 chats")));
     const users = await call(h, a, "GET", "/api/users");
     assert.equal(users.body.users.find((u: { user: { email: string } }) => u.user.email === alice).user.status, "suspended");
     const tasks = await call(h, a, "GET", `/api/tasks?userId=${aliceId}`);

@@ -120,6 +120,8 @@ export interface InstanceFeatures {
   search?: boolean;
   /** Scheduled tasks, wakeups and channels (section 15). Optional: absent on older servers. */
   schedules?: boolean;
+  /** Projects (section 17), task rename and POST /api/tasks/:id/messages. Optional: absent on older servers. */
+  projects?: boolean;
   /**
    * Push notifications for notices (section 16): which channels the instance can send through.
    * Absent on older servers and when the instance has no push keys.
@@ -222,6 +224,41 @@ export interface TaskView {
   attachments?: string[];
   /** The schedule that started this task (section 15), or null. */
   scheduleId?: string | null;
+  /**
+   * The time of the latest message in the chat: the creation, the latest message the owner sent
+   * through POST /api/tasks/:id/messages, or the latest transcript entry the session reported,
+   * whichever is newest. Pausing, resuming and state changes don't move it. The app sorts its
+   * chat list by it.
+   */
+  lastActivityAt: IsoTime;
+  /** The Projects picked at creation (fixed), with their names as they were then; [] when none. */
+  projects: ProjectRef[];
+  /** True once the owner renamed the task (PATCH /api/tasks/:id); the session's titles are ignored after that. */
+  titleSetByUser?: boolean;
+}
+
+/** PATCH /api/tasks/:id (the owner only): rename. */
+export interface UpdateTaskRequest {
+  /** 1..120 characters after trimming. */
+  title: string;
+}
+
+/**
+ * POST /api/tasks/:id/messages (the owner only): a message for the task's agent, delivered through
+ * the task's inbox once the agent is not mid-turn. A paused task is resumed.
+ */
+export interface SendMessageRequest {
+  /** 1..16000 characters, delivered exactly as written. */
+  text: string;
+  /** [A-Za-z0-9_-]{1,64}. A repeat for the same task returns the first result and queues nothing. */
+  requestId?: string;
+}
+
+/** 202 answer of POST /api/tasks/:id/messages. */
+export interface SendMessageResult {
+  task: TaskView;
+  /** The inbox message's id. */
+  messageId: string;
 }
 
 /** POST /api/tasks */
@@ -241,6 +278,12 @@ export interface CreateTaskRequest {
    * inline.
    */
   attachments?: string[];
+  /**
+   * Projects (ids from GET /api/projects) whose repos and secrets this task's machine gets, at most
+   * 10, each visible to the caller. A secret key with different values in two of them refuses the
+   * create (400).
+   */
+  projects?: string[];
 }
 
 /** GET /api/tasks */
@@ -991,7 +1034,8 @@ export interface ArmWakeupRequest {
 /** A message waiting for the task's agent (GET /api/session/inbox). */
 export interface InboxMessage {
   id: string;
-  source: "wakeup";
+  /** "wakeup": a wakeup fired (text starts with a header line); "user": the owner sent it from the app (the text as written). */
+  source: "wakeup" | "user";
   sourceId: string;
   text: string;
   createdAt: IsoTime;
@@ -1128,4 +1172,112 @@ export type CreatePushSubscriptionRequest =
 export interface PushTestResult {
   /** One entry per subscription, after the push service answered. */
   results: { id: string; ok: boolean; error: string | null }[];
+}
+
+// ---- projects (section 17) ---------------------------------------------------------------------------
+
+/**
+ * A git repo a Project brings into its tasks' machines (cloned into ~/workspace/<dir>).
+ * url: https:// only, without credentials in it. ref: a branch or tag ([A-Za-z0-9._/-]{1,200}),
+ * null = the repo's default branch. tokenSecret: the key of one of the Project's secrets that holds
+ * a token for a private repo (GitHub: a fine-grained PAT, used as the x-access-token password over
+ * https), or null.
+ */
+export interface ProjectRepo {
+  url: string;
+  ref: string | null;
+  tokenSecret: string | null;
+}
+
+/** A repo in a create or update request: `ref` and `tokenSecret` may be left out (null). */
+export interface ProjectRepoInput {
+  url: string;
+  ref?: string | null;
+  tokenSecret?: string | null;
+}
+
+/** A secret's name; its value is never returned by any route. */
+export interface ProjectSecretView {
+  key: string;
+  updatedAt: IsoTime;
+}
+
+export interface ProjectView {
+  id: string;
+  name: string;
+  description: string;
+  /** Shared (made by an admin for roles) or private (its owner's own). */
+  shared: boolean;
+  /** Shared: the roles whose members may use it. [] for a private Project. */
+  roles: string[];
+  /** The owner of a private Project; null for a shared one. */
+  ownerId: string | null;
+  repos: ProjectRepo[];
+  secrets: ProjectSecretView[];
+  /** Whether the caller may change or delete it (the owner of a private one; an admin for a shared one). */
+  canEdit: boolean;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
+/** A Project as a task remembers it (the name as it was when the task was made). */
+export interface ProjectRef {
+  id: string;
+  name: string;
+}
+
+/** GET /api/projects */
+export interface ProjectList {
+  projects: ProjectView[];
+  /** The instance's role names, for the shared-Project form. Admins only. */
+  roles?: string[];
+}
+
+/**
+ * POST /api/projects. Limits: name 1..80, description ≤ 2000, ≤ 10 repos, ≤ 50 secrets; a key is
+ * ^[A-Z_][A-Z0-9_]{0,63}$ and not one the machine sets itself; a value is 1..16384 bytes. A person
+ * has at most 50 private Projects. `shared: true` (admins only) needs at least one role.
+ */
+export interface CreateProjectRequest {
+  name: string;
+  description?: string;
+  repos?: ProjectRepoInput[];
+  secrets?: Record<string, string>;
+  shared?: boolean;
+  roles?: string[];
+}
+
+/**
+ * PATCH /api/projects/:id. A field left out is unchanged; `repos` replaces the list. In `secrets`
+ * a value sets or replaces that key, null deletes it, a key left out is kept. `roles`: shared
+ * Projects only.
+ */
+export interface UpdateProjectRequest {
+  name?: string;
+  description?: string;
+  repos?: ProjectRepoInput[];
+  secrets?: Record<string, string | null>;
+  roles?: string[];
+}
+
+/** GET /api/session/projects (session token): what the task's machine loads at boot. */
+export interface SessionProjects {
+  projects: {
+    id: string;
+    name: string;
+    repos: {
+      url: string;
+      ref: string | null;
+      /** The folder under ~/workspace: the URL's last path segment without .git, made unique. */
+      dir: string;
+      /** The token for a private repo (the value of its `tokenSecret`). */
+      token?: string;
+      /** The env var that holds the token in the agent's environment (the repo's `tokenSecret`). */
+      tokenEnv?: string;
+    }[];
+    /** The names of this Project's secrets (their values are in `env`). */
+    secrets: string[];
+  }[];
+  /** Every picked Project's secrets, merged (a clash refuses the start). */
+  env: Record<string, string>;
 }

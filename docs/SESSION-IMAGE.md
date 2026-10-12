@@ -39,7 +39,19 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
 1. **Restore** (`jarvis-boot`, resume only): `JARVIS_RESTORE_URL` → download the tar.gz → unpack
    into `/home/jarvis`. Once per machine (marker in `/var/lib/jarvis`). A failed restore is logged
    and the task boots without its old state (docs/OPEN.md).
-2. **Layers** (jarvis-agent): `GET /api/session/bundle` and `GET /api/session/org-env.tar` with the
+2. **Projects** (jarvis-agent, before anything else): `GET /api/session/projects` (docs/API.md
+   section 17). Each repo is cloned into `~/workspace/<dir>` as user `jarvis`, only when that folder
+   doesn't exist yet (a resumed task's snapshot already has it, with the agent's own changes). The
+   token never goes into a URL or `.git/config`: the clone runs with the token in one env var (named
+   by the repo's `tokenSecret`) and a credential helper that answers `x-access-token` + that
+   variable, and the clone keeps a repo-local `credential.helper` that reads the same variable, which
+   is a secret in the agent's environment, so the agent can pull and push. `GIT_CONFIG_*` from the
+   machine env (a URL rewrite; tests only) is passed to the clones. The secrets (`env`) are merged
+   into the daemon's env (below), never overriding a name the machine sets. The instructions get a
+   "Projects" section after the platform preamble: each Project's name, its repo folders and its
+   secret **names** (never values). A failed clone is logged and noted in that section, and a failed
+   fetch (or a 409 for clashing secrets) is noted as missing Projects; the task starts either way.
+3. **Layers** (jarvis-agent): `GET /api/session/bundle` and `GET /api/session/org-env.tar` with the
    gate service token + `Authorization: Bearer $JARVIS_SESSION_TOKEN`, retried with backoff.
    - the org-env tree → `/home/jarvis/org`, owned by root, read-only for the agent;
    - `~/.jarvis/instructions.md`: a short platform preamble (what the machine is, where things are,
@@ -58,26 +70,26 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
      `todowrite`, `question`, `doom_loop`), a deny rule denies the whole permission.
    Everything here is rebuilt on every boot, so a resumed task loads the layers as they are now
    (including notes remembered in the task before the pause).
-3. **Files** (jarvis-agent): `GET /api/session/files`, then each file, newest first, up to
+4. **Files** (jarvis-agent): `GET /api/session/files`, then each file, newest first, up to
    `JARVIS_FILES_SYNC_BYTES`, into `~/files/<path>` (owned by `jarvis`, modification time = the
    file's `updatedAt`). A fresh copy every boot; not in the snapshot; a failure is logged and the
    boot goes on.
-4. **Daemon**: `paseo daemon run --home ~/.paseo` as user `jarvis` in a restart loop (a restored
+5. **Daemon**: `paseo daemon run --home ~/.paseo` as user `jarvis` in a restart loop (a restored
    `paseo.pid` is removed first: the old machine's pid can belong to another process here), listening on
    `127.0.0.1:6767` with `PASEO_PASSWORD`, relay, web UI, dictation and voice off. Its env holds only
    HOME/PATH, the Paseo settings, the password and `OPENROUTER_API_KEY` (and `OPENROUTER_BASE_URL`
-   when set, and `JARVIS_PROXY_URL` with a Tier 0 proxy): **not** the session token or the gate secret, so nothing the agent runs can read them.
+   when set, `JARVIS_PROXY_URL` with a Tier 0 proxy, and the task's Project secrets): **not** the session token or the gate secret, so nothing the agent runs can read them.
    The daemon answers `/api/health` before it accepts WebSockets (it restores its agents first
    and answers 503 meanwhile), so jarvis-agent waits until its own client gets through before it
    dials in: a task is `running` only once the app's socket can reach the daemon.
-5. **Channel**: one WebSocket to `$JARVIS_URL/api/session/channel` (`ws-open` / `ws-msg` / `ws-close`,
+6. **Channel**: one WebSocket to `$JARVIS_URL/api/session/channel` (`ws-open` / `ws-msg` / `ws-close`,
    `hello`, `ping` every 30 s; reconnects with backoff 1 s → 30 s). Each `ws-open` becomes a local
    socket to `ws://127.0.0.1:6767<path>` with the server's subprotocols (the first is
    `paseo.bearer.<password>`); frames are queued until it opens. Each `http-req` becomes a `fetch`
   to `http://127.0.0.1:6767<path>` with the server's headers (the server has added the daemon's
   bearer); the answer goes back as `http-res`, `http-data` chunks of ≤ 256 KiB and `http-end`, and
   `http-cancel` aborts it.
-6. **First prompt** (create only, once per task — marker `~/.jarvis/first-prompt-sent`, kept in
+7. **First prompt** (create only, once per task — marker `~/.jarvis/first-prompt-sent`, kept in
    the snapshot): the attachments (`JARVIS_ATTACHMENTS`) are copied from `~/files` (or downloaded)
    into `~/workspace/attachments/` (a clashing name gets `-2`, `-3`…), and a paragraph naming them
    is appended to the prompt. Paseo's client SDK creates the task's main agent
@@ -86,8 +98,9 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
    inline for the first three attempts (`opencode.json` then declares the model's image input);
    later attempts leave the images out (a model without image input). Its id is kept in
    `~/.jarvis/main-agent`.
-7. **Inbox** (after the first prompt): a long poll of `GET /api/session/inbox?wait=50`. New
-   messages (wakeup prompts, docs/API.md section 15) wait until the main agent is neither
+8. **Inbox** (after the first prompt): a long poll of `GET /api/session/inbox?wait=50`. New
+   messages (wakeup prompts, docs/API.md section 15, and the owner's messages from the app, section 5,
+   which arrive exactly as written) wait until the main agent is neither
    `running`/`initializing` nor holding a pending permission, then go to it as **one** user
    message (several queued ones joined), and are acked. Sending while the agent is mid-turn would
    interrupt it (Paseo's default), and a message must never land as the answer to something the
@@ -95,7 +108,7 @@ bundled Claude Agent SDK binary (~250 MB; there is no Claude here).
    `~/.jarvis/inbox-delivered` (in the snapshot), so a crash between delivery and ack doesn't
    deliver twice. With no main agent (archived, or the first prompt never made one) the message
    starts a new main agent. The server doesn't idle-pause a task while it has an unacked message.
-8. **Status**: every 3 s jarvis-agent lists the daemon's agents over one local client connection;
+9. **Status**: every 3 s jarvis-agent lists the daemon's agents over one local client connection;
    `busy` while any agent is `running`/`initializing` (or the first prompt is still being sent),
    else `idle`. A change (or a reconnect) → `POST /api/session/status`, with the main agent's id
    (on a reconnect, and when it first exists) and its title when it changed.
@@ -192,13 +205,14 @@ status line.
 
 The server sets everything (docs/API.md section 10). Optional, for tests and local runs only:
 `OPENROUTER_BASE_URL` (an OpenAI-compatible endpoint instead of OpenRouter; the local-Docker
-provider sets it from `envOverrides`), `JARVIS_STATUS_MS`, `JARVIS_TRANSCRIPT_MS`, `JARVIS_DAEMON_PORT`.
+provider sets it from `envOverrides`), `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`
+(passed to Project clones), `JARVIS_STATUS_MS`, `JARVIS_TRANSCRIPT_MS`, `JARVIS_DAEMON_PORT`.
 The wakeup/post commands honour `JARVIS_AGENT_SOCKET` and `JARVIS_LIB` (their tests point them at a
 stand-in).
 
 ## Testing
 
-- `cd session-image && npm test`: assembly, the channel relay, the policy plugin, the web tools and
+- `cd session-image && npm test`: assembly, Project clones (a local repo, the credential helper), the channel relay, the policy plugin, the web tools and
   the wakeup/post commands and inbox delivery against a stand-in agent socket, and the local proxy
   (node:test, no Docker).
 - `integration/`: the image end to end (the header of `integration.test.ts` lists the checks):

@@ -87,6 +87,8 @@ const LAYER_TITLE = { org: "Organisation", role: "Role", personal: "Personal", p
 /** The instructions file: the platform preamble, then every bundle instruction in load order. */
 export function renderInstructions(bundle, o) {
   const parts = [PLATFORM_PREAMBLE(o)];
+  // the task's Projects (lib/projects.mjs): repo folders and secret names, before the layers
+  if (o.projectsText) parts.push(o.projectsText);
   for (const i of bundle.instructions) {
     parts.push(`<!-- jarvis layer: ${i.layer} (${i.source}) -->\n## ${LAYER_TITLE[i.layer] || i.layer} instructions\n\n${i.text.trim()}`);
   }

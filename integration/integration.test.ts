@@ -25,6 +25,10 @@
 // wakeup reaches the running task as a new message; a wakeup armed from the shell resumes the
 // paused task and its prompt arrives in the restored conversation; destroy cancels wakeups.
 //
+// Then chats and Projects (docs/API.md section 17): a Project's private repo (dumb HTTP from this
+// process, behind its token) is cloned into the workspace and its secret is in the agent's shell; a
+// message sent to the paused chat resumes it and reaches the agent as written.
+//
 // Needs Docker and the session image: SESSION_IMAGE (default jarvis3-session:test), built from
 // session-image/. Run: npm test (in integration/).
 import { test, before, after } from "node:test";
@@ -922,5 +926,184 @@ test("scheduled tasks, wakeups and channels on the real session image", { timeou
     assert.ok(ws.every((x: { state: string }) => x.state !== "armed"));
     assert.equal((await call(ALICE, "GET", `/api/tasks/${taskId}/posts`)).body.posts.length, 1, "the channel outlives the machine");
     assert.equal((await call(ALICE, "DELETE", `/api/schedules/${scheduleId}`)).status, 200);
+  });
+});
+
+// ---- chats and Projects (docs/API.md section 17) -------------------------------------------------------
+
+/**
+ * A git repo over dumb HTTP from this process, behind basic auth (x-access-token + `token`), reached
+ * by the machines through the bridge gateway. The Project names it by an https:// URL; the machine
+ * env rewrites that URL to this server (GIT_CONFIG_*, which jarvis-agent passes to its clones).
+ */
+async function serveGitRepo(token: string): Promise<{ httpsUrl: string; close: () => Promise<void>; gets: string[] }> {
+  const { mkdtempSync, mkdirSync: mk, writeFileSync: wf, readFileSync: rf, statSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, normalize } = await import("node:path");
+  const { createServer } = await import("node:http");
+  const dir = mkdtempSync(join(tmpdir(), "itest-git-"));
+  const work = join(dir, "work");
+  mk(work);
+  const genv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.org", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.org" };
+  execFileSync("git", ["init", "-q", "-b", "main", work]);
+  wf(join(work, "README.md"), "PROJECT-REPO-MARK\n");
+  execFileSync("git", ["-C", work, "add", "-A"]);
+  execFileSync("git", ["-C", work, "commit", "-q", "-m", "project repo"], { env: genv });
+  const bare = join(dir, "proj-repo.git");
+  execFileSync("git", ["clone", "-q", "--bare", "--no-local", work, bare]);
+  execFileSync("git", ["-C", bare, "update-server-info"]);
+  const want = "Basic " + Buffer.from(`x-access-token:${token}`).toString("base64");
+  const gets: string[] = [];
+  const srv = createServer((req, res) => {
+    const path = new URL(req.url!, "http://x").pathname;
+    gets.push(`${req.headers.authorization === want ? "auth" : "anon"} ${path}`);
+    if (req.headers.authorization !== want) {
+      res.writeHead(401, { "www-authenticate": 'Basic realm="itest"' });
+      return res.end();
+    }
+    const rel = normalize(path.replace(/^\/org\/proj-repo\.git\//, ""));
+    if (rel.startsWith("..") || !path.startsWith("/org/proj-repo.git/")) {
+      res.writeHead(404);
+      return res.end();
+    }
+    try {
+      const f = join(bare, rel);
+      if (!statSync(f).isFile()) throw new Error("not a file");
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      res.end(rf(f));
+    } catch {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  await new Promise<void>((r) => srv.listen(0, "0.0.0.0", () => r()));
+  const port = (srv.address() as AddressInfo).port;
+  const httpsUrl = "https://git.itest.example/org/proj-repo.git";
+  s.machineEnv.GIT_CONFIG_COUNT = "1";
+  s.machineEnv.GIT_CONFIG_KEY_0 = `url.http://${s.gateway}:${port}/.insteadOf`;
+  s.machineEnv.GIT_CONFIG_VALUE_0 = "https://git.itest.example/";
+  return {
+    httpsUrl,
+    gets,
+    close: async () => {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    },
+  };
+}
+
+test("a chat with a Project, then a message to the paused chat (the app's way to talk to it)", { timeout: 20 * 60_000 }, async (t) => {
+  let broken = false;
+  const step = (name: string, fn: () => Promise<void>) =>
+    t.test(name, { skip: broken ? "an earlier step failed" : false }, async () => {
+      try {
+        await fn();
+      } catch (e) {
+        broken = true;
+        diagnose();
+        throw e;
+      }
+    });
+  const TOKEN = "itest-pat-" + Math.random().toString(36).slice(2);
+  const SECRET = "PROJECT-SECRET-" + Math.random().toString(36).slice(2);
+  const git = await serveGitRepo(TOKEN);
+  t.after(() => git.close());
+  let projectId = "";
+  let taskId = "";
+  let agentId = "";
+  const seenChat = (mark: string, since: number) => () => Promise.resolve(s.openrouter.chats.slice(since).find((c) => c.lastUser.includes(mark) && c.tools.length > 0));
+
+  await step("alice makes a Project (a private repo + secrets) and a chat with it", async () => {
+    const p = await call(ALICE, "POST", "/api/projects", {
+      name: "Itest project",
+      repos: [{ url: git.httpsUrl, ref: "main", tokenSecret: "ITEST_GH_TOKEN" }],
+      secrets: { ITEST_GH_TOKEN: TOKEN, ITEST_PROJECT_SECRET: SECRET },
+    });
+    assert.equal(p.status, 201, JSON.stringify(p.body));
+    assert.ok(!JSON.stringify(p.body).includes(SECRET) && !JSON.stringify(p.body).includes(TOKEN));
+    projectId = p.body.id;
+    assert.equal((await call(BOB, "GET", `/api/projects/${projectId}`)).status, 404);
+    assert.equal((await call(ADMIN, "GET", `/api/projects/${projectId}`)).status, 404);
+    const r = await call(ALICE, "POST", "/api/tasks", { prompt: "Hello PROJECT-CHAT-MARK", requestId: "itest-projects", projects: [projectId] });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    taskId = r.body.id;
+    assert.deepEqual(r.body.projects, [{ id: projectId, name: "Itest project" }]);
+    await waitFor("the chat running", async () => {
+      const v = await taskOf(ALICE, taskId);
+      if (v.state === "failed") throw Object.assign(new Error(`task failed: ${v.error}`), { fatal: true });
+      return v.connected && (v.state === "running" || v.state === "idle") && v.agentId ? v : null;
+    }, BOOT_MS, 2000);
+    agentId = (await taskOf(ALICE, taskId)).agentId;
+  });
+
+  await step("the repo is in ~/workspace/proj-repo (token not in .git/config); the instructions name the Project and its secrets, not their values", async () => {
+    const m = await machineOf(taskId);
+    assert.equal(await exec(m, "cat /home/jarvis/workspace/proj-repo/README.md"), "PROJECT-REPO-MARK");
+    assert.equal(await exec(m, "stat -c %U /home/jarvis/workspace/proj-repo/README.md"), "jarvis");
+    const cfg = await exec(m, "cat /home/jarvis/workspace/proj-repo/.git/config");
+    assert.ok(!cfg.includes(TOKEN), "no token in .git/config");
+    assert.match(cfg, /url = https:\/\/git\.itest\.example\/org\/proj-repo\.git/);
+    assert.match(cfg, /ITEST_GH_TOKEN/);
+    assert.ok(git.gets.some((g) => g.startsWith("auth ")), "the clone authenticated with the token");
+    const instr = await exec(m, "cat /home/jarvis/.jarvis/instructions.md");
+    assert.match(instr, /## Projects/);
+    assert.match(instr, /### Itest project/);
+    assert.match(instr, /\/home\/jarvis\/workspace\/proj-repo/);
+    assert.match(instr, /\$ITEST_PROJECT_SECRET/);
+    assert.ok(!instr.includes(SECRET) && !instr.includes(TOKEN));
+    // not in the provider's machine config
+    const env = execFileSync("docker", ["inspect", m, "--format", "{{json .Config.Env}}"], { encoding: "utf8" });
+    assert.ok(!env.includes(SECRET) && !env.includes(TOKEN), "Project secrets are not in the machine's env");
+  });
+
+  await step("the secret is in the agent's shell", async () => {
+    await waitFor("idle", async () => (await taskOf(ALICE, taskId)).state === "idle", 60_000);
+    const client = await paseoAs(ALICE, taskId);
+    try {
+      const r = await client.agents.ref(agentId).run("run: echo $ITEST_PROJECT_SECRET", { timeoutMs: TURN_MS });
+      assert.equal(String(r.lastMessage), `TOOL RESULT: ${SECRET}`);
+    } finally {
+      await client.close();
+    }
+  });
+
+  await step("a message to the paused chat resumes it and the agent gets the text as written", async () => {
+    await waitFor("idle", async () => (await taskOf(ALICE, taskId)).state === "idle", 60_000);
+    assert.equal((await call(ALICE, "POST", `/api/tasks/${taskId}/pause`)).status, 202);
+    await waitFor("paused", async () => {
+      const x = await taskOf(ALICE, taskId);
+      if (x.state !== "pausing" && x.state !== "paused") throw Object.assign(new Error(`pause failed: ${x.state} ${x.error}`), { fatal: true });
+      return x.state === "paused" && !x.busy ? x : null;
+    }, 5 * 60_000);
+    const before = s.openrouter.chats.length;
+    const lastActivity = (await taskOf(ALICE, taskId)).lastActivityAt;
+    const text = "USER-MESSAGE-MARK please carry on\nwith the second line";
+    assert.equal((await call(BOB, "POST", `/api/tasks/${taskId}/messages`, { text })).status, 404);
+    const r = await call(ALICE, "POST", `/api/tasks/${taskId}/messages`, { text, requestId: "itest-msg-1" });
+    assert.equal(r.status, 202, JSON.stringify(r.body));
+    assert.equal(r.body.task.state, "starting");
+    assert.ok(r.body.task.lastActivityAt > lastActivity);
+    assert.equal((await call(ALICE, "POST", `/api/tasks/${taskId}/messages`, { text, requestId: "itest-msg-1" })).body.messageId, r.body.messageId);
+    await waitFor("running again", async () => {
+      const x = await taskOf(ALICE, taskId);
+      if (x.state === "paused" && !x.busy) throw Object.assign(new Error(`resume failed: ${x.error}`), { fatal: true });
+      return x.connected ? x : null;
+    }, BOOT_MS, 2000);
+    const chat = await waitFor("the message at the model", seenChat("USER-MESSAGE-MARK", before), TURN_MS);
+    assert.ok(chat.lastUser.startsWith(text), `as written: ${JSON.stringify(chat.lastUser.slice(0, 200))}`);
+    assert.ok(chat.transcript.includes("PROJECT-CHAT-MARK"), "the restored conversation continued");
+    await waitFor("acked", async () => !s.jarvis.ctx.db.prepare("SELECT 1 FROM inbox WHERE task_id = ? AND delivered_at IS NULL").get(taskId), 60_000);
+    // the resumed machine kept the repo (from the snapshot) and has the secret again
+    const m = await machineOf(taskId);
+    assert.equal(await exec(m, "cat /home/jarvis/workspace/proj-repo/README.md"), "PROJECT-REPO-MARK");
+  });
+
+  await step("clean up", async () => {
+    assert.equal((await call(ALICE, "DELETE", `/api/tasks/${taskId}?force=1`)).status, 202);
+    await waitFor("archived", async () => (await taskOf(ALICE, taskId)).state === "archived", 5 * 60_000);
+    assert.equal((await call(ALICE, "DELETE", `/api/projects/${projectId}`)).status, 200);
+    delete s.machineEnv.GIT_CONFIG_COUNT;
+    delete s.machineEnv.GIT_CONFIG_KEY_0;
+    delete s.machineEnv.GIT_CONFIG_VALUE_0;
   });
 });

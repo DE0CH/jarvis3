@@ -216,7 +216,7 @@ function noticeIfChanged(ctx: Ctx, s: ScheduleRow, prev: RunRow | null, run: Run
   if (run.result === "started" || run.manual) return;
   if (prev && prev.result === run.result) return;
   const why = run.result === "failed" ? `it could not start: ${run.error ?? "unknown error"}` : SKIP_TEXT[run.result];
-  addNotice(ctx, s.user_id, "schedule_skipped", `The scheduled task "${s.title}" did not run: ${why}.`);
+  addNotice(ctx, s.user_id, "schedule_skipped", `The schedule "${s.title}" did not start a chat: ${why}.`);
 }
 
 function runTitle(s: ScheduleRow, at: number): string {

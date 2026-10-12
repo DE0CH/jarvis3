@@ -2,7 +2,8 @@
 
 Status: design agreed 2026-10-08; v0.1 of the server, session image, app variant and deployment is
 built (docs/), actions and approvals (docs/ACTIONS.md), the Tier 0 web tools (docs/TOOLS.md), the user's files with first-prompt attachments, transcript search (docs/API.md sections 13 and 14), scheduled tasks, wakeups and channels
-(docs/API.md section 15), and push notifications for notices (docs/API.md section 16). Jarvis 1 and Jarvis 2 (`DE0CH/jarvis2`) are separate projects and stay as they are;
+(docs/API.md section 15), push notifications for notices (docs/API.md section 16), and the chat-style app with Projects
+(docs/API.md sections 5 and 17). Jarvis 1 and Jarvis 2 (`DE0CH/jarvis2`) are separate projects and stay as they are;
 Jarvis 3 is a new codebase.
 
 ## What Jarvis 3 is
@@ -85,8 +86,10 @@ testing mode the logins expire every 7 days.
 
 ## Front end: one app, web + iOS
 
-Paseo (Apache-2.0) with the Jarvis dashboard folded in, in its own repo `DE0CH/jarvis3-app`: one Expo app that is both the instance's web page and the iOS app. It holds sign-in, New task, the
-session list and chat, the user's files, "My instructions & skills", Reset to company default, and the
+Paseo (Apache-2.0) with the Jarvis dashboard folded in, in its own repo `DE0CH/jarvis3-app`: one Expo app that is both the instance's web page and the iOS app. It works like the ChatGPT
+and Claude apps: a sidebar of **chats** (the server's tasks, newest activity first) and no pause, resume,
+destroy or machine status in the UI. Chats still pause on idle on the server; a message typed into a
+paused chat resumes it. It holds sign-in, new chat, the chat list and chat, Projects, the user's files, "My instructions & skills", Reset to company default, and the
 approval queue.
 
 **iOS distribution:** TestFlight on the operator's developer account while the organisation is hosted
@@ -131,7 +134,7 @@ Buttons:
 ## Secrets and capabilities
 
 Principle: **raw secrets never enter a staff session; capabilities do.** Users never choose secret stores; a
-user's role determines what their machines hold.
+user's role determines what their machines hold. **Projects are the one exception**, below.
 
 - **Tier 0 — always on, never asked about.** Search, scraping, proxies, OpenRouter, document tools. Per-user
   sub-keys with hard spend caps wherever the provider supports them; otherwise the server meters the calls with
@@ -144,6 +147,17 @@ user's role determines what their machines hold.
   admin approval.
 - **Tier 3 — infrastructure.** The instance's own servers, keys, identity-provider admin, org-env write,
   billing. Admin only, never in any staff role; enforced in the core, not by convention.
+
+- **Projects — user-owned and admin-shared secrets.** A Project is git repos plus a secret store of
+  named key/values. Anyone can make their own (private: nobody else, admins included, ever sees it);
+  admins also make shared ones and choose which roles may use each. A person picks Projects when
+  starting a chat; that chat's machine gets the repos cloned into its workspace and the secrets in the
+  agent's environment, on top of the layers above. These are secrets a person (or an admin, for a
+  role) chose to hand to their own agent: the person's own tokens and keys for their own work, the way
+  Tier 1 accounts are theirs. Company assets still belong in Tier 2 behind the broker, never in a
+  Project. Values are sealed at rest, never returned by any route, never in the machine provider's
+  config, and reach only the machines of chats that picked the Project. An offboarded person's
+  private Projects stay as the organisation's record, unused (docs/API.md section 17).
 
 ## Actions and approvals
 
@@ -182,7 +196,8 @@ user's sessions at their cap and tells them and the admin.
 ## Offboarding
 
 Suspend the person in the identity provider → Access refuses them; the instance revokes their sub-keys,
-archives and destroys their sessions, and keeps their personal layer and archive for the organisation.
+archives and destroys their sessions, and keeps their personal layer, private Projects and archive for
+the organisation.
 
 ## Open
 

@@ -19,8 +19,12 @@
 //               the first prompt's attachments -> ~/workspace/attachments/
 //   9. search   the agents' timelines -> POST /api/session/transcript (lib/transcript.mjs), so the
 //               owner can search this conversation from the app
-//  10. inbox    wakeup prompts the server queued for this task go to the main agent as one new
-//               message, once it is not mid-turn (lib/wakeups.mjs)
+//  10. inbox    wakeup prompts and the owner's messages from the app, queued by the server for this
+//               task, go to the main agent as one new message, once it is not mid-turn
+//               (lib/wakeups.mjs)
+//  11. projects before the layers: GET /api/session/projects -> each repo cloned into
+//               ~/workspace/<dir> (first boot only), the secrets into the daemon's env, a Projects
+//               section in the instructions (lib/projects.mjs)
 //
 // Config comes from the env the server sets (docs/API.md section 10).
 import { spawn, spawnSync } from "node:child_process";
@@ -35,6 +39,7 @@ import { startChannel, VERSION } from "./channel.mjs";
 import { relayTunnel, startLocalProxy, subuserTunnel } from "./proxy.mjs";
 import { syncAgent } from "./transcript.mjs";
 import { InboxDelivery } from "./wakeups.mjs";
+import { cloneAll, gitConfigFromEnv, projectsSection, safeEnv } from "./projects.mjs";
 
 const env = process.env;
 const need = (k) => {
@@ -127,6 +132,41 @@ async function loadTools() {
   }
 }
 
+// ---- 11. projects ------------------------------------------------------------------------------
+
+/** The Projects' secrets (merged by the server), for the daemon's env only. */
+let projectEnv = {};
+let projectsText = "";
+
+/** Never fails the boot: a problem is logged and noted in the instructions' Projects section. */
+async function loadProjects() {
+  let v;
+  try {
+    v = await server("GET", "/api/session/projects", undefined, { retries: 8 });
+  } catch (e) {
+    log("projects not loaded", { error: e.message.slice(0, 300) });
+    projectsText = `## Projects\n\nThe user picked Projects for this task, but they could not be loaded (${e.status === 409 ? "their secrets clash" : "the Jarvis server did not answer"}); their repos and secrets are missing. Tell the user.`;
+    return;
+  }
+  if (!v.projects?.length) return;
+  projectEnv = safeEnv(v.env);
+  mkdirSync(P.workspace, { recursive: true });
+  spawnSync("chown", [`${USER}:${USER}`, P.workspace]);
+  const { uid, gid } = ids();
+  const baseEnv = { HOME, USER, LOGNAME: USER, PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" };
+  const problems = cloneAll(
+    v.projects,
+    { workspace: P.workspace, baseEnv, passThrough: gitConfigFromEnv(env) },
+    {
+      exists: (p) => existsSync(p),
+      run: (argv, e) => spawnSync(argv[0], argv.slice(1), { cwd: P.workspace, uid, gid, env: e, timeout: 600_000, encoding: "utf8" }),
+      log,
+    },
+  );
+  projectsText = projectsSection(v.projects, P.workspace, problems);
+  log("projects loaded", { projects: v.projects.map((p) => p.name), secrets: Object.keys(projectEnv).length, problems: problems.size });
+}
+
 async function loadLayers() {
   const bundle = await server("GET", "/api/session/bundle", undefined, { retries: 8 });
   guards = bundle.guards || [];
@@ -149,6 +189,7 @@ async function loadLayers() {
     proxyUrl: PROXY_URL,
     filesDir: P.files,
     images: env.JARVIS_MODEL_IMAGES === "1",
+    projectsText,
   });
   chownR(P.jarvis);
   chownR(join(HOME, ".config"));
@@ -164,6 +205,8 @@ let daemon = null;
 let stopping = false;
 function daemonEnv() {
   return {
+    // the task's Projects' secrets first: nothing below can be overridden by them
+    ...projectEnv,
     HOME,
     USER,
     LOGNAME: USER,
@@ -768,6 +811,7 @@ function startInbox() {
 
 async function main() {
   log("jarvis-agent starting", { version: VERSION, task: env.JARVIS_TASK_ID, model: MODEL });
+  await loadProjects();
   await loadLayers();
   await pullFiles();
   const local = localApi();

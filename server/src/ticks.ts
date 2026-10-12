@@ -45,9 +45,9 @@ export function capTick(ctx: Ctx): string[] {
     if (!kvGet<boolean>(ctx.db, flag)) {
       kvSet(ctx.db, flag, true);
       const cap = limitsFor(ctx, u).machineHoursPerMonth;
-      addNotice(ctx, u.id, "machine_hours_cap", `You have used this month's ${cap} machine hours. Your tasks are paused until next month or until an admin raises your limit.`);
+      addNotice(ctx, u.id, "machine_hours_cap", `You have used this month's ${cap} machine hours. Your chats are paused until next month or until an admin raises your limit.`);
       for (const a of admins(ctx))
-        if (a.id !== u.id) addNotice(ctx, a.id, "machine_hours_cap", `${u.email} reached their monthly machine-hour cap (${cap} h); their tasks were paused. You can raise it on the Users page.`);
+        if (a.id !== u.id) addNotice(ctx, a.id, "machine_hours_cap", `${u.email} reached their monthly machine-hour cap (${cap} h); their chats were paused. You can raise it on the Users page.`);
     }
   }
   return paused;
@@ -66,9 +66,9 @@ export async function budgetTick(ctx: Ctx): Promise<{ enforce: boolean; paused: 
   const paused: string[] = [];
   if (r.enforce) for (const t of liveTasksOf(ctx, null)) if (tryPause(ctx, t, "instance_budget")) paused.push(t.id);
   if (r.capNotice) {
-    for (const a of admins(ctx)) addNotice(ctx, a.id, "instance_budget", `The instance's machine budget (USD ${capUsd}) for ${r.state.month} is used up; every task was paused.`);
+    for (const a of admins(ctx)) addNotice(ctx, a.id, "instance_budget", `The instance's machine budget (USD ${capUsd}) for ${r.state.month} is used up; every chat was paused.`);
     const owners = new Set(paused.map((id) => (ctx.db.prepare("SELECT user_id FROM tasks WHERE id = ?").get(id) as { user_id: string }).user_id));
-    for (const o of owners) addNotice(ctx, o, "instance_budget", "Your tasks were paused: the instance's machine budget for this month is used up.");
+    for (const o of owners) addNotice(ctx, o, "instance_budget", "Your chats were paused: the instance's machine budget for this month is used up.");
   } else if (r.warnNotice) {
     for (const a of admins(ctx)) addNotice(ctx, a.id, "instance_budget", `The instance's machine spend for ${r.state.month} passed USD ${warnUsd} (cap USD ${capUsd}).`);
   }
