@@ -1,3 +1,4 @@
 node_modules/
 server/web-dist/
 __pycache__/
+chat/sandboxd/proto/state*/
