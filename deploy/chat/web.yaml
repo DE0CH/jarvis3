@@ -60,6 +60,9 @@ spec:
               valueFrom: {secretKeyRef: {name: web-env, key: S3_ACCESS_KEY_ID}}
             - name: S3_SECRET_ACCESS_KEY
               valueFrom: {secretKeyRef: {name: web-env, key: S3_SECRET_ACCESS_KEY}}
+            # sandbox provider e2b (config sandbox.provider): the instance's E2B API key
+            - name: E2B_API_KEY
+              valueFrom: {secretKeyRef: {name: web-env, key: E2B_API_KEY, optional: true}}
           readinessProbe:
             httpGet: {path: /healthz, port: 8080}
             periodSeconds: 3

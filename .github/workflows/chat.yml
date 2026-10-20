@@ -1,7 +1,9 @@
 name: chat
 # The chat runtime (docs/CHAT.md): typecheck and tests against a real Postgres, the UI typecheck and build, then the
 # images ghcr.io/de0ch/jarvis3-chat (web, egress, tools + UI + claw pinned in chat/claw.json) and
-# ghcr.io/de0ch/jarvis3-sandbox, smoke-tested, pushed on main as :<commit 12> and on a chat-v* tag as :<tag> too.
+# ghcr.io/de0ch/jarvis3-sandbox, smoke-tested, pushed on main as :<commit 12> and on a chat-v* tag as :<tag> too;
+# and the same sandbox as the E2B template jarvis3-sandbox:<commit 12> (the "e2b" sandbox provider), smoke-tested in a
+# real E2B sandbox (secret E2B_API_KEY: the instance's E2B project; skipped without it).
 on:
   push:
     branches: [main]
@@ -146,3 +148,25 @@ jobs:
         run: |
           echo "pushed ${{ steps.tags.outputs.chat }}" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "pushed ${{ steps.tags.outputs.sandbox }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  e2b-template:
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 40
+    env:
+      E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: build the E2B template jarvis3-sandbox:<commit 12> and smoke-test it
+        run: |
+          set -euo pipefail
+          if [ -z "$E2B_API_KEY" ]; then echo "no E2B_API_KEY secret: E2B template skipped" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          mkdir -p "$RUNNER_TEMP/e2b" && cp chat/sandbox/e2b-template.mjs "$RUNNER_TEMP/e2b/"
+          cd "$RUNNER_TEMP/e2b" && npm init -y >/dev/null && npm i --no-audit --no-fund e2b@2.56.0
+          node e2b-template.mjs "$GITHUB_WORKSPACE/chat/sandbox" "${GITHUB_SHA::12}" --smoke | tee build.log
+          if [[ $GITHUB_REF == refs/tags/chat-v* ]]; then node e2b-template.mjs "$GITHUB_WORKSPACE/chat/sandbox" "$GITHUB_REF_NAME"; fi
+          echo "E2B template jarvis3-sandbox:${GITHUB_SHA::12}: $(grep templateId build.log | head -1)" | tee -a "$GITHUB_STEP_SUMMARY"
