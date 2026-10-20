@@ -72,6 +72,11 @@ jobs:
           kubectl kustomize deploy/smoke > "$RUNNER_TEMP/r/smoke.yaml"
           kubectl kustomize deploy/app-base > "$RUNNER_TEMP/r/app-base.yaml"
           kubectl kustomize deploy/smoke/app > "$RUNNER_TEMP/r/smoke-app.yaml"
+          # the chat runtime's base (docs/CHAT.md): web, egress, tools, cloudflared in namespace jarvis, and nothing else
+          kubectl kustomize deploy/chat > "$RUNNER_TEMP/r/chat.yaml"
+          deps="$(awk '/^kind: Deployment/{f=1} f&&/^  name:/{print $2;f=0}' "$RUNNER_TEMP/r/chat.yaml" | sort | tr '\n' ' ')"
+          [ "$deps" = "cloudflared egress tools web " ] || { echo "chat Deployments: $deps"; exit 1; }
+          if grep -E '^  namespace: ' "$RUNNER_TEMP/r/chat.yaml" | grep -v 'namespace: jarvis$'; then echo "chat resource outside jarvis"; exit 1; fi
           cp deploy/example-instance/flux/bootstrap-apps.yaml "$RUNNER_TEMP/r/bootstrap-apps.yaml"
           # the example instance as Flux would see it: its SOPS file decrypted (test-only key) first
           cp -r deploy "$RUNNER_TEMP/deploy"

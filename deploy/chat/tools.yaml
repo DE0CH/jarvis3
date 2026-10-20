@@ -1,0 +1,89 @@
+# tools (docs/CHAT.md, "tools"): the MCP server claw reaches through jarvis-mcp-bridge, holding the tool keys. A call
+# held by a confirmation may wait 15 minutes, so the drain (JARVIS_DRAIN_MS, 16 min) and the grace period (1020 s)
+# let it finish before the pod stops.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tools
+  namespace: jarvis
+  labels: {app: tools}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels: {app: tools}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {app: tools}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: serving
+      terminationGracePeriodSeconds: 1020
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: tools
+          image: jarvis3-chat
+          ports: [{name: http, containerPort: 8080}]
+          # DATABASE_URL and the key variables the config names (tools.*.keyEnv, wisers *Env, ${VAR} in upstream headers)
+          envFrom:
+            - secretRef: {name: tools-env}
+          env:
+            - {name: JARVIS_ROLE, value: tools}
+            - {name: PORT, value: "8080"}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - {name: JARVIS_DRAIN_MS, value: "960000"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep: {seconds: 10}
+          resources:
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: config, mountPath: /etc/jarvis, readOnly: true}
+      volumes:
+        - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
+        - name: config
+          configMap:
+            name: jarvis-config
+            items: [{key: config.json, path: config.json}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tools
+  namespace: jarvis
+spec:
+  selector: {app: tools}
+  ports: [{name: http, port: 8080, targetPort: 8080}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tools
+  namespace: jarvis
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: tools}

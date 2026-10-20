@@ -1,0 +1,99 @@
+# egress (docs/CHAT.md, "egress"): the forward proxy and package mirror for sandboxes on 3128 and the model gateway
+# (/x/model) for claw; /healthz and /metrics on 9090. On SIGTERM /healthz turns 503 and open requests and tunnels get
+# EGRESS_DRAIN_SECONDS (120) < the 150 s grace period.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress
+  namespace: jarvis
+  labels: {app: egress}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels: {app: egress}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {app: egress}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: serving
+      terminationGracePeriodSeconds: 150
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: egress
+          image: jarvis3-chat
+          ports:
+            - {name: proxy, containerPort: 3128}
+            - {name: health, containerPort: 9090}
+          env:
+            - {name: JARVIS_ROLE, value: egress}
+            - {name: PORT, value: "3128"}   # the image sets PORT=8080 for web/tools
+            - {name: HEALTH_PORT, value: "9090"}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - {name: JARVIS_CACHE_DIR, value: /var/cache/jarvis-egress}
+            - {name: EGRESS_DRAIN_SECONDS, value: "120"}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: egress-env, key: DATABASE_URL}}
+            - name: OPENROUTER_API_KEY
+              valueFrom: {secretKeyRef: {name: egress-env, key: OPENROUTER_API_KEY}}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 9090}
+            periodSeconds: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: 9090}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep: {seconds: 10}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi, ephemeral-storage: 1Gi}
+            limits: {cpu: "1", memory: 256Mi, ephemeral-storage: 7Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: cache, mountPath: /var/cache/jarvis-egress}
+            - {name: tmp, mountPath: /tmp}
+            - {name: config, mountPath: /etc/jarvis, readOnly: true}
+      volumes:
+        - {name: cache, emptyDir: {sizeLimit: 6Gi}}   # config egress.cacheGiB (5) + headroom
+        - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
+        - name: config
+          configMap:
+            name: jarvis-config
+            items: [{key: config.json, path: config.json}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress
+  namespace: jarvis
+spec:
+  selector: {app: egress}
+  ports:
+    - {name: proxy, port: 3128, targetPort: 3128}
+    - {name: health, port: 9090, targetPort: 9090}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: egress
+  namespace: jarvis
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: egress}

@@ -1,0 +1,62 @@
+# Connector for the instance's own Cloudflare tunnel (its ingress, set in Cloudflare: the public hostname →
+# http://web.<namespace>.svc.cluster.local:8080). On SIGTERM cloudflared stops taking requests and waits for those in
+# flight (--grace-period 3m, cloudflared's maximum). --edge-ip-version auto: works on IPv4, IPv6 and dual-stack nodes
+# (an instance on IPv6-only nodes may patch it to "6").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: jarvis
+  labels: {app: cloudflared}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels: {app: cloudflared}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {app: cloudflared}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: serving
+      terminationGracePeriodSeconds: 200
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:2026.10.0
+          args: [tunnel, --no-autoupdate, --edge-ip-version, auto, --metrics, "0.0.0.0:2000", --grace-period, 3m, run]
+          env:
+            - {name: TUNNEL_TOKEN, valueFrom: {secretKeyRef: {name: tunnel, key: token}}}
+          readinessProbe:
+            httpGet: {path: /ready, port: 2000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /ready, port: 2000}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudflared
+  namespace: jarvis
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: cloudflared}

@@ -1,0 +1,70 @@
+# Ingress: nothing accepts connections unless listed. web ← cloudflared (the tunnel) and tools (/internal/events);
+# tools ← web (claw's MCP bridge runs in the web pod); egress ← web (claw's model calls). Sandboxes live in another
+# cluster: their path to egress:3128 is added by whatever links the clusters, not here.
+# Egress: cluster DNS, pods of this namespace, and the public internet only (Postgres, the bucket, OpenRouter, tool
+# APIs, the Cloudflare edge, the sandbox cluster's API server and sandbox pods); private, CGNAT, loopback and
+# link-local ranges (this cluster's pods, Services and nodes, the metadata service) are excluded.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: jarvis
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-ingress
+  namespace: jarvis
+spec:
+  podSelector: {matchLabels: {app: web}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app: cloudflared}}
+        - podSelector: {matchLabels: {app: tools}}
+      ports: [{port: 8080, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tools-ingress
+  namespace: jarvis
+spec:
+  podSelector: {matchLabels: {app: tools}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: web}}}]
+      ports: [{port: 8080, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-ingress
+  namespace: jarvis
+spec:
+  podSelector: {matchLabels: {app: egress}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: web}}}]
+      ports: [{port: 3128, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-dns-namespace-internet
+  namespace: jarvis
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{podSelector: {}}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - to:
+        - ipBlock: {cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16]}
+        - ipBlock: {cidr: "::/0", except: ["fc00::/7", "fe80::/10", "::1/128"]}

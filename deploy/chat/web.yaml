@@ -1,0 +1,121 @@
+# web (docs/CHAT.md, "web deployment needs"): UI, API, SSE, the turn runner (one claw process per running turn),
+# the sandbox manager and the janitor. Zero-downtime: on SIGTERM readiness turns 503, new turns go to the other
+# replica (the UI retries), and running turns finish within JARVIS_DRAIN_SECONDS (1770) < the 1800 s grace period.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web
+  namespace: jarvis
+# No Role here: sandbox pods are created in the sandbox cluster with the token in Secret `sandbox-cluster`. The
+# token stays mounted only because the current image builds its Kubernetes client from the pod's own service
+# account files at startup; this account has no RoleBinding, so it can do nothing in this cluster.
+automountServiceAccountToken: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: jarvis
+  labels: {app: web}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels: {app: web}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      serviceAccountName: web
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      priorityClassName: serving
+      terminationGracePeriodSeconds: 1800
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: web
+          image: jarvis3-chat
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - {name: JARVIS_ROLE, value: web}
+            - {name: PORT, value: "8080"}
+            - name: JARVIS_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - {name: JARVIS_WORK_ROOT, value: /var/lib/jarvis/work}
+            - {name: JARVIS_DRAIN_SECONDS, value: "1770"}
+            # the sandbox cluster's API server URL, CA and a token for its jarvis-sandbox namespace (Secret
+            # `sandbox-cluster`, keys server, ca.crt, token; optional until the sandbox cluster exists)
+            - {name: JARVIS_SANDBOX_CLUSTER_DIR, value: /var/run/secrets/jarvis/sandbox-cluster}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: web-env, key: DATABASE_URL}}
+            - name: S3_ACCESS_KEY_ID
+              valueFrom: {secretKeyRef: {name: web-env, key: S3_ACCESS_KEY_ID}}
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: web-env, key: S3_SECRET_ACCESS_KEY}}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 3
+          # the kubelet stops liveness probes once the pod is terminating, so a draining 503 never kills a turn;
+          # a Postgres outage restarts the pod only after 2 minutes
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              sleep: {seconds: 10}
+          resources:
+            requests: {cpu: 250m, memory: 1Gi, ephemeral-storage: 1Gi}
+            limits: {cpu: "2", memory: 1Gi, ephemeral-storage: 12Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: work, mountPath: /var/lib/jarvis/work}
+            - {name: tmp, mountPath: /tmp}
+            - {name: config, mountPath: /etc/jarvis, readOnly: true}
+            - {name: sandbox-cluster, mountPath: /var/run/secrets/jarvis/sandbox-cluster, readOnly: true}
+      volumes:
+        - {name: work, emptyDir: {sizeLimit: 10Gi}}
+        - {name: tmp, emptyDir: {sizeLimit: 1Gi}}
+        - name: config
+          projected:
+            sources:
+              - configMap:
+                  name: jarvis-config
+                  items: [{key: config.json, path: config.json}, {key: system-prompt.md, path: system-prompt.md}]
+              - configMap:
+                  name: jarvis-brand
+                  optional: true
+                  items: [{key: logo.svg, path: brand/logo.svg}, {key: logo.png, path: brand/logo.png}]
+        - name: sandbox-cluster
+          secret: {secretName: sandbox-cluster, optional: true, defaultMode: 0400}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: jarvis
+spec:
+  selector: {app: web}
+  ports: [{name: http, port: 8080, targetPort: 8080}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+  namespace: jarvis
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: web}
