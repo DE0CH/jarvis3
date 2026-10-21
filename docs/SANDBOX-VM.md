@@ -145,14 +145,14 @@ WireGuard key and TLS certificate, so nothing else changed:
   conversation would keep an AWS host up); 1 once the CX43 runs.
 - Scale out (capacity planning, `VmController.launch`/`plan`): **available** = free slots on ready hosts (the only
   room placement uses: never a booting host), **pending** = the slots of booting hosts, **planned** = available +
-  pending; **need** = `spareSlots` + people typing in a conversation without a sandbox (`POST /api/typing` → kv
-  `sandbox_demand:<email>`, counted 2 min) + sandboxes waiting for a host. want = need − planned; want > 0 starts
+  pending; **need** = `spareSlots` + people who may need a sandbox soon (kv `sandbox_demand:<email>`, counted 2 min;
+  nothing sends that signal since the old chat UI was retired, so today it is always 0) + sandboxes waiting for a
+  host. want = need − planned; want > 0 starts
   ceil(want / slots per host) AWS hosts at once, at most `aws.maxHosts` (3; a 4th only while a host is `retiring` and
   its sandboxes have nowhere to go). Decided and recorded under one Postgres lock, booting rows inserted before
-  RunInstances, so the next signal on any replica already counts their slots: two people typing → one host; a burst
-  larger than a host → enough hosts at once. Sandboxes themselves are made only at a turn's first bash command
-  (docs/CHAT.md, "Sandbox lifecycle"). With every host at `maxHosts` the bash command says "all sandbox hosts are
-  full". The monitor's scaler panel shows available, pending and need.
+  RunInstances, so the next request on any replica already counts their slots: a burst larger than a host → enough
+  hosts at once. Sandboxes are made when the UI first runs Claude Code in a conversation (docs/CHAT.md, "Sandbox
+  lifecycle"). With every host at `maxHosts` `/internal/cc/sandbox` fails with "all sandbox hosts are full".
 - Release (one rule): an AWS host is terminated as soon as it has no sandbox and is older than
   `vm.minHostLifetimeSeconds` (900 = 15 min, from launch). Nothing else keeps or ends it.
 - Packing (`chat/src/web/packing.ts`, a pure function; host age plays no part in it):
@@ -166,17 +166,17 @@ WireGuard key and TLS certificate, so nothing else changed:
   ```
 
   One migration per scaler pass (the plan is recomputed each pass); an emptied host goes by the release rule. No
-  move rate limit: a move only happens when it lowers the number of hosts in use. During a turn too with
-  `migration.duringTurns` (YYC: true since 2026-10-21, verified live: a command printing every 100 ms for 60 s and a
-  pip install through egress, moved AWS→AWS and back mid-command: all 600 lines, no duplicates, exit code and pip
-  intact, pauses 102 and 84 ms); across clouds only if CPU use < `migration.idleCpu`
+  move rate limit: a move only happens when it lowers the number of hosts in use. Also while Claude Code or a command
+  runs in the sandbox (verified live 2026-10-21: a command printing every 100 ms for 60 s and a pip install through
+  egress, moved AWS→AWS and back mid-command: all 600 lines, no duplicates, exit code and pip intact, pauses 102 and
+  84 ms); across clouds only if CPU use < `migration.idleCpu`
   and with `--migrate-max-downtime` = `migration.maxDowntimeMs` (500 ms): a move that won't converge leaves the
   sandbox running where it is (`migration-skipped`). Each move is recorded as `pack` (with the plan) and `migration`.
   A `retiring` host (the operator's) has its sandboxes moved off the same way.
 - Every decision and migration goes to `vm_events` (launch, active, pack, migration with pause_ms, migration-skipped,
-  terminate, host-lost); `VmProvider.stats()` serves them, the hosts and the AWS cost so far to the admin monitor.
-- Release: the janitor's final save of the files (to the bucket) then `DELETE`; the next sandbox gets the files and
-  the reset note. A full-memory checkpoint to the bucket on release was not built (it would hide the reset).
+  terminate, host-lost); read them with SQL.
+- Release: `DELETE` (nothing to save: `/workspace` and `~/.claude` are on JuiceFS); the next sandbox mounts the same
+  folders and the UI is told `reset`. A full-memory checkpoint on release was not built.
 
 ### The fork, as used
 
@@ -228,33 +228,29 @@ WireGuard key and TLS certificate, so nothing else changed:
 - AWS only while bursting: USD 0.2415/h per m7i.xlarge + IPv4 0.005/h + gp3; drain-back traffic USD 0.09/GB (an idle
   sandbox ~30 MB, one with 400 MiB in use ~0.45 GB).
 
-## How the existing contract maps
+## How the provider contract maps
 
-Nothing changes for jarvis-bash, the web role or egress. Their interface is the agent on :7070 with
-`X-Jarvis-Exec-Token`, plus egress with the sandbox's token.
+The web role's interface to a sandbox is the agent on :7070 with `X-Jarvis-Exec-Token`, plus egress with the
+sandbox's token; the UI uses the same agent (`/proc`).
 
-- **Lifecycle:** made at the first bash command, kept while active, released after idle or at max lifetime with files saved. This is
-  unchanged and stays owned by `chat/src/web/sandbox.ts`. Migration is invisible to that lifecycle: the sandbox
-  keeps its id, IP, tokens, `boot_id`, processes and files. jarvis-bash's `/changes` cursor stays valid because the
-  agent process itself moved.
-- **No secrets** inside a sandbox. Its environment holds only the proxy URL with its egress token, the mirror
-  settings and its exec token, as with `kubernetes`.
+- **Lifecycle:** owned by `chat/src/web/sandbox.ts` (docs/CHAT.md, "Sandbox lifecycle"). Migration is invisible to
+  it: the sandbox keeps its id, IP, tokens, `boot_id`, processes and files, and a running `/proc` connection survives.
+- **No secrets** inside a sandbox: its environment holds the proxy URL with its egress token, the mirror settings,
+  its exec token and Claude Code's settings (the egress token again; no model key).
 - **Egress only through our proxy.** Each sandbox gets nftables rules on its host. It may reach only egress:3128
-  (through the overlay) and answer the controller on :7070. It cannot reach the host itself or the cloud metadata
-  service. Its connection to egress is the plain HTTP proxy on 3128, without `/wire`: the overlay carries it
+  (through the overlay) and answer the controller and the UI on :7070. It cannot reach the host itself or the cloud
+  metadata service. Its connection to egress is the plain HTTP proxy on 3128, without `/wire`: the overlay carries it
   straight to the egress pods, with no NAT on the way.
-- **Provider `vm`** (`chat/src/web/sandbox-vm.ts`, to be written) implements `SandboxProvider`:
+- **Provider `vm`** (`chat/src/web/sandbox-vm.ts`) implements `SandboxProvider`:
   - `create(row, egressToken)`: the controller places the sandbox on a host and calls that host's sandboxd
-    `POST /sandboxes {id, ip, image, egressToken, execToken, cpu, memory}`. It returns the sandbox id as the name.
+    `POST /v1/sandboxes {name, ip, image, env, cpu, memory, cpuFeatures, workspace, user}`.
   - `waitReady`: returns `{url: "http://<overlay ip>:7070", headers: {}}`. The URL never changes, even after
     migrations.
-  - `keepAlive`: a no-op, as in the Kubernetes provider. The janitor owns release.
-  - `destroy(name)`: `DELETE /sandboxes/{id}` on whichever host holds the sandbox now.
-  - `list()`: the union of every host's `GET /sandboxes`.
-- **Host dies:** its sandboxes are gone. The next turn creates a fresh sandbox, gets the existing reset note
-  ("files in the workspace are restored; installed packages and background processes from before are gone"), and
-  jarvis-bash pushes the workdir again. This is the same path as an E2B sandbox that timed out.
-
+  - `keepAlive`: a no-op. The janitor owns release.
+  - `destroy(name)`: `DELETE /v1/sandboxes/{name}` on whichever host holds the sandbox now.
+  - `list()`: the union of every host's `GET /v1/sandboxes`.
+- **Host dies:** its sandboxes are gone. The next `/internal/cc/sandbox` creates a fresh sandbox (`reset`); the
+  conversation's `/workspace` and `~/.claude` are on JuiceFS, unchanged.
 
 ## Components
 
@@ -315,15 +311,15 @@ Hetzner fsn1 (yyc project)                                              AWS eu-c
     released early saves money at once.
   - The Hetzner box is never drained and never released: it is the baseline (no scale to zero).
   - A drain never interrupts a running bash call: the controller waits until the sandbox's agent is between
-    `/exec` calls, which the web role knows from `turns`.
+    commands (not built: moves happen mid-command and were verified live, see "Controller and scaler as built").
   - Moving AWS → Hetzner is billed as AWS internet egress ($0.09/GB): about the sandbox's memory in use plus what
     it rewrites during the copy (measured: 1.3 GB for 1 GiB at 8 MiB/s of writes). Prefer moving idle sandboxes.
 - **Spot (optional):** a spot host's 2-minute interruption notice triggers the same drain. 2 minutes is enough for
   several migrations.
 - **Failure:**
   - A host stops answering its heartbeat for 30 s: the controller marks its sandboxes `gone` and terminates the
-    instance. The next turn creates a fresh sandbox and gets the existing reset note (files restored; installed
-    packages and background processes gone), as with an E2B sandbox that timed out.
+    instance. The next `/internal/cc/sandbox` creates a fresh sandbox (`reset`: `/workspace` and `~/.claude` are
+    there, installed packages and background processes are gone).
   - A migration fails while memory is being copied (the sandbox still runs on the source): nothing happens to the
     sandbox; the controller retries later or picks another target.
   - A migration fails during the final stop-and-copy (~0.1-0.5 s): the source has already stopped, so the sandbox
@@ -341,7 +337,7 @@ Hetzner fsn1 (yyc project)                                              AWS eu-c
     be added later if that matters.
   - Hetzner rule: the yyc project's token must not create or delete servers from automation. The box is created
     once, by Deyao; the AWS scaler never touches Hetzner.
-- **Web to sandbox:** jarvis-bash and the controller reach `<ip>:7070` through the same path (pods → Hetzner network
+- **Web and UI to sandbox:** the controller and the UI pods reach `<ip>:7070` through the same path (pods → Hetzner network
   route → box → veth or WireGuard → host → sandbox). The exec token is still required.
 - **Sandbox to egress:** by its overlay address, so the connection survives a migration. Egress additionally checks
   that the source IP belongs to the token's sandbox.
@@ -504,8 +500,8 @@ What a host needs outside its sandboxes, and what a sandbox costs outside its ow
 - **Over its limit a sandbox dies whole.** gVisor reports the cgroup limit as the sandbox's total memory (`free`
   shows 512 MiB) but has no OOM killer of its own: when sentry + gofer + the sandbox's memory reach the limit, the
   host kernel's memcg OOM killer kills the sentry (seen: shmem 376 MB + sentry anon 73 MB + file 64 MB). What the
-  sandbox can use is about the limit minus ~50-70 MiB. The files are safe (the workdir lives on the server); the
-  next bash call gets a new sandbox and the reset note.
+  sandbox can use is about the limit minus ~50-70 MiB. `/workspace` is safe (on JuiceFS); the next
+  `/internal/cc/sandbox` gets a new sandbox (`reset`).
 
 ## Docker in sandboxes
 
