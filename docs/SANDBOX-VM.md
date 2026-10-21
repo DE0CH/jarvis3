@@ -92,15 +92,30 @@ Deyao's requirements and decisions (2026-10-20):
   `sandbox.cpu`, `vm_hosts.max_sandboxes`). YYC: `sandbox.memory` 1Gi, cpu 1; hub reserve 1 GiB → 2 slots on the
   cx23; an m7i.xlarge has 15. `maxActive` 10. `spareSlots` 0 while the hub is the cx23 (else every second
   conversation would keep an AWS host up); 1 once the CX43 runs.
-- Scale out: when placement finds no room (or free slots < `spareSlots`): one AWS host at a time, at most
-  `aws.maxHosts` (3); a 4th only while a host is `retiring` and its sandboxes have nowhere to go. A full pool answers
-  "all sandbox hosts are full" at once (the turn runs without a sandbox, the model says so).
-- Scale in: the emptiest AWS host whose sandboxes fit elsewhere (with the spare kept) becomes `draining`; one
-  migration per scaler pass, longest-idle sandbox first, never while its conversation has a turn going; across clouds
-  only if its CPU use < `migration.idleCpu` (0.05 cores) and with `--migrate-max-downtime` = `migration.maxDowntimeMs`
-  (500 ms): a sandbox that won't converge is left running where it is and retried later. Empty draining/retiring hosts
-  are terminated at once, empty active ones after `aws.emptyMinutes` (5).
-- Every decision and migration goes to `vm_events` (launch, active, drain, migration with pause_ms, migration-skipped,
+- Scale out: when placement finds no room, or as soon as someone types in a conversation without a sandbox
+  (`POST /api/typing` → kv `sandbox_demand:<email>`, counted 2 min) while free slots < `spareSlots` + those people:
+  one AWS host at a time, at most `aws.maxHosts` (3); a 4th only while a host is `retiring` and its sandboxes have
+  nowhere to go. Sandboxes themselves are made only at a turn's first bash command (docs/CHAT.md, "Sandbox
+  lifecycle"). A full pool answers "all sandbox hosts are full" at once (the bash command says so).
+- Release (one rule): an AWS host is terminated as soon as it has no sandbox and is older than
+  `vm.minHostLifetimeSeconds` (900 = 15 min, from launch). Nothing else keeps or ends it.
+- Packing (`chat/src/web/packing.ts`, a pure function; hosts within their minimum lifetime are already paid for):
+
+  ```
+  target = current placement
+  for each host h past its minimum lifetime, least loaded first (ties: its sandboxes moved least recently):
+    place h's sandboxes, biggest first, on other hosts in use or paid for: paid hosts first, then best fit
+    all fit -> they go there in the target (h is empty in it); else h keeps them
+  if target uses fewer hosts past their minimum lifetime than now: migrate each sandbox whose target host differs
+  ```
+
+  One migration per scaler pass (the plan is recomputed each pass); an emptied host goes by the release rule. No
+  move rate limit: a move only happens when it lowers the number of releasable hosts in use. During a turn only with
+  `migration.duringTurns` (default false until verified live); across clouds only if CPU use < `migration.idleCpu`
+  and with `--migrate-max-downtime` = `migration.maxDowntimeMs` (500 ms): a move that won't converge leaves the
+  sandbox running where it is (`migration-skipped`). Each move is recorded as `pack` (with the plan) and `migration`.
+  A `retiring` host (the operator's) has its sandboxes moved off the same way.
+- Every decision and migration goes to `vm_events` (launch, active, pack, migration with pause_ms, migration-skipped,
   terminate, host-lost); `VmProvider.stats()` serves them, the hosts and the AWS cost so far to the admin monitor.
 - Release: the janitor's final save of the files (to the bucket) then `DELETE`; the next sandbox gets the files and
   the reset note. A full-memory checkpoint to the bucket on release was not built (it would hide the reset).
@@ -159,7 +174,7 @@ Deyao's requirements and decisions (2026-10-20):
 Nothing changes for jarvis-bash, the web role or egress. Their interface is the agent on :7070 with
 `X-Jarvis-Exec-Token`, plus egress with the sandbox's token.
 
-- **Lifecycle:** warm on typing, kept while active, released after idle or at max lifetime with files saved. This is
+- **Lifecycle:** made at the first bash command, kept while active, released after idle or at max lifetime with files saved. This is
   unchanged and stays owned by `chat/src/web/sandbox.ts`. Migration is invisible to that lifecycle: the sandbox
   keeps its id, IP, tokens, `boot_id`, processes and files. jarvis-bash's `/changes` cursor stays valid because the
   agent process itself moved.
