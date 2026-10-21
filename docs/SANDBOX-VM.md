@@ -48,6 +48,32 @@ Deyao's requirements and decisions (2026-10-20):
 | AWS burst hosts | eu-central-1a, launch template `yyc-ai-sandbox-host` (m7i.xlarge, AMI from `aws/infra.sh ami`, SG `yyc-ai-sandbox-host`: udp 51820 from the VPC only, IMDSv2 hop limit 1, no instance profile, no key pair, gp3 40 GB, terminate on shutdown) | started/terminated only by the scaler, as IAM user `yyc-ai-sandbox-scaler` (RunInstances from that template with tag app=yyc-ai-sandbox, m7i.xlarge only; tags at launch; TerminateInstances of app=yyc-ai-sandbox; DescribeInstances) |
 | Cluster side | DE0CH/YYC `yyc-ai/deploy/sandbox-vm.yaml` | DaemonSet `kube-system/sbx-overlay-route` (each node: 10.200.0.0/15 via the private network; each egress pod: route to 10.200.0.0/16 with `rto_min 20ms`); policies egress ← 10.200.0.0/16:3128, web → :7070 and sandboxd :7443. SealedSecret `jarvis/sandbox-vm` (PKI + the scaler's AWS key) as web env |
 
+### Gateway (since 2026-10-21: no always-on sandbox host)
+
+Sandboxes run only on AWS burst hosts; the Hetzner hub `yyc-sbx-hub` is gone. Its network job moved to a **gateway**
+on an existing k3s node (`yyc-pool-apps-worker2`, private 10.0.0.6), at no extra cost: sandboxd as the hub with
+`gateway: true` (`chat/sandboxd/host/gateway.sh`, a systemd unit on the node, outside Kubernetes), which runs no
+sandboxes (it reports all memory reserved: 0 slots) and no runsc. It keeps the hub's overlay address 10.201.0.1, its
+WireGuard key and TLS certificate, so nothing else changed:
+
+- WireGuard hub for the AWS hosts on **udp 51821** (flannel's own WireGuard has 51820), reached over the node's
+  **IPv6** (cluster nodes have no public IPv4; they reach IPv4 through WARP): config `sandbox.vm.hub.endpoint` =
+  `[2a01:4f8:c013:c93e::1]:51821`; AWS hosts got IPv6 (`aws/infra.sh ipv6`: Amazon /56 on the VPC, /64 on the subnet,
+  ::/0 to the IGW, IPv6 egress in the SG; the template asks for one IPv6 address). Hetzner firewall `yyc-sbx-gw` on
+  that server: in udp 51821 from ::/0.
+- Egress VIP translation (10.201.1.1:3128 → an egress pod, source kept) and the image source for AWS hosts (:7444).
+- Hetzner network `yyc` route 10.200.0.0/15 → 10.0.0.6; on the node itself `10.200.0.0/16 dev wg0 src 10.0.0.6` (the
+  node's pods are masqueraded to its private address, which the sandboxes' nft lock admits).
+- Host rules that touch only wg0's traffic (`hostRules` with `gateway`): nothing from wg0 to the public interface or
+  back, wg0 may reach only sandboxd's API and image ports on the node itself (not the kubelet or anything else), the
+  egress VIP only translated. The node's pods, kube-proxy, flannel and WARP keep their own rules. No packages, sysctl
+  (beyond ip_forward, already on) or nftables.service are touched.
+- A single point like the hub was: if the node is down, sandboxes can't reach egress or the controller until it is
+  back (sandboxd restarts with it; wg0 and the nft table survive a sandboxd restart). Moving the gateway = run
+  gateway.sh on another node with the same `/etc/sbx` files, point the Hetzner route and firewall at it, stop the old.
+- Fixed with it: a burst host's forward chain dropped its sandboxes' packets to the egress VIP (a rule meant for the
+  hub), so sandboxes on AWS could not reach egress; the rule is the hub's only now (test in `vm.test.ts`).
+
 ### Addresses and paths
 
 - 10.200.0.0/16: sandboxes (one fixed /32 each, `sandboxes.ip`); 10.201.0.0/24: hosts on wg0 (hub .1, AWS .10–.250);
