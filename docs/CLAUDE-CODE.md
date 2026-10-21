@@ -39,7 +39,15 @@ CLAUDE.md and MCP config read from disk; this design gives it exactly that, insi
    | installs and scratch | apt, pip, npm -g, `/tmp`, `~/.cache`, Docker's dir | the sandbox | host disk: Linux overlayfs (image as lowerdir, `/sbx/<id>/upper` as upperdir) + host dirs for `/tmp` and Docker, capped at 5 GiB (writes past it fail with ENOSPC) | file-level pre-copy: rsync rounds while it runs, the final delta while it is stopped, before the restore (docs/SANDBOX-VM.md "Scratch on migration") |
    | memory | processes | the sandbox | RAM | pre-copied by the gVisor fork |
 
-   Writes past a quota fail with an error the agent sees; nothing truncates, destroys or crashes.
+   Writes past a quota fail with an error the agent sees; nothing destroys or crashes. One gap, measured 2026-10-21:
+   JuiceFS counts written data against the quota when it commits it, so the write that crosses 1 GiB is cut short at
+   the quota and the error comes on `close`/`fsync`; gVisor's gofer (directfs) never passed a FUSE file's close
+   error to the application, so `head`/`dd conv=fsync` saw "Disk quota exceeded" but a program that only checks
+   `close` (Python's `f.close()`, Node's `fs.writeFile`) saw success with the file cut at the quota. The fix is a
+   gVisor fork patch (`chat/sandboxd/gvisor-patches/0001-gofer-close-flush-error.patch`: `close` flushes the host file
+   and returns its error; tested: Python then gets EDQUOT from `close`), to be released as a `precopy-*` tag and
+   baked into the next AMI. Until then the agent's CLAUDE.md should say to check sizes after big writes to
+   `/workspace`.
    runsc runs with `--overlay2=none` so scratch writes land as plain host files (today's `--overlay2=root:self` keeps
    the upper layer in gVisor's memory image, which is what OOM-killed a large sandbox on restore after a move).
 4. **Sandbox lifecycle:** release = unmount and drop the sandbox; nothing to save (every `/workspace` and
