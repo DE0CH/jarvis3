@@ -1,10 +1,12 @@
 # Own sandbox hosts (sandbox provider "vm")
 
-Status: design, prototype and a forked gVisor with pre-copy live migration, 2026-10-21. Nothing here is wired into
-an instance. This is a third sandbox provider next to `kubernetes` and `e2b` (docs/CHAT.md, "Sandbox providers"). It
-runs on our own VMs ("hosts") and live-migrates a running sandbox from one host to another, so the scaler can empty
-a host and give it back. The prototype scripts are in `chat/sandboxd/proto/`; the gVisor fork is
-[DE0CH/gvisor](https://github.com/DE0CH/gvisor) (branch `main`, releases `precopy-*`).
+Status: **built and live** for YYC AI since 2026-10-21 (DE0CH/YYC `yyc-ai/deploy`). This is the third sandbox
+provider next to `kubernetes` and `e2b` (docs/CHAT.md, "Sandbox providers"). It runs on our own VMs ("hosts") and
+live-migrates a running sandbox from one host to another, so the scaler can empty a host and give it back. Code: host
+agent `chat/sandboxd/` (`src/`, `host/setup.sh`, `host/make-certs.sh`, `aws/infra.sh`), controller and scaler
+`chat/src/web/sandbox-vm.ts` + `vm-clients.ts`; the gVisor fork is [DE0CH/gvisor](https://github.com/DE0CH/gvisor)
+(branch `main`, releases `precopy-*`, current `precopy-20261021.1`). The prototype scripts stay in
+`chat/sandboxd/proto/`. What was built, and where it differs from the design below: "Built (2026-10-21)".
 
 Deyao's requirements and decisions (2026-10-20):
 - Not a Kubernetes cluster. We manage migration ourselves, and Docker-in-Docker doesn't work well there.
@@ -21,7 +23,8 @@ Deyao's requirements and decisions (2026-10-20):
 - **No vCPU quota increase**: the AWS burst pool fits YYC's 16-vCPU eu-central-1 quota.
 - **Docker in sandboxes: yes.** Installed in the sandbox image; dockerd starts on demand (first docker command), not
   at boot.
-- The Hetzner box itself: Deyao creates it later; this doc recommends a size.
+- The Hetzner box itself: Deyao approved a CX43 (2026-10-21). The CX line was sold out in fsn1/nbg1/hel1 that day,
+  so an interim **cx23** (EUR 6.59/month) runs as the hub until a CX43 can be created ("Hub: interim cx23").
 
 ## Decision summary
 
