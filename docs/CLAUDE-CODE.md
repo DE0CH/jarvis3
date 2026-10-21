@@ -36,7 +36,7 @@ CLAUDE.md and MCP config read from disk; this design gives it exactly that, insi
    |---|---|---|---|---|
    | base system | image (`/usr`, `/opt/py`, `/etc` as shipped) | per image | read-only image on the host disk, shared | nothing (same image on every host) |
    | persistent work | `/workspace` (quota: 1 GiB and 1,000 files, a plain folder), `~/.claude` | the conversation | JuiceFS (metadata: Neon Postgres; data: the Hetzner bucket), mounted by the host and bind-mounted in | nothing (destination mounts the same volume) |
-   | installs and scratch | apt, pip, npm -g, `/tmp`, `~/.cache`, Docker's dir | the sandbox | host disk: Linux overlayfs (image as lowerdir, `/sbx/<id>/upper` as upperdir) + host dirs for `/tmp` and Docker, capped at 5 GiB (writes past it fail with ENOSPC) | file-level pre-copy (rsync-style while running, final delta in the pause) |
+   | installs and scratch | apt, pip, npm -g, `/tmp`, `~/.cache`, Docker's dir | the sandbox | host disk: Linux overlayfs (image as lowerdir, `/sbx/<id>/upper` as upperdir) + host dirs for `/tmp` and Docker, capped at 5 GiB (writes past it fail with ENOSPC) | file-level pre-copy: rsync rounds while it runs, the final delta while it is stopped, before the restore (docs/SANDBOX-VM.md "Scratch on migration") |
    | memory | processes | the sandbox | RAM | pre-copied by the gVisor fork |
 
    Writes past a quota fail with an error the agent sees; nothing truncates, destroys or crashes.
@@ -53,5 +53,8 @@ CLAUDE.md and MCP config read from disk; this design gives it exactly that, insi
   `git add` of them 31 s (0.02 s); a warm `git status` 0.7 s. Caching helps reads, not metadata writes. Fine for
   the few files a turn writes; bulk work goes in `/tmp`. (Git was dropped from the design, so the git numbers are
   only for reference.)
+- Migration with the scratch (2026-10-21, two m7i.large, docs/SANDBOX-VM.md "Scratch on migration"): 230 MB of
+  installs and `/tmp` plus a 300 MiB process moved in 1.9 s (`send`), with 150 ms of the pause for the scratch's
+  final delta; apt/pip/npm installs, whiteouts, `/workspace` files and running writers intact both ways.
 - apt/pip installs with the gofer-backed host overlay (`--overlay2=none`) vs gVisor's internal overlay.
 - Docker inside gVisor on a gofer-backed directory: overlay2 storage driver or a fall back to `vfs`.

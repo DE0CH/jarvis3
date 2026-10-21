@@ -105,18 +105,22 @@ WireGuard key and TLS certificate, so nothing else changed:
 - API (HTTPS, TLS 1.3, mutual TLS; only the client certificate CN `sandbox-controller` is accepted; listens on the
   host's wg0 address): `GET /v1/host`, `PUT /v1/peers`, `PUT /v1/egress` (hub), `POST /v1/images`,
   `GET|POST /v1/sandboxes`, `DELETE /v1/sandboxes/{name}`, `GET /v1/sandboxes/{name}/spec`,
-  `POST|GET /v1/sandboxes/{name}/receive`, `POST /v1/sandboxes/{name}/send` (409 = not moved, still running here).
+  `POST|GET /v1/sandboxes/{name}/receive`, `POST /v1/sandboxes/{name}/send` (409 = not moved, still running here;
+  the answer has the scratch copy's figures, `scratch`).
   The hub also serves unpacked images to burst hosts (plain HTTP on 10.201.0.1:7444, overlay hosts only).
 - State per sandbox in `/var/lib/sbx/sandboxes/<name>.json` (mode 600). The unit has `KillMode=process`: restarting
   or upgrading sandboxd never touches sandboxes (checked: setup.sh re-run with two sandboxes running, same PIDs).
-- Every sandbox: `runsc --platform=systrap --network=sandbox --overlay2=root:self,size=5g --host-uds=none
+- Every sandbox: `runsc --platform=systrap --network=sandbox --overlay2=none --host-uds=none
   --host-fifo=none --net-raw --allow-packet-socket-write --allow-suid`, the pool's CPU features (annotation), cgroup
-  `/sbx/<name>` (memory = `sandbox.memory`, CPU quota = `sandbox.cpu`, pids 4096), its own netns, no host mounts. The
+  `/sbx/<name>` (memory = `sandbox.memory`, CPU quota = `sandbox.cpu`, pids 4096), its own netns. Its files
+  (docs/CLAUDE-CODE.md "Storage"): root = Linux overlayfs (the image read-only + `upper/` on the sandbox's 5 GiB ext4
+  scratch file), `/tmp` and `/var/lib/docker` on the same scratch, `/workspace` and `~/.claude` from the host's JuiceFS
+  mount (a sandbox with a workspace or user is refused, 503, on a host without it). The
   first process is `sbx-init.mjs` (root inside gVisor, the Docker capabilities exist only there): it writes
   `/etc/hosts` and apt's proxy setting, starts the agent through setpriv as uid 1000 with no capabilities (bounding
   set kept, no no_new_privs: sudo works inside, see "Installing packages"), and dockerd only when the `docker` wrapper
   asks.
-  `/var/lib/docker` is a tmpfs in the sandbox's memory, so images migrate with it.
+  `/var/lib/docker` is on the scratch filesystem, so images migrate with it (the scratch copy below).
 - Host setup: `host/setup.sh hub|burst [image]` (idempotent: the fork's runsc checked against SHA256SUMS, crane,
   sandboxd's binary from `bin/` (`host/fetch-sandboxd.sh`: the CI release `sandboxd-<commit>`, checked), sysctls, the tmpfs for migration images, units, logrotate, the image unpacked). Burst images get each
   instance's `host.json`, WireGuard key and TLS files from EC2 user data at first boot (`sbx-userdata.service`).
@@ -358,11 +362,53 @@ Hetzner fsn1 (yyc project)                                              AWS eu-c
 5. The controller moves the /32 (one route, plus the WireGuard AllowedIPs when the target is across the overlay).
    It must not move before the restore returns.
 
-**Flags on both sides:** `--platform=systrap --network=sandbox --overlay2=root:self,size=5g --host-uds=none
---host-fifo=none`. `--network=sandbox` means gVisor's own TCP/IP stack holds every connection, so connections are in
+### Scratch on migration (2026-10-21)
+
+A sandbox's scratch filesystem (`/var/lib/sbx/scratch/<name>`: the overlay's `upper/` with every install, `/tmp`,
+Docker's directory) is host disk, not memory, so it moves as files, with rsync, around the memory pre-copy above
+(sandboxd `storage.rs`, `relay.rs`, `sandboxes.rs`):
+
+1. **Receive:** the target prepares the same storage as a create (an empty 5 GiB scratch, the overlay on the same
+   image digest, the JuiceFS folders) and the bundle, starts `runsc restore --migrate-listen 127.0.0.1:<port+1000>`,
+   and `sandboxd migrate-relay` (a helper process in the helpers cgroup, so nothing of it is in sandboxd's memory
+   bound) on `<overlay address>:<port>`, the port the controller gets as before. The relay serves the source's
+   connections one at a time: rsync (`rsync --daemon` in inetd mode on the connection, module `scratch` = the scratch
+   filesystem, chroot, root, overlay addresses only), the pre-copy stream (relayed to the restore record by record,
+   except its End record, which it holds back), and `SBXDONE!`/`SBXFAIL!` from the source.
+2. **Send, sandbox running:** up to 3 rsync rounds of the scratch (`rsync -aHAX --numeric-ids --delete`, overlayfs'
+   work directory excluded), stopping early once a round copies under 32 MiB and 2,000 files. Files changing under
+   rsync (exit 23/24) are fine here. A failure leaves the sandbox running (409).
+3. **Memory pre-copy** (`runsc checkpoint --migrate-to <relay>`), unchanged. Its final step stops the sandbox and
+   writes its dirty file data to the host files; then the stream ends with End, which the relay keeps.
+4. **Sandbox stopped:** the final rsync delta, while `runsc delete` removes the stopped container (its gofer closes
+   the sandbox's files, so JuiceFS commits the last writes to `/workspace` and `~/.claude` for the target, which
+   mounts the same volume). Then `SBXDONE!`: the relay hands End to the restore, which restores. A failure here loses
+   the sandbox (502), as a failure in the stopped part of the memory copy always did; `SBXFAIL!` makes the target's
+   restore fail at once.
+5. **The upper directories on the way to the bind mounts** (`/tmp`, `/var/lib/docker`, `/workspace`,
+   `/home/sandbox/.claude` and their parents) are made in `upper/` before the overlay is mounted, on every host.
+   runsc looks these paths up when it creates the sandbox (the target does that before the copy), overlayfs caches a
+   directory it found only in the image, and the bind mount pins it: files copied into its upper twin afterwards
+   would stay invisible.
+
+What is preserved: contents, owners (numeric), modes, mtimes to the nanosecond (gVisor's restore checks the size
+and mtime of every file the sandbox had open, so they must match), hard links, ACLs, xattrs (`trusted.overlay.*` of
+opaque directories) and devices (whiteouts, 0/0 character devices). Inode numbers change; gVisor's gofer accepts that
+on restore.
+
+Measured on two m7i.large (eu-central-1, same AZ), 2026-10-21, a sandbox with apt (`cowsay`, `sl`), pip (`humanize`)
+and npm -g installs, a deleted image file (whiteout), 200 MB in `/tmp`, 53 files in `/workspace` (one appended to every
+second by an open file), and a process holding 300 MiB: A → B and back, everything intact (same PID, memory checked,
+checksums, whiteout, the appending file and a shell loop writing `/tmp` and `/workspace` every few ms went on without a
+gap in its sequence). Each move: scratch live rounds 0.7-0.8 s for 230 MB (2.9 s with the shell loop running),
+`send` 1.9 s, final memory 190-370 ms, final scratch delta 130 ms (+20 ms for the delete and End: `stoppedMs` 150),
+restore 59-67 ms; the largest gap the process saw: 330-800 ms (it also hashes its 300 MiB every 1.25 s, ~200 ms).
+
+**Flags on both sides:** `--platform=systrap --network=sandbox --overlay2=none --host-uds=none
+--host-fifo=none` (plus the Docker and sudo flags, runsc.rs). `--network=sandbox` means gVisor's own TCP/IP stack holds every connection, so connections are in
 the migrated state. `--allow-connected-on-save` is not needed any more (see "The TCP bug").
 
-**What moves:** processes (same PIDs and start times), files in the overlay upper layer and tmpfs mounts, memory
+**What moves:** processes (same PIDs and start times), the scratch filesystem (above) and tmpfs mounts, memory
 (checked page by page in the tests), established TCP connections, the agent's `boot_id`, and Docker state inside the
 sandbox. **What doesn't:** connections from outside to the sandbox that are in their handshake at the switch (the
 probe's new HTTP connections then wait for a SYN retransmission, ~1 s).

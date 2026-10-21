@@ -127,6 +127,9 @@ Dependencies (all permissive): rustls 0.23 (Apache-2.0/ISC/MIT) with ring 0.17 (
 - **The commands sandboxd runs** (runsc CLI calls incl. `checkpoint --migrate-to` and `restore --migrate-listen` until
   the restore joins the sandbox's cgroup, crane, tar, curl, ip, nft, wg) and runsc's per-sandbox `runsc-fd-parking`
   sidecars (~8 KiB each): in `<unit>/helpers`, capped at `helperMemoryMaxMiB`.
+- **The scratch copy of a migration** (docs/SANDBOX-VM.md "Scratch on migration"): rsync on the source and the
+  target's `sandboxd migrate-relay` (the same binary, its own process: a 1 MiB relay buffer and normal sockets) with
+  its `rsync --daemon` children run in `<unit>/helpers`; sandboxd itself only waits for them.
 - **Migration images** on the tmpfs `/run/sbx/ckpt`: charged to the receiving sandbox's cgroup (the restore joins it
   before it receives).
 - **The kernel** itself (and memory of the netns/veth/nft objects per sandbox): the host reserve (`reserveMemory`) is
