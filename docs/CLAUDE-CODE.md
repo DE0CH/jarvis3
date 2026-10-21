@@ -17,9 +17,11 @@ CLAUDE.md and MCP config read from disk; this design gives it exactly that, insi
      machine (git, shell, file tree, plugins, taskmaster, worktrees, browser-use, cli) are removed.
    - CloudCLI's SQLite tables move to our Postgres (Neon), same schema.
    - sign-in: Cloudflare Access (Google, the staff allowlist) in place of CloudCLI's own login.
-2. **Agent: Claude Code inside the sandbox**, `cwd=/workspace`, a git repo made when the workspace is first made
-   (invisible to staff). `CLAUDE.md`: the YYC instructions, plus a paragraph on sandbox release (only `/workspace`
-   and the conversation carry over; installs, processes and everything else are gone). MCP: our tools role.
+2. **Agent: Claude Code inside the sandbox**, `cwd=/workspace`, a plain folder (no git: Claude Code works as well
+   in a folder without version control). `CLAUDE.md`: the YYC instructions, a paragraph on sandbox release (only
+   `/workspace` and the conversation carry over; installs, processes and everything else are gone), and: bulk file
+   work (unpacking archives, installs, thousands of small files) goes in `/tmp`, only results in `/workspace` (each
+   file write there is a network round trip, ~25 ms). MCP: our tools role.
    Model calls: `ANTHROPIC_BASE_URL` = egress `/x/model` → OpenRouter with zero data retention, under the shared
    budget, with a short-lived token; the sandbox holds no real key. Licence: Claude Code's commercial terms,
    accepted by Deyao as a one-time exception for this instance.
@@ -28,7 +30,7 @@ CLAUDE.md and MCP config read from disk; this design gives it exactly that, insi
    | What | Paths | Lifetime | Where | On migration |
    |---|---|---|---|---|
    | base system | image (`/usr`, `/opt/py`, `/etc` as shipped) | per image | read-only image on the host disk, shared | nothing (same image on every host) |
-   | persistent work | `/workspace` (1 GiB quota, git), `~/.claude` | the conversation | JuiceFS (metadata: Neon Postgres; data: the Hetzner bucket), mounted by the host and bind-mounted in | nothing (destination mounts the same volume) |
+   | persistent work | `/workspace` (1 GiB quota, a plain folder), `~/.claude` | the conversation | JuiceFS (metadata: Neon Postgres; data: the Hetzner bucket), mounted by the host and bind-mounted in | nothing (destination mounts the same volume) |
    | installs and scratch | apt, pip, npm -g, `/tmp`, `~/.cache`, Docker's dir | the sandbox | host disk: Linux overlayfs (image as lowerdir, `/sbx/<id>/upper` as upperdir) + host dirs for `/tmp` and Docker, capped at 5 GiB (writes past it fail with ENOSPC) | file-level pre-copy (rsync-style while running, final delta in the pause) |
    | memory | processes | the sandbox | RAM | pre-copied by the gVisor fork |
 
@@ -39,10 +41,12 @@ CLAUDE.md and MCP config read from disk; this design gives it exactly that, insi
    `~/.claude` write is already in storage). Scaler, placement, release rules, Rust sandboxd, egress allowlist,
    tools role, budget and Access stay as they are.
 
-## Measurements to make before building on them
+## Measurements
 
-- git on JuiceFS from an AWS host (init/add/commit/status on ~2,000 files, cold and warm cache) vs local disk.
-  Fallbacks if too slow: `.git` on scratch with a push to a bare repo on JuiceFS after each turn; or all of
-  `/workspace` on scratch with a sync after each turn.
+- **JuiceFS** (metadata on Neon from an m7i.large in eu-central-1: 2–5 ms per query; data in the Hetzner bucket;
+  `--writeback`), 2026-10-21: creating 2,000 small files 58 s (local disk 1.8 s), about 25 ms per file create;
+  `git add` of them 31 s (0.02 s); a warm `git status` 0.7 s. Caching helps reads, not metadata writes. Fine for
+  the few files a turn writes; bulk work goes in `/tmp`. (Git was dropped from the design, so the git numbers are
+  only for reference.)
 - apt/pip installs with the gofer-backed host overlay (`--overlay2=none`) vs gVisor's internal overlay.
 - Docker inside gVisor on a gofer-backed directory: overlay2 storage driver or a fall back to `vfs`.
