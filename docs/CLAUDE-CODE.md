@@ -89,11 +89,32 @@ browser ─▶ Cloudflare Access ─▶ Worker yyc-ai (edge/worker.js) ─▶ tu
   WebSockets to it with `X-Jarvis-User`, stops idle ones; each person lives on one of the 2 replicas (rendezvous
   hashing, Service `ui-peers`). The server's Jarvis provider (`server/modules/jarvis/`) gets the conversation's
   sandbox from web and runs `claude` there through the agent's `/proc` (the SDK's `spawnClaudeCodeProcess`),
-  touching it every minute while it runs; staff read and download a conversation's `/workspace` from `/jfs/ws/<id>`.
+  touching it every minute while it runs; staff download the files Claude sent them (next section) from
+  `/jfs/ws/<id>`.
 - **Postgres for the UI:** Neon database `cloudcli` (project yyc-news-stream, the same compute as `jarvis` and the
   JuiceFS metadata database `jfs_yyc_ai`), one schema per person (`cc_<userKey>`).
 - **JuiceFS volume `yyc-ai`:** metadata in Neon `jfs_yyc_ai`, data in the Hetzner bucket `yyc-ai-files` under
   `yyc-ai/`; mounted by every sandbox host at `/var/lib/sbx/jfs` and in the UI pods at `/jfs` (CSI driver).
+
+## Sent files: Claude Code's SendUserFile
+
+Claude hands a deliverable (a report, a chart, a spreadsheet) to the staff member with Claude Code's own built-in
+tool **SendUserFile** (`{files: [paths], caption?, status: "normal"|"proactive", display?: "render"|"attach"}`; its
+description tells the model to send deliverables, not scratch files, as they are produced). Nothing in the managed
+CLAUDE.md mentions it (Deyao, 2026-10-21: the tool's own description is enough).
+- **Enabled by** `CLAUDE_CODE_ATTACHMENTS_BY_PATH=1` in the sandbox env (`claudeCodeEnv`, `chat/src/web/claude-code.ts`).
+  Read from Claude Code 2.1.304's bundle: the tool's `isEnabled` otherwise needs a first-party claude.ai login with
+  the `allow_send_file` capability (a Remote Control session) and refuses a custom `ANTHROPIC_BASE_URL`; with the
+  variable it is on (and not deferred behind ToolSearch) for any provider, and `call` only checks the paths and
+  returns `{caption, attachments: [{path (absolute), size, media_type, isImage, pathValidated}]}` (no upload).
+  Verified headless (`claude -p --output-format stream-json`): `SendUserFile` is in the init message's tools, the
+  call and its result are in the stream and in the transcript (`toolUseResult` on the result line).
+- **Shown by** the fork (DE0CH/claudecodeui `src/modules/jarvis-files/SentFileCards.tsx`): each call is a set of
+  download cards under the assistant's turn (name, size, a preview for images and PDFs unless `display: "attach"`),
+  live and from history. The **檔案 (Files) panel** lists only sent files: `GET /api/jarvis/sessions/:id/files`
+  reads the conversation's transcript (`server/modules/jarvis/jarvis-sent-files.ts`: calls with a result that is not
+  an error, paths inside `/workspace`, newest send first), then opens each under `/jfs/ws/<id>` without following
+  symlinks; a file gone since is left out. There is no table of its own: the transcript is the record.
 
 ## Warming: typing starts a host
 
