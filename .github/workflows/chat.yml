@@ -82,18 +82,6 @@ jobs:
           echo "claw_url=$(jq -r .url chat/claw.json)" >> "$GITHUB_OUTPUT"
           echo "claw_sha=$(jq -r .sha256 chat/claw.json)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
-      - name: build the chat image
-        uses: docker/build-push-action@v6
-        with:
-          context: chat
-          load: true
-          tags: jarvis3-chat:test
-          build-args: |
-            CLAW_URL=${{ steps.tags.outputs.claw_url }}
-            CLAW_SHA256=${{ steps.tags.outputs.claw_sha }}
-            CHAT_COMMIT=${{ github.sha }}
-          cache-from: type=gha,scope=chat-image
-          cache-to: type=gha,mode=max,scope=chat-image
       - name: build the sandbox image
         uses: docker/build-push-action@v6
         with:
@@ -102,6 +90,26 @@ jobs:
           tags: jarvis3-sandbox:test
           cache-from: type=gha,scope=sandbox-image
           cache-to: type=gha,mode=max,scope=sandbox-image
+      # sandbox_environment (tools role) serves the sandbox image's package list: copied out of the image just built
+      - name: the sandbox image's package list
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sandbox-env"
+          docker run --rm --entrypoint cat jarvis3-sandbox:test /opt/agent/packages.txt > "$RUNNER_TEMP/sandbox-env/packages.txt"
+          grep -c . "$RUNNER_TEMP/sandbox-env/packages.txt"
+      - name: build the chat image
+        uses: docker/build-push-action@v6
+        with:
+          context: chat
+          build-contexts: sandbox-env=${{ runner.temp }}/sandbox-env
+          load: true
+          tags: jarvis3-chat:test
+          build-args: |
+            CLAW_URL=${{ steps.tags.outputs.claw_url }}
+            CLAW_SHA256=${{ steps.tags.outputs.claw_sha }}
+            CHAT_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=chat-image
+          cache-to: type=gha,mode=max,scope=chat-image
       - name: smoke test
         run: |
           set -euo pipefail
@@ -118,6 +126,15 @@ jobs:
           docker rm -f sbx
           # Docker is in the image; outside our own hosts (no sbx-init) the wrapper says it isn't available
           docker run --rm --entrypoint sh jarvis3-sandbox:test -c 'test -x /usr/bin/dockerd && test -x /usr/bin/containerd && test -f /opt/agent/sbx-init.mjs && setpriv --version >/dev/null && out=$(docker ps 2>&1); echo "$out" | grep -q "not available"'
+          # sandbox_environment's files are in the chat image (the package list from the sandbox image)
+          docker run --rm --entrypoint sh jarvis3-chat:test -c 'grep -q "^FROM node" sandbox-env/Dockerfile && grep -q "^jq " sandbox-env/packages.txt && grep -q "^pandas==" sandbox-env/packages.txt'
+          # installing packages (docs/SANDBOX-VM.md "Installing packages"): sudo is set up for uid 1000 and keeps the
+          # proxy variables; apt-get/apt are the wrappers; apt asks nothing
+          docker run --rm --user 0 --entrypoint sh jarvis3-sandbox:test -c 'test "$(command -v apt-get)" = /usr/local/bin/apt-get && test -u /usr/bin/sudo && sudo -n -l -U node | grep -q "NOPASSWD: ALL" && sudo -n -l -U node | grep -q HTTPS_PROXY && apt-config dump | grep -q "Assume-Yes \"true\"" && echo $PATH | grep -q /home/sandbox/.local/bin'
+          # uid 1000, as a command runs: apt-get goes through sudo and fetches the package lists itself
+          docker run --rm --entrypoint sh jarvis3-sandbox:test -c 'test "$(id -u)" = 1000 && apt-get install -y -qq sl >/dev/null && test -x /usr/games/sl'
+          # without root (kubernetes/e2b style, no sudo): a clear message, not a prompt
+          out=$(docker run --rm --security-opt no-new-privileges --entrypoint sh jarvis3-sandbox:test -c 'apt-get install -y jq 2>&1; echo "exit $?"') ; echo "$out"; echo "$out" | grep -q "needs root" && echo "$out" | grep -q "exit 100"
           # sandboxd (provider "vm"): its code loads under the image's Node
           docker run --rm -v "$PWD/chat/sandboxd:/sbxd:ro" --entrypoint node jarvis3-chat:test --input-type=module -e 'await import("/sbxd/src/config.ts"); await import("/sbxd/src/net.ts"); await import("/sbxd/src/runsc.ts"); console.log("sandboxd modules load")' 
       - name: log in to GHCR
@@ -132,6 +149,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: chat
+          build-contexts: sandbox-env=${{ runner.temp }}/sandbox-env
           push: true
           tags: ${{ steps.tags.outputs.chat }}
           build-args: |

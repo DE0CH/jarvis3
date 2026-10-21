@@ -23,6 +23,8 @@ Deyao's requirements and decisions (2026-10-20):
 - **No vCPU quota increase**: the AWS burst pool fits YYC's 16-vCPU eu-central-1 quota.
 - **Docker in sandboxes: yes.** Installed in the sandbox image; dockerd starts on demand (first docker command), not
   at boot.
+- **Package installs: yes** (2026-10-21): uid 1000 has passwordless sudo to the sandbox's own root (runsc
+  `--allow-suid`), so `apt-get install` works through egress; gVisor stays the boundary ("Installing packages").
 - The Hetzner box itself: Deyao approved a CX43 (2026-10-21). The CX line was sold out in fsn1/nbg1/hel1 that day,
   so an interim **cx23** (EUR 6.59/month) runs as the hub until a CX43 can be created ("Hub: interim cx23").
 
@@ -101,10 +103,12 @@ WireGuard key and TLS certificate, so nothing else changed:
 - State per sandbox in `/var/lib/sbx/sandboxes/<name>.json` (mode 600). The unit has `KillMode=process`: restarting
   or upgrading sandboxd never touches sandboxes (checked: setup.sh re-run with two sandboxes running, same PIDs).
 - Every sandbox: `runsc --platform=systrap --network=sandbox --overlay2=root:self,size=5g --host-uds=none
-  --host-fifo=none --net-raw --allow-packet-socket-write`, the pool's CPU features (annotation), cgroup `/sbx/<name>`
-  (memory = `sandbox.memory`, CPU quota = `sandbox.cpu`, pids 4096), its own netns, no host mounts. The first process
-  is `sbx-init.mjs` (root inside gVisor, the Docker capabilities exist only there): it starts the agent through
-  setpriv as uid 1000 with no capabilities and no_new_privs, and dockerd only when the `docker` wrapper asks.
+  --host-fifo=none --net-raw --allow-packet-socket-write --allow-suid`, the pool's CPU features (annotation), cgroup
+  `/sbx/<name>` (memory = `sandbox.memory`, CPU quota = `sandbox.cpu`, pids 4096), its own netns, no host mounts. The
+  first process is `sbx-init.mjs` (root inside gVisor, the Docker capabilities exist only there): it writes
+  `/etc/hosts` and apt's proxy setting, starts the agent through setpriv as uid 1000 with no capabilities (bounding
+  set kept, no no_new_privs: sudo works inside, see "Installing packages"), and dockerd only when the `docker` wrapper
+  asks.
   `/var/lib/docker` is a tmpfs in the sandbox's memory, so images migrate with it.
 - Host setup: `host/setup.sh hub|burst [image]` (idempotent: the fork's runsc checked against SHA256SUMS, crane,
   sandboxd's binary from `bin/` (`host/fetch-sandboxd.sh`: the CI release `sandboxd-<commit>`, checked), sysctls, the tmpfs for migration images, units, logrotate, the image unpacked). Burst images get each
@@ -462,6 +466,63 @@ never use Docker pay nothing for it.
 - **Image size:** adding Docker (docker-ce CLI, dockerd, containerd, runc) to the sandbox image adds roughly
   100-150 MB to it; not built yet.
 
+## Installing packages (2026-10-21)
+
+Deyao (2026-10-21): "apt pip and other packages need to be installable on the sandbox". pip (venv `/opt/py`) and npm
+(prefix `~/.npm-global`) already worked as uid 1000; `apt-get install` needs root.
+
+**Design: uid 1000 gets passwordless sudo inside the sandbox; gVisor stays the boundary.**
+- runsc `--allow-suid` (gVisor ignores set-user-ID bits without it); the sandbox image has `sudo` with
+  `node ALL=(ALL:ALL) NOPASSWD: ALL` (`/etc/sudoers.d/sandbox`), keeping the proxy and mirror variables
+  (`env_keep`). `sbx-init.mjs` starts the agent as uid 1000 with empty effective/permitted/inheritable/ambient
+  capability sets but keeps the bounding set and doesn't set no_new_privs, so `sudo` can give a command the
+  sandbox's root (the Docker capability set of the OCI spec, `DOCKER_CAPS` in `runsc.ts`, unchanged).
+- `/usr/local/bin/apt-get` and `apt` (`chat/sandbox/apt-wrapper.sh`): as uid 1000 they re-run themselves through
+  `sudo -n`, so `apt-get install -y x` and `sudo apt-get install -y x` both work; an install fetches the package lists
+  first when the image has none (it ships without them); without sudo (kubernetes/e2b providers, no_new_privs) they
+  say root isn't available (exit 100) instead of apt's lock-file error. `/etc/apt/apt.conf.d/90sandbox`: assume yes,
+  no recommended packages, no pty.
+- apt goes through egress like everything else: sudo keeps `http_proxy`/`https_proxy`, and `sbx-init.mjs` writes
+  `/etc/apt/apt.conf.d/80sandbox-proxy` (`Acquire::http::Proxy`/`https::Proxy` = the sandbox's own proxy URL, mode
+  644: uid 1000 has the same URL in its environment) so a root shell that reset its environment uses it too.
+  `deb.debian.org`/`security.debian.org` are on the allowlist and their plain-HTTP GETs are cached by egress;
+  `download.docker.com` (the image's Docker source) is allowlisted too, so `apt-get update` succeeds as a whole.
+- `sbx-init.mjs` also writes `/etc/hosts` (an image has none): sudo resolves the hostname on every call, and without
+  an entry each sudo waited for DNS (which the sandbox doesn't have) for ~80 s (measured locally).
+- Installs land in the root overlay's upper layer (`--overlay2=root:self,size=5g`: in the sandbox's own filestore,
+  capped at 5 GiB), which a live migration carries; the shared image rootfs on the host is never written (checked:
+  after `apt-get install ffmpeg` as root inside, the host's `images/<digest>/rootfs` was unchanged, the sandbox's
+  writes were all in `rootfs/.gvisor.filestore.<name>`).
+
+**Why this is safe.**
+- Root inside a sandbox is not new: `sbx-init.mjs` and dockerd already ran as that root with `DOCKER_CAPS`, and uid
+  1000 could already get it through Docker (`docker.sock` belongs to its group: `docker run --privileged -v /:/h`).
+  sudo makes the same thing direct.
+- A uid inside gVisor is the sentry's bookkeeping, not a host uid: every syscall of the sandbox, root's too, goes to
+  the sentry, which runs on the host in its own user namespace with a fixed small capability set, no_new_privs and
+  its seccomp filter, whatever the uid inside (checked locally: runsc-sandbox/sentry processes `NoNewPrivs: 1`,
+  `Seccomp: 2`, own user namespace, same credentials before and after `sudo` inside). An OCI user namespace on top
+  (the design's "map root inside to an unprivileged host uid") would change nothing for the sentry and is therefore
+  not added; `--allow-suid` only lets the sentry honour set-user-ID bits between its own virtual uids.
+- What isolates a sandbox stays as it was: the host-side netns with the stateless nft lock (out only `<own ip>` →
+  egress VIP:3128, in only from the controller to :7070; root inside can add addresses or raw sockets to gVisor's
+  netstack, but the lock checks the source address on the host side), the cgroup (memory, CPU, pids), no host mounts,
+  `--host-uds=none --host-fifo=none`, no secrets in the environment. The proxy token and exec token were already
+  readable by uid 1000 (its own environment and the agent's).
+- Migration: gVisor keeps `AllowSUID` in the sandbox's saved kernel state, so a sandbox keeps the setting it started
+  with wherever it moves; restore doesn't compare runsc flags, and the OCI spec is unchanged (restore validates it),
+  so hosts with and without the flag can exchange sandboxes during a rollout. A sandbox started before the upgrade
+  keeps sudo off until it is reset; the new image on a host without the flag gets "sudo: effective uid is not 0".
+
+**Hardening checks with root inside** (live results in "Measured live").
+
+**Order of a rollout:** sandboxd with `--allow-suid` first (new AMI, retire the AWS hosts), then the sandbox image
+(`sandbox.image`).
+
+**The Rust sandboxd must replicate:** the runsc flag `--allow-suid` in the global flags (same list as now
+otherwise); the OCI spec unchanged (root, `DOCKER_CAPS` in bounding/effective/permitted, no `noNewPrivileges`, no
+user namespace). Everything else lives in the image.
+
 ## Measured (2026-10-20/21)
 
 **Setup:**
@@ -586,8 +647,8 @@ workload's memory on the first migration: both Python processes crashed.
   empty mount namespace, with no host capabilities. The fork doesn't change that; the sentry writes the migration
   stream to a socket that runsc passes in (no new syscalls in the sentry's filter).
 - Hardening (unchanged):
-  - uid 1000 inside;
-  - no capabilities and `noNewPrivileges` (except Docker sandboxes, whose capabilities exist only inside gVisor);
+  - uid 1000 inside, with passwordless sudo to the sandbox's root (since 2026-10-21, "Installing packages"); that
+    root and its capabilities exist only inside gVisor;
   - `--host-uds=none --host-fifo=none`;
   - cgroup limits for CPU, memory and pids (a received sandbox's memory is written from its own cgroup, so it is
     charged there);
