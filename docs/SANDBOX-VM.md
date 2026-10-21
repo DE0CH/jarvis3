@@ -483,7 +483,7 @@ Deyao (2026-10-21): "apt pip and other packages need to be installable on the sa
   `node ALL=(ALL:ALL) NOPASSWD: ALL` (`/etc/sudoers.d/sandbox`), keeping the proxy and mirror variables
   (`env_keep`). `sbx-init.mjs` starts the agent as uid 1000 with empty effective/permitted/inheritable/ambient
   capability sets but keeps the bounding set and doesn't set no_new_privs, so `sudo` can give a command the
-  sandbox's root (the Docker capability set of the OCI spec, `DOCKER_CAPS` in `runsc.ts`, unchanged).
+  sandbox's root (the Docker capability set of the OCI spec, `DOCKER_CAPS` in `daemon/src/runsc.rs`, unchanged).
 - `/usr/local/bin/apt-get` and `apt` (`chat/sandbox/apt-wrapper.sh`): as uid 1000 they re-run themselves through
   `sudo -n`, so `apt-get install -y x` and `sudo apt-get install -y x` both work; an install fetches the package lists
   first when the image has none (it ships without them); without sudo (kubernetes/e2b providers, no_new_privs) they
@@ -526,7 +526,7 @@ Deyao (2026-10-21): "apt pip and other packages need to be installable on the sa
 **Order of a rollout:** sandboxd with `--allow-suid` first (new AMI, retire the AWS hosts), then the sandbox image
 (`sandbox.image`).
 
-**sandboxd's part** (both `src/runsc.ts` and the Rust `daemon/src/runsc.rs`, which the hosts run): the runsc flag
+**sandboxd's part** (`chat/sandboxd/daemon/src/runsc.rs`; the Node daemon had it too until it was removed): the runsc flag
 `--allow-suid` in the global flags (same list as before otherwise, tested); the OCI spec unchanged (root,
 `DOCKER_CAPS` in bounding/effective/permitted, no `noNewPrivileges`, no user namespace). Everything else lives in
 the image.
