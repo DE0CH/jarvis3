@@ -1,0 +1,64 @@
+name: sandboxd
+# sandboxd, the sandbox hosts' agent (chat/sandboxd/daemon, Rust; docs/SANDBOXD-MEMORY.md): format, clippy, unit tests
+# (incl. arena exhaustion), a static musl build, then the end-to-end soak test against that binary (two daemons with
+# stand-ins for runsc/ip/nft/wg: every endpoint, a migration, hostile clients, RSS flat and under the budget). On main
+# the binary is published as release sandboxd-<commit 12> (sandboxd + SHA256SUMS), which aws/infra.sh ami and
+# host/gateway.sh install.
+on:
+  push:
+    branches: [main]
+    paths: ["chat/sandboxd/daemon/**", "chat/sandboxd/host/make-certs.sh", ".github/workflows/sandboxd.yml"]
+  pull_request:
+    paths: ["chat/sandboxd/daemon/**", ".github/workflows/sandboxd.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: sandboxd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: chat/sandboxd/daemon
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          rustup toolchain install stable --profile minimal -c clippy,rustfmt -t x86_64-unknown-linux-musl
+          rustup default stable
+          sudo apt-get -qq update && sudo apt-get -qq install -y musl-tools >/dev/null
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            chat/sandboxd/daemon/target
+          key: sandboxd-${{ hashFiles('chat/sandboxd/daemon/Cargo.lock') }}
+      - name: format, clippy, unit tests
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+      - name: static build
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl
+          b=target/x86_64-unknown-linux-musl/release/sandboxd
+          file $b | grep -q "static"
+          $b --version
+          $b budget
+      - name: soak test (every endpoint, migration, hostile clients, RSS under the budget)
+        run: sudo -E env PATH="$PATH" python3 tests/soak.py target/x86_64-unknown-linux-musl/release/sandboxd --seconds 45
+      - name: publish (main)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=sandboxd-${GITHUB_SHA::12}
+          d=$(mktemp -d); cp target/x86_64-unknown-linux-musl/release/sandboxd "$d/"
+          (cd "$d" && sha256sum sandboxd > SHA256SUMS)
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" "$d/sandboxd" "$d/SHA256SUMS" \
+            --title "$tag" --notes "sandboxd (Rust, static x86_64 musl) at ${GITHUB_SHA}; docs/SANDBOXD-MEMORY.md" --target "$GITHUB_SHA"
