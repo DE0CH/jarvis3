@@ -135,8 +135,7 @@ jobs:
           docker run --rm --entrypoint sh jarvis3-sandbox:test -c 'test "$(id -u)" = 1000 && apt-get install -y -qq sl >/dev/null && test -x /usr/games/sl'
           # without root (kubernetes/e2b style, no sudo): a clear message, not a prompt
           out=$(docker run --rm --security-opt no-new-privileges --entrypoint sh jarvis3-sandbox:test -c 'apt-get install -y jq 2>&1; echo "exit $?"') ; echo "$out"; echo "$out" | grep -q "needs root" && echo "$out" | grep -q "exit 100"
-          # sandboxd (provider "vm"): its code loads under the image's Node
-          docker run --rm -v "$PWD/chat/sandboxd:/sbxd:ro" --entrypoint node jarvis3-chat:test --input-type=module -e 'await import("/sbxd/src/config.ts"); await import("/sbxd/src/net.ts"); await import("/sbxd/src/runsc.ts"); console.log("sandboxd modules load")' 
+          # (sandboxd is the Rust daemon since 570eeac, built and tested by its own workflow; no Node sources to load here)
       - name: log in to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
