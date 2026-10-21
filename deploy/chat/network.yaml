@@ -1,5 +1,4 @@
-# Ingress: nothing accepts connections unless listed. web ← cloudflared (the tunnel) and tools (/internal/events);
-# tools ← web (claw's MCP bridge runs in the web pod); egress ← web (claw's model calls) and cloudflared (hosted
+# Ingress: nothing accepts connections unless listed. web ← cloudflared (the tunnel); tools ← web (claw's MCP bridge runs in the web pod); egress ← web (claw's model calls) and cloudflared (hosted
 # sandboxes' wire, provider e2b). Pod sandboxes live in another cluster: their path to egress:3128 is added by
 # whatever links the clusters, not here.
 # Egress: cluster DNS, pods of this namespace, and the public internet only (Postgres, the bucket, OpenRouter, tool
@@ -25,7 +24,6 @@ spec:
   ingress:
     - from:
         - podSelector: {matchLabels: {app: cloudflared}}
-        - podSelector: {matchLabels: {app: tools}}
       ports: [{port: 8080, protocol: TCP}]
 ---
 apiVersion: networking.k8s.io/v1

@@ -1,0 +1,52 @@
+name: egress-allowlist
+# Refreshes the sandbox egress allowlist (chat/egress-allowlist/, docs/CHAT.md "The sandbox allowlist") every Monday:
+# runs generate.py and commits allow.txt/deny.txt to main only when an entry changed (the header's date and digest
+# alone don't count), then dispatches the chat workflow for that commit (a push made with GITHUB_TOKEN starts no
+# workflow by itself) so its images carry the new lists; an instance picks them up when its jarvis3 pin is bumped.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: egress-allowlist
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: generate
+        run: python3 -I chat/egress-allowlist/generate.py
+      - name: commit when an entry changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -I '^#' -- chat/egress-allowlist; then
+            echo "no entry changed"
+            git checkout -- chat/egress-allowlist
+            exit 0
+          fi
+          git diff --stat -- chat/egress-allowlist
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add chat/egress-allowlist/allow.txt chat/egress-allowlist/deny.txt
+          git commit -m "chat egress allowlist: weekly refresh ($(sed -n 's/^# entries: //p' chat/egress-allowlist/allow.txt) allowed, $(sed -n 's/^# entries: //p' chat/egress-allowlist/deny.txt) denied)"
+          for i in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              gh workflow run chat.yml --ref main
+              exit 0
+            fi
+            sleep 10
+          done
+          exit 1
+        env:
+          GH_TOKEN: ${{ github.token }}
