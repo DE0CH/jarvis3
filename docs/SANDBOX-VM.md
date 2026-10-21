@@ -38,6 +38,122 @@ Deyao's requirements and decisions (2026-10-20):
 | Network | A WireGuard overlay. **The Hetzner box is the hub**: it sits in the yyc private network, peers with every AWS host, and is the route to the sandbox /32s on AWS | This collapses the earlier "sbx-gw" question: no separate gateway VMs. |
 | CPU features | Every sandbox sees only the CPU features common to all hosts (gVisor annotation `dev.gvisor.internal.cpufeatures`) | AWS m7i is Intel (AVX-512), Hetzner CX is AMD EPYC: a sandbox started on Intel with AVX-512 can't be restored on the AMD box. |
 
+## Built (2026-10-21)
+
+### What runs (YYC AI)
+
+| Part | Where | Notes |
+|---|---|---|
+| Hub `yyc-sbx-hub` | Hetzner yyc project, fsn1, **cx23 interim** (2 vCPU Intel Skylake, 4 GB), public 128.140.49.7, private 10.0.0.7 | sandboxd role `hub`, WireGuard hub (wg0 10.201.0.1, udp 51820), egress VIP translation, image source for AWS hosts. Firewall `yyc-sbx-hub`: in only udp 51820 + ICMP; no public SSH (SSH through yyc-master1 to 10.0.0.7). Hetzner network `yyc` route 10.200.0.0/15 → 10.0.0.7 |
+| AWS burst hosts | eu-central-1a, launch template `yyc-ai-sandbox-host` (m7i.xlarge, AMI from `aws/infra.sh ami`, SG `yyc-ai-sandbox-host`: udp 51820 from the VPC only, IMDSv2 hop limit 1, no instance profile, no key pair, gp3 40 GB, terminate on shutdown) | started/terminated only by the scaler, as IAM user `yyc-ai-sandbox-scaler` (RunInstances from that template with tag app=yyc-ai-sandbox, m7i.xlarge only; tags at launch; TerminateInstances of app=yyc-ai-sandbox; DescribeInstances) |
+| Cluster side | DE0CH/YYC `yyc-ai/deploy/sandbox-vm.yaml` | DaemonSet `kube-system/sbx-overlay-route` (each node: 10.200.0.0/15 via the private network; each egress pod: route to 10.200.0.0/16 with `rto_min 20ms`); policies egress ← 10.200.0.0/16:3128, web → :7070 and sandboxd :7443. SealedSecret `jarvis/sandbox-vm` (PKI + the scaler's AWS key) as web env |
+
+### Addresses and paths
+
+- 10.200.0.0/16: sandboxes (one fixed /32 each, `sandboxes.ip`); 10.201.0.0/24: hosts on wg0 (hub .1, AWS .10–.250);
+  10.201.1.1: the egress VIP.
+- **Sandbox → egress:** sandbox → its host's veth → (AWS: wg0 → hub) → hub DNATs 10.201.1.1:3128 to one egress pod
+  (`numgen random` over the pods' addresses, which egress pods announce in `kv egress_pod:*` and the scaler pushes,
+  `PUT /v1/egress`) → private network (Hetzner's per-node pod routes) → egress pod. The **source is never NATed**:
+  egress sees the sandbox's own /32 and accepts its token only from there. Replies go node → 10.200.0.0/15 → hub
+  (reverse DNAT) → veth or wg0. The design said "no NAT on the way"; a stable proxy address the sandboxes keep for
+  hours needs one translation, so it sits on the hub, which is on every path: a moved sandbox's connection keeps its
+  conntrack entry and survives (measured).
+- **Controller → sandbox / sandboxd:** web pod → node (masqueraded to the node's private address, 10.0.0.0/16, which
+  is the `controlCidr` the nft lock admits on :7070) → hub → veth or wg0 → host.
+- AWS hosts peer the hub (endpoint = its public IPv4) and each other (VPC addresses, for AWS↔AWS migrations); the hub
+  learns their endpoints from the handshakes. The hub's peer list (each AWS host's /32 plus the /32s of its
+  sandboxes) is rewritten by the controller after every placement and migration.
+
+### sandboxd (`chat/sandboxd/src`, Node 22 type stripping, no npm packages)
+
+- API (HTTPS, TLS 1.3, mutual TLS; only the client certificate CN `sandbox-controller` is accepted; listens on the
+  host's wg0 address): `GET /v1/host`, `PUT /v1/peers`, `PUT /v1/egress` (hub), `POST /v1/images`,
+  `GET|POST /v1/sandboxes`, `DELETE /v1/sandboxes/{name}`, `GET /v1/sandboxes/{name}/spec`,
+  `POST|GET /v1/sandboxes/{name}/receive`, `POST /v1/sandboxes/{name}/send` (409 = not moved, still running here).
+  The hub also serves unpacked images to burst hosts (plain HTTP on 10.201.0.1:7444, overlay hosts only).
+- State per sandbox in `/var/lib/sbx/sandboxes/<name>.json` (mode 600). The unit has `KillMode=process`: restarting
+  or upgrading sandboxd never touches sandboxes (checked: setup.sh re-run with two sandboxes running, same PIDs).
+- Every sandbox: `runsc --platform=systrap --network=sandbox --overlay2=root:self,size=5g --host-uds=none
+  --host-fifo=none --net-raw --allow-packet-socket-write`, the pool's CPU features (annotation), cgroup `/sbx/<name>`
+  (memory = `sandbox.memory`, CPU quota = `sandbox.cpu`, pids 4096), its own netns, no host mounts. The first process
+  is `sbx-init.mjs` (root inside gVisor, the Docker capabilities exist only there): it starts the agent through
+  setpriv as uid 1000 with no capabilities and no_new_privs, and dockerd only when the `docker` wrapper asks.
+  `/var/lib/docker` is a tmpfs in the sandbox's memory, so images migrate with it.
+- Host setup: `host/setup.sh hub|burst [image]` (idempotent: Node, the fork's runsc checked against SHA256SUMS, crane,
+  sandboxd, sysctls, the tmpfs for migration images, units, logrotate, the image unpacked). Burst images get each
+  instance's `host.json`, WireGuard key and TLS files from EC2 user data at first boot (`sbx-userdata.service`).
+- PKI: `host/make-certs.sh` (CA, hub and AWS server certificates "sandboxd", controller client certificate); in the
+  `yyc` store as `YYC_SBX_*` (the CA key only there).
+
+### Controller and scaler as built
+
+- Placement and capacity: slots per host = min(memory − reserve over `sandbox.memory`, CPUs × `cpuOvercommit` over
+  `sandbox.cpu`, `vm_hosts.max_sandboxes`). YYC: `sandbox.memory` 1Gi, cpu 1; hub reserve 1 GiB → 2 slots on the
+  cx23; an m7i.xlarge has 15. `maxActive` 10. `spareSlots` 0 while the hub is the cx23 (else every second
+  conversation would keep an AWS host up); 1 once the CX43 runs.
+- Scale out: when placement finds no room (or free slots < `spareSlots`): one AWS host at a time, at most
+  `aws.maxHosts` (3); a 4th only while a host is `retiring` and its sandboxes have nowhere to go. A full pool answers
+  "all sandbox hosts are full" at once (the turn runs without a sandbox, the model says so).
+- Scale in: the emptiest AWS host whose sandboxes fit elsewhere (with the spare kept) becomes `draining`; one
+  migration per scaler pass, longest-idle sandbox first, never while its conversation has a turn going; across clouds
+  only if its CPU use < `migration.idleCpu` (0.05 cores) and with `--migrate-max-downtime` = `migration.maxDowntimeMs`
+  (500 ms): a sandbox that won't converge is left running where it is and retried later. Empty draining/retiring hosts
+  are terminated at once, empty active ones after `aws.emptyMinutes` (5).
+- Every decision and migration goes to `vm_events` (launch, active, drain, migration with pause_ms, migration-skipped,
+  terminate, host-lost); `VmProvider.stats()` serves them, the hosts and the AWS cost so far to the admin monitor.
+- Release: the janitor's final save of the files (to the bucket) then `DELETE`; the next sandbox gets the files and
+  the reset note. A full-memory checkpoint to the bucket on release was not built (it would hide the reset).
+
+### The fork, as used
+
+- Release `precopy-20261021.1` adds `runsc checkpoint --migrate-max-downtime D`: when the live rounds end with the
+  remaining dirty pages estimated to take longer than D to send, the migration is aborted before the sandbox is ever
+  stopped (`ErrPrecopyNotConverging`); the receiver sees a truncated stream and cleans up. Measured: a 256 MiB
+  rewriting loop at ~95 % CPU, AWS → hub with D = 10 ms: aborted after 9 rounds (12.6 s, 65 MB still dirty, ~611 ms
+  estimated), the workload kept its PID and kept running.
+
+### Measured live (2026-10-21, cx23 hub + m7i.xlarge)
+
+| What | Result |
+|---|---|
+| sandboxd create on the hub | 0.4 s; turn: sandbox ready 2.4 s after "starting" |
+| Burst: launch → host active (RunInstances, boot, sandboxd, WireGuard) | 48.5 s; the turn's sandbox ready 67 s after it asked |
+| Drain-back AWS → hub, idle sandbox with a 400 MiB process | 9.1 s total, 1 round, 448 MB sent, final copy 17.6 ms, restore 159 ms; the process kept PID and memory |
+| Drain-back AWS → hub, agent-only sandbox (Deyao's live conversation, after its turn) | 0.86 s, 30 MB, final 33 ms, restore 128 ms |
+| 256 MiB writer (Python, page per 4 KiB), AWS → hub | 6.8 s, 8 rounds, 786 MB, final 83 ms, restore 143 ms |
+| Same, hub → AWS | 3.2 s, 2 rounds, 346 MB, final 152 ms, restore 38 ms |
+| Empty AWS host terminated after its last sandbox left | 6 s later (scaler pass) |
+| Isolation from inside a sandbox | uid 1000, CapEff/CapBnd 0, NoNewPrivs 1; env: only the proxy (egress token) and settings; `/proc/1/environ` denied; hub, sandboxd, metadata, API server, internet and egress pods directly: blocked; allowlisted hosts through the proxy 200, others 403 |
+
+### Operations
+
+- **Upgrade sandboxd or runsc on the hub:** `tar -C chat/sandboxd -cf - host src | ssh <hub via yyc-master1> 'tar -x
+  -C /root/sbx && bash /root/sbx/host/setup.sh hub <image>'` (GV=<release> for another fork release). Running
+  sandboxes keep running on their runsc; new ones use the new runsc. A migration needs the same runsc on both ends:
+  upgrade the hub, then bake a new AMI and retire the AWS hosts (`update vm_hosts set status='retiring'`), whose
+  sandboxes drain to the hub or a fresh host.
+- **New AMI** (new sandboxd/runsc, or to pre-cache a new sandbox image): `aws/infra.sh ami <image>`, `aws/infra.sh
+  template <ami>`, `aws/infra.sh prune-amis`. Running hosts are unaffected; new hosts use it.
+- **Add capacity:** raise `aws.maxHosts` (the quota allows 3 m7i.xlarge + 1); a bigger hub: see below.
+- **Drain a host by hand:** `update vm_hosts set status = 'retiring' where name = …` (AWS: terminated when empty;
+  the hub: its sandboxes move to AWS; set it back to `active` after). **Cap a host:** `max_sandboxes` (0 = no new
+  sandboxes; null = by memory). **Force a burst (test):** hub `max_sandboxes = 0`, then back to null: the scaler
+  drains the AWS host back.
+- **Hub: interim cx23 → CX43** (when the CX line is back in stock): create the CX43 by hand (same firewall, network
+  `yyc`), `setup.sh hub` with the hub's TLS files from the store; then at a quiet time mark the old hub `retiring`
+  so its sandboxes move to AWS, point the network route 10.200.0.0/15 at the new box and swap the names (or release
+  the two hub sandboxes: files are saved, the next turn gets the reset note), then delete the cx23. Set
+  `spareSlots` 1.
+- **Logs:** web `vm:` lines (`kubectl -n jarvis logs deploy/web | grep '"vm:'`), table `vm_events`; on a host
+  `journalctl -u sandboxd`, `/var/log/sbx/<sandbox>.log`.
+
+### Cost (monthly)
+
+- Hub: cx23 EUR 6.59 now (CX43 EUR 19.19 when it replaces it); AMI snapshot ~USD 0.33.
+- AWS only while bursting: USD 0.2415/h per m7i.xlarge + IPv4 0.005/h + gp3; drain-back traffic USD 0.09/GB (an idle
+  sandbox ~30 MB, one with 400 MiB in use ~0.45 GB).
+
 ## How the existing contract maps
 
 Nothing changes for jarvis-bash, the web role or egress. Their interface is the agent on :7070 with
@@ -445,7 +561,7 @@ available in fsn1 on 2026-10-20/21.
   t3.small (~10.7 h; ~8.5 h of that idle while the work was paused), gp3 and IPv4 ~$0.27, ~10 GB to Hetzner ~$0.92.
   Hetzner: one CX33 for ~10.7 h. Everything is terminated/deleted, including key pairs and security groups.
 
-## Open questions for Deyao
+## Open questions for Deyao (answered 2026-10-21: TCP fix and pre-copy stay in the fork; CX43 approved; Intel m7i kept with the common feature set; busy sandboxes wait to go idle, and a non-converging move is aborted)
 
 1. **Send the TCP fix upstream?** Branch `upstream/tcp-migration-fix` of DE0CH/gvisor is one commit with a test,
    ready as a PR to google/gvisor. The pre-copy change (`upstream/precopy`) could follow, probably split up and
