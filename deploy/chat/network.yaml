@@ -1,7 +1,8 @@
-# Ingress: nothing accepts connections unless listed. web ← cloudflared (the tunnel); tools ← web (claw's MCP bridge runs in the web pod); egress ← web (claw's model calls) and cloudflared (hosted
-# sandboxes' wire, provider e2b). Pod sandboxes live in another cluster: their path to egress:3128 is added by
-# whatever links the clusters, not here.
-# Egress: cluster DNS, pods of this namespace, and the public internet only (Postgres, the bucket, OpenRouter, tool
+# Ingress: nothing accepts connections unless listed. tools ← egress (route `tools`: Claude Code's MCP calls);
+# egress ← cloudflared (hosted sandboxes' wire, provider e2b). web accepts only what the instance adds (its UI pods,
+# e.g. DE0CH/YYC yyc-ai/deploy/ui.yaml `web-from-ui`); sandboxes on other machines reach egress:3128 through
+# whatever links them (the instance's own policies, e.g. yyc-ai/deploy/sandbox-vm.yaml).
+# Egress: cluster DNS, pods of this namespace, and the public internet only (Postgres, OpenRouter, tool
 # APIs, the Cloudflare edge, the sandbox cluster's API server and sandbox pods); private, CGNAT, loopback and
 # link-local ranges (this cluster's pods, Services and nodes, the metadata service) are excluded.
 apiVersion: networking.k8s.io/v1
@@ -16,26 +17,13 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: web-ingress
-  namespace: jarvis
-spec:
-  podSelector: {matchLabels: {app: web}}
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - podSelector: {matchLabels: {app: cloudflared}}
-      ports: [{port: 8080, protocol: TCP}]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
   name: tools-ingress
   namespace: jarvis
 spec:
   podSelector: {matchLabels: {app: tools}}
   policyTypes: [Ingress]
   ingress:
-    - from: [{podSelector: {matchLabels: {app: web}}}]
+    - from: [{podSelector: {matchLabels: {app: egress}}}]
       ports: [{port: 8080, protocol: TCP}]
 ---
 apiVersion: networking.k8s.io/v1
@@ -47,8 +35,8 @@ spec:
   podSelector: {matchLabels: {app: egress}}
   policyTypes: [Ingress]
   ingress:
-    # web: claw's model calls; cloudflared: hosted sandboxes' wire (wss://<egress host>/wire, provider e2b)
-    - from: [{podSelector: {matchLabels: {app: web}}}, {podSelector: {matchLabels: {app: cloudflared}}}]
+    # cloudflared: hosted sandboxes' wire (wss://<egress host>/wire, provider e2b)
+    - from: [{podSelector: {matchLabels: {app: cloudflared}}}]
       ports: [{port: 3128, protocol: TCP}]
 ---
 apiVersion: networking.k8s.io/v1

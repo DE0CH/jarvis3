@@ -1,5 +1,5 @@
-# Connector for the instance's own Cloudflare tunnel (its ingress, set in Cloudflare: the public hostname →
-# http://web.<namespace>.svc.cluster.local:8080). On SIGTERM cloudflared stops taking requests and waits for those in
+# Connector for the instance's own Cloudflare tunnel (its ingress, set in Cloudflare: the public hostname → the
+# instance's UI, e.g. http://ui.<namespace>.svc.cluster.local:8080). On SIGTERM cloudflared stops taking requests and waits for those in
 # flight (--grace-period 3m, cloudflared's maximum). --edge-ip-version auto: works on IPv4, IPv6 and dual-stack nodes
 # (an instance on IPv6-only nodes may patch it to "6").
 apiVersion: apps/v1

@@ -1,7 +1,6 @@
 name: chat
-# The chat runtime (docs/CHAT.md): typecheck and tests against a real Postgres, the UI typecheck and build, then the
-# images ghcr.io/de0ch/jarvis3-chat (web, egress, tools + UI + claw pinned in chat/claw.json) and
-# ghcr.io/de0ch/jarvis3-sandbox, smoke-tested, pushed on main as :<commit 12> and on a chat-v* tag as :<tag> too;
+# The chat runtime (docs/CHAT.md): typecheck and tests against a real Postgres, then the images
+# ghcr.io/de0ch/jarvis3-chat (web, egress, tools) and ghcr.io/de0ch/jarvis3-sandbox (Claude Code and the sandbox agent), smoke-tested, pushed on main as :<commit 12> and on a chat-v* tag as :<tag> too;
 # and the same sandbox as the E2B template jarvis3-sandbox:<commit 12> (the "e2b" sandbox provider), smoke-tested in a
 # real E2B sandbox (secret E2B_API_KEY: the instance's E2B project; skipped without it).
 on:
@@ -44,18 +43,11 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: chat/package-lock.json
-      - name: server side
+      - name: typecheck and tests
         working-directory: chat
         run: |
           npm ci
           npm test
-      - name: UI
-        working-directory: chat/ui
-        run: |
-          npm ci
-          npm run typecheck
-          npm run build
-          test -s ../ui-dist/index.html
 
   images:
     runs-on: ubuntu-latest
@@ -79,8 +71,6 @@ jobs:
           fi
           echo "chat=$chat" >> "$GITHUB_OUTPUT"
           echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
-          echo "claw_url=$(jq -r .url chat/claw.json)" >> "$GITHUB_OUTPUT"
-          echo "claw_sha=$(jq -r .sha256 chat/claw.json)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - name: build the sandbox image
         uses: docker/build-push-action@v6
@@ -90,23 +80,13 @@ jobs:
           tags: jarvis3-sandbox:test
           cache-from: type=gha,scope=sandbox-image
           cache-to: type=gha,mode=max,scope=sandbox-image
-      # sandbox_environment (tools role) serves the sandbox image's package list: copied out of the image just built
-      - name: the sandbox image's package list
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/sandbox-env"
-          docker run --rm --entrypoint cat jarvis3-sandbox:test /opt/agent/packages.txt > "$RUNNER_TEMP/sandbox-env/packages.txt"
-          grep -c . "$RUNNER_TEMP/sandbox-env/packages.txt"
       - name: build the chat image
         uses: docker/build-push-action@v6
         with:
           context: chat
-          build-contexts: sandbox-env=${{ runner.temp }}/sandbox-env
           load: true
           tags: jarvis3-chat:test
           build-args: |
-            CLAW_URL=${{ steps.tags.outputs.claw_url }}
-            CLAW_SHA256=${{ steps.tags.outputs.claw_sha }}
             CHAT_COMMIT=${{ github.sha }}
           cache-from: type=gha,scope=chat-image
           cache-to: type=gha,mode=max,scope=chat-image
@@ -116,18 +96,17 @@ jobs:
           for i in jarvis3-chat:test jarvis3-sandbox:test; do
             docker image inspect $i --format '{{.Size}}' | awk -v i=$i '{printf "%s unpacked: %.0f MB\n", i, $1/1e6}' | tee -a "$GITHUB_STEP_SUMMARY"
           done
-          docker run --rm --entrypoint sh jarvis3-chat:test -c 'test "$(id -u)" = 1000 && test -s /app/ui-dist/index.html && /usr/local/bin/claw --version && command -v pdftoppm && command -v pdfinfo && command -v heif-dec && command -v rsvg-convert && test -x src/bin/jarvis-bash && test -x src/bin/jarvis-mcp-bridge'
+          docker run --rm --entrypoint sh jarvis3-chat:test -c 'test "$(id -u)" = 1000 && test -s egress-allowlist/allow.txt'
           # an unknown role refuses to start
           if docker run --rm -e JARVIS_ROLE=nope jarvis3-chat:test; then exit 1; fi
-          # the sandbox agent answers its health check
+          # the sandbox agent answers its health check; Claude Code and the Python tools are in the image
           docker run -d --name sbx -e JARVIS_EXEC_TOKEN=t -p 17070:7070 jarvis3-sandbox:test
           for i in $(seq 30); do curl -fsS localhost:17070/healthz && break; sleep 1; done
-          curl -fsS -H 'authorization: Bearer t' -H 'content-type: application/json' -d '{"command":"python3 -c \"import pandas; print(1)\" && id -u"}' localhost:17070/exec | tee /dev/stderr | jq -e '.exit_code == 0'
+          curl -fsS -H 'x-jarvis-exec-token: t' localhost:17070/healthz | jq -e '.ok == true'
           docker rm -f sbx
+          docker run --rm --entrypoint sh jarvis3-sandbox:test -c 'claude --version && python3 -c "import pandas" && test "$(id -u)" = 1000 && test -d /workspace'
           # Docker is in the image; outside our own hosts (no sbx-init) the wrapper says it isn't available
           docker run --rm --entrypoint sh jarvis3-sandbox:test -c 'test -x /usr/bin/dockerd && test -x /usr/bin/containerd && test -f /opt/agent/sbx-init.mjs && setpriv --version >/dev/null && out=$(docker ps 2>&1); echo "$out" | grep -q "not available"'
-          # sandbox_environment's files are in the chat image (the package list from the sandbox image)
-          docker run --rm --entrypoint sh jarvis3-chat:test -c 'grep -q "^FROM node" sandbox-env/Dockerfile && grep -q "^jq " sandbox-env/packages.txt && grep -q "^pandas==" sandbox-env/packages.txt'
           # installing packages (docs/SANDBOX-VM.md "Installing packages"): sudo is set up for uid 1000 and keeps the
           # proxy variables; apt-get/apt are the wrappers; apt asks nothing
           docker run --rm --user 0 --entrypoint sh jarvis3-sandbox:test -c 'test "$(command -v apt-get)" = /usr/local/bin/apt-get && test -u /usr/bin/sudo && sudo -n -l -U node | grep -q "NOPASSWD: ALL" && sudo -n -l -U node | grep -q HTTPS_PROXY && apt-config dump | grep -q "Assume-Yes \"true\"" && echo $PATH | grep -q /home/sandbox/.local/bin'
@@ -148,12 +127,9 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: chat
-          build-contexts: sandbox-env=${{ runner.temp }}/sandbox-env
           push: true
           tags: ${{ steps.tags.outputs.chat }}
           build-args: |
-            CLAW_URL=${{ steps.tags.outputs.claw_url }}
-            CLAW_SHA256=${{ steps.tags.outputs.claw_sha }}
             CHAT_COMMIT=${{ github.sha }}
           cache-from: type=gha,scope=chat-image
       - name: push the sandbox image

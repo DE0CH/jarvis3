@@ -1,13 +1,14 @@
-# The Jarvis 3 chat runtime (docs/CHAT.md): web, egress, tools and the tunnel connector in namespace `jarvis`.
-# Sandbox pods do not run here: they run in a separate cluster (namespace `jarvis-sandbox` there), which `web` reaches
-# with the credentials in Secret `sandbox-cluster` (see web.yaml).
+# The Jarvis 3 chat runtime (docs/CHAT.md): web (the sandbox manager behind /internal/cc/*), egress, tools and the
+# tunnel connector in namespace `jarvis`. The UI that staff use (the CloudCLI fork DE0CH/claudecodeui and its router)
+# is the instance's own (e.g. DE0CH/YYC yyc-ai/deploy/ui.yaml), and so are sandbox hosts (provider vm).
 #
 # An instance (e.g. DE0CH/YYC yyc-ai/deploy) uses this as a remote base pinned to a commit and supplies:
 # - `images:` mapping the placeholder `jarvis3-chat` to ghcr.io/de0ch/jarvis3-chat:<sha12>;
-# - ConfigMaps `jarvis-config` (config.json, system-prompt.md) and `jarvis-brand` (logo.svg and/or logo.png);
-# - Secrets `web-env` (DATABASE_URL, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY), `egress-env` (DATABASE_URL and every
-#   variable an egress route injects, e.g. OPENROUTER_API_KEY), `tools-env` (DATABASE_URL and the tool key variables
-#   the config names), `tunnel` (key `token`), `sandbox-cluster` (keys `server`, `ca.crt`, `token`);
+# - ConfigMap `jarvis-config` (config.json, system-prompt.md);
+# - Secrets `web-env` (DATABASE_URL, JARVIS_CC_TOKEN), `egress-env` (DATABASE_URL and every variable an egress route
+#   injects, e.g. OPENROUTER_API_KEY), `tools-env` (DATABASE_URL and the tool key variables the config names),
+#   `tunnel` (key `token`), and `sandbox-cluster` (keys `server`, `ca.crt`, `token`) for provider kubernetes;
+# - its UI and a NetworkPolicy admitting the UI pods to web:8080;
 # - the PriorityClass `serving` (or a patch of priorityClassName), and imagePullSecrets when the images are private.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

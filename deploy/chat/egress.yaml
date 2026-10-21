@@ -1,5 +1,5 @@
-# egress (docs/CHAT.md, "egress"): the forward proxy and package mirror for sandboxes on 3128 and the model gateway
-# (/x/model) for claw; /healthz and /metrics on 9090. On SIGTERM /healthz turns 503 and open requests and tunnels get
+# egress (docs/CHAT.md, "egress"): the forward proxy and package mirror for sandboxes on 3128, and the credential
+# routes (/x/<route>: the model for Claude Code, our tools' MCP endpoint); /healthz and /metrics on 9090. On SIGTERM /healthz turns 503 and open requests and tunnels get
 # EGRESS_DRAIN_SECONDS (120) < the 150 s grace period.
 apiVersion: apps/v1
 kind: Deployment

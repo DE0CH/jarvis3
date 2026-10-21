@@ -1,5 +1,5 @@
-# tools (docs/CHAT.md, "tools"): the MCP server claw reaches through jarvis-mcp-bridge, holding the tool keys (read-only
-# tools only). An upstream call may take up to 2 minutes, so the drain (JARVIS_DRAIN_MS, 150 s) and the grace period
+# tools (docs/CHAT.md, "tools"): the MCP server Claude Code in a sandbox reaches through egress (route `tools`), holding
+# the tool keys (read-only tools only). An upstream call may take up to 2 minutes, so the drain (JARVIS_DRAIN_MS, 150 s) and the grace period
 # (180 s) let it finish before the pod stops.
 apiVersion: apps/v1
 kind: Deployment
