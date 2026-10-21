@@ -122,11 +122,16 @@ WireGuard key and TLS certificate, so nothing else changed:
   `sandbox.cpu`, `vm_hosts.max_sandboxes`). YYC: `sandbox.memory` 1Gi, cpu 1; hub reserve 1 GiB → 2 slots on the
   cx23; an m7i.xlarge has 15. `maxActive` 10. `spareSlots` 0 while the hub is the cx23 (else every second
   conversation would keep an AWS host up); 1 once the CX43 runs.
-- Scale out: when placement finds no room, or as soon as someone types in a conversation without a sandbox
-  (`POST /api/typing` → kv `sandbox_demand:<email>`, counted 2 min) while free slots < `spareSlots` + those people:
-  one AWS host at a time, at most `aws.maxHosts` (3); a 4th only while a host is `retiring` and its sandboxes have
-  nowhere to go. Sandboxes themselves are made only at a turn's first bash command (docs/CHAT.md, "Sandbox
-  lifecycle"). A full pool answers "all sandbox hosts are full" at once (the bash command says so).
+- Scale out (capacity planning, `VmController.launch`/`plan`): **available** = free slots on ready hosts (the only
+  room placement uses: never a booting host), **pending** = the slots of booting hosts, **planned** = available +
+  pending; **need** = `spareSlots` + people typing in a conversation without a sandbox (`POST /api/typing` → kv
+  `sandbox_demand:<email>`, counted 2 min) + sandboxes waiting for a host. want = need − planned; want > 0 starts
+  ceil(want / slots per host) AWS hosts at once, at most `aws.maxHosts` (3; a 4th only while a host is `retiring` and
+  its sandboxes have nowhere to go). Decided and recorded under one Postgres lock, booting rows inserted before
+  RunInstances, so the next signal on any replica already counts their slots: two people typing → one host; a burst
+  larger than a host → enough hosts at once. Sandboxes themselves are made only at a turn's first bash command
+  (docs/CHAT.md, "Sandbox lifecycle"). With every host at `maxHosts` the bash command says "all sandbox hosts are
+  full". The monitor's scaler panel shows available, pending and need.
 - Release (one rule): an AWS host is terminated as soon as it has no sandbox and is older than
   `vm.minHostLifetimeSeconds` (900 = 15 min, from launch). Nothing else keeps or ends it.
 - Packing (`chat/src/web/packing.ts`, a pure function; host age plays no part in it):
@@ -140,8 +145,10 @@ WireGuard key and TLS certificate, so nothing else changed:
   ```
 
   One migration per scaler pass (the plan is recomputed each pass); an emptied host goes by the release rule. No
-  move rate limit: a move only happens when it lowers the number of hosts in use. During a turn only with
-  `migration.duringTurns` (default false until verified live); across clouds only if CPU use < `migration.idleCpu`
+  move rate limit: a move only happens when it lowers the number of hosts in use. During a turn too with
+  `migration.duringTurns` (YYC: true since 2026-10-21, verified live: a command printing every 100 ms for 60 s and a
+  pip install through egress, moved AWS→AWS and back mid-command: all 600 lines, no duplicates, exit code and pip
+  intact, pauses 102 and 84 ms); across clouds only if CPU use < `migration.idleCpu`
   and with `--migrate-max-downtime` = `migration.maxDowntimeMs` (500 ms): a move that won't converge leaves the
   sandbox running where it is (`migration-skipped`). Each move is recorded as `pack` (with the plan) and `migration`.
   A `retiring` host (the operator's) has its sandboxes moved off the same way.
