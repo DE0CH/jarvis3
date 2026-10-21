@@ -41,6 +41,10 @@ spec:
             - {name: HEALTH_PORT, value: "9090"}
             - name: POD_NAMESPACE
               valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            # provider "vm": each egress pod announces its address; the sandbox hub sends the egress VIP's
+            # connections to these (docs/SANDBOX-VM.md, "Cross-cloud network")
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
             - {name: JARVIS_CACHE_DIR, value: /var/cache/jarvis-egress}
             - {name: EGRESS_DRAIN_SECONDS, value: "120"}
             - name: DATABASE_URL
