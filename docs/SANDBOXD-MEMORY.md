@@ -147,6 +147,8 @@ Dependencies (all permissive): rustls 0.23 (Apache-2.0/ISC/MIT) with ring 0.17 (
 - AWS: launch template version 4 = the new AMI. The live sandbox on the last Node host was moved by retiring that
   host: the scaler launched a Rust host (active 29.6 s after launch; Node hosts: 40-47 s) and live-migrated it Node →
   Rust (5.6 s, 2 rounds, final copy 32 ms, pause 579 ms); the probe saw 1 of 711 answers missing (the switch).
+  Then template version 5 = `ami-0dfe8af13bbc16ecd` (release `sandboxd-570eeac5d472`, with runsc `--allow-suid`); the
+  older AMIs (incl. the last Node one) were pruned.
 
 ## Changes in behaviour (all additive)
 
