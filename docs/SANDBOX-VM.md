@@ -519,9 +519,10 @@ Deyao (2026-10-21): "apt pip and other packages need to be installable on the sa
 **Order of a rollout:** sandboxd with `--allow-suid` first (new AMI, retire the AWS hosts), then the sandbox image
 (`sandbox.image`).
 
-**The Rust sandboxd must replicate:** the runsc flag `--allow-suid` in the global flags (same list as now
-otherwise); the OCI spec unchanged (root, `DOCKER_CAPS` in bounding/effective/permitted, no `noNewPrivileges`, no
-user namespace). Everything else lives in the image.
+**sandboxd's part** (both `src/runsc.ts` and the Rust `daemon/src/runsc.rs`, which the hosts run): the runsc flag
+`--allow-suid` in the global flags (same list as before otherwise, tested); the OCI spec unchanged (root,
+`DOCKER_CAPS` in bounding/effective/permitted, no `noNewPrivileges`, no user namespace). Everything else lives in
+the image.
 
 ## Measured (2026-10-20/21)
 
