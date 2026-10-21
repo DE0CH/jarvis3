@@ -77,6 +77,14 @@ WireGuard key and TLS certificate, so nothing else changed:
   what arrives on wg0 to pods over the private network (`ip rule iif wg0 lookup 51822`: 10.244.0.0/16 via 10.0.0.1,
   as from the old hub; Hetzner's per-node pod routes deliver it) and pins its source with an identity SNAT in its own
   table (`keep_source`, `priority srcnat - 10`: a connection's NAT is bound there, so iptables' masquerade never runs).
+- **The node's own pods** (fixed 2026-10-21): a pod on the gateway node reaching a sandbox leaves through wg0, where
+  flannel's masquerade would give it wg0's address 10.201.0.1, which the sandboxes' lock drops; the ui pod scheduled
+  there timed out on every sandbox. `keep_source` also SNATs `oifname wg0, 10.244.0.0/16 → 10.200.0.0/16` to the
+  node's private address. Checked from a pod on every node.
+- **Routes survive systemd-networkd** (2026-10-21): networkd restarted on the node and dropped the routes it hadn't
+  made (`10.200.0.0/16 dev wg0`, table 51822's pod route), cutting every sandbox off the controller and egress.
+  gateway.sh and host setup set `ManageForeignRoutes=no` / `ManageForeignRoutingPolicyRules=no`, and sandboxd checks
+  its routes (and each sandbox's /32) every 10 s and re-makes missing ones (logged "host routes were removed").
 - A single point like the hub was: if the node is down, sandboxes can't reach egress or the controller until it is
   back (sandboxd restarts with it; wg0 and the nft table survive a sandboxd restart). Moving the gateway = run
   gateway.sh on another node with the same `/etc/sbx` files, point the Hetzner route and firewall at it, stop the old.
@@ -115,7 +123,9 @@ WireGuard key and TLS certificate, so nothing else changed:
   `/sbx/<name>` (memory = `sandbox.memory`, CPU quota = `sandbox.cpu`, pids 4096), its own netns. Its files
   (docs/CLAUDE-CODE.md "Storage"): root = Linux overlayfs (the image read-only + `upper/` on the sandbox's 5 GiB ext4
   scratch file), `/tmp` and `/var/lib/docker` on the same scratch, `/workspace` and `~/.claude` from the host's JuiceFS
-  mount (a sandbox with a workspace or user is refused, 503, on a host without it). The
+  mount (a sandbox with a workspace or user is refused, 503, on a host without it; `sbx-jfs.service` counts as started
+  only once the mount is there and sandboxd starts after it, so a freshly launched host never refuses one). `ws/` and
+  `users/` belong to uid 1000 (sandboxd sets it), so the UI can remove a deleted conversation's folder. The
   first process is `sbx-init.mjs` (root inside gVisor, the Docker capabilities exist only there): it writes
   `/etc/hosts` and apt's proxy setting, starts the agent through setpriv as uid 1000 with no capabilities (bounding
   set kept, no no_new_privs: sudo works inside, see "Installing packages"), and dockerd only when the `docker` wrapper
