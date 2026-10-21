@@ -70,6 +70,13 @@ WireGuard key and TLS certificate, so nothing else changed:
   back, wg0 may reach only sandboxd's API and image ports on the node itself (not the kubelet or anything else), the
   egress VIP only translated. The node's pods, kube-proxy, flannel and WARP keep their own rules. No packages, sysctl
   (beyond ip_forward, already on) or nftables.service are touched.
+- **Sandbox sources through a k3s node** (fixed 2026-10-21, after AWS sandboxes' connections to the egress VIP timed
+  out): flannel masquerades every non-pod source going to a pod (`! -s 10.244.0.0/16 -d 10.244.0.0/16 -j MASQUERADE`),
+  so egress saw the node's flannel address and its NetworkPolicy (10.200.0.0/16 only) dropped the SYN; and flannel's
+  own WireGuard would drop a 10.200.x source anyway (not in the node peer's allowed IPs). The gateway therefore sends
+  what arrives on wg0 to pods over the private network (`ip rule iif wg0 lookup 51822`: 10.244.0.0/16 via 10.0.0.1,
+  as from the old hub; Hetzner's per-node pod routes deliver it) and pins its source with an identity SNAT in its own
+  table (`keep_source`, `priority srcnat - 10`: a connection's NAT is bound there, so iptables' masquerade never runs).
 - A single point like the hub was: if the node is down, sandboxes can't reach egress or the controller until it is
   back (sandboxd restarts with it; wg0 and the nft table survive a sandboxd restart). Moving the gateway = run
   gateway.sh on another node with the same `/etc/sbx` files, point the Hetzner route and firewall at it, stop the old.
