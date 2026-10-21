@@ -6,10 +6,35 @@ kind: ServiceAccount
 metadata:
   name: web
   namespace: jarvis
-# No Role here: sandbox pods are created in the sandbox cluster with the token in Secret `sandbox-cluster`. The
-# token stays mounted only because the current image builds its Kubernetes client from the pod's own service
-# account files at startup; this account has no RoleBinding, so it can do nothing in this cluster.
+# In this namespace the account may only read Deployments (Role web-monitor below: the admin monitor's
+# replicas and versions). Sandbox pods are created by the instance's own Role in the sandbox namespace (or in a
+# separate sandbox cluster with the token in Secret `sandbox-cluster`).
 automountServiceAccountToken: true
+---
+# the admin monitor (docs/CHAT.md, "Admin monitor"): replicas, readiness and images of this namespace's Deployments
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: web-monitor
+  namespace: jarvis
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: web-monitor
+  namespace: jarvis
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: web-monitor
+subjects:
+  - kind: ServiceAccount
+    name: web
+    namespace: jarvis
 ---
 apiVersion: apps/v1
 kind: Deployment
