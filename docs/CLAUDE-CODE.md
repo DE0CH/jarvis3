@@ -109,6 +109,11 @@ the host's minimum lifetime: an empty host goes once it is 15 minutes old, as an
 sandbox's idle time and does not make the sandbox itself (that waits for the message, and takes seconds on a ready
 host).
 
+Measured 2026-10-21 (no host up, a fresh conversation, "Reply with just the word: ready", Sonnet 5.5, time from send
+to the reply): cold 111.5 s; typing 30 s before sending 76.5 s; typing 90 s before sending 12.1 s. A host is `active`
+36–45 s after launch, then fetches the sandbox image from the gateway (about 45 s, started at once by the scaler)
+before its first sandbox starts; after that a sandbox is ready in about 5 s and Claude Code answers about 20 s later.
+
 ## Deploying a change
 
 - **The fork (UI or its server):** push to DE0CH/claudecodeui `main`; its `jarvis-image` workflow builds
