@@ -146,8 +146,8 @@ WireGuard key and TLS certificate, so nothing else changed:
 - Scale out (capacity planning, `VmController.launch`/`plan`): **available** = free slots on ready hosts (the only
   room placement uses: never a booting host), **pending** = the slots of booting hosts, **planned** = available +
   pending; **need** = `spareSlots` + people who may need a sandbox soon (kv `sandbox_demand:<email>`, counted 2 min;
-  nothing sends that signal since the old chat UI was retired, so today it is always 0) + sandboxes waiting for a
-  host. want = need − planned; want > 0 starts
+  sent by `POST /internal/cc/warm` when someone types in the CloudCLI composer in a conversation without a live
+  sandbox, docs/CLAUDE-CODE.md "Warming") + sandboxes waiting for a host. want = need − planned; want > 0 starts
   ceil(want / slots per host) AWS hosts at once, at most `aws.maxHosts` (3; a 4th only while a host is `retiring` and
   its sandboxes have nowhere to go). Decided and recorded under one Postgres lock, booting rows inserted before
   RunInstances, so the next request on any replica already counts their slots: a burst larger than a host → enough

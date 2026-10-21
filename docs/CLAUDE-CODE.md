@@ -95,6 +95,20 @@ browser ─▶ Cloudflare Access ─▶ Worker yyc-ai (edge/worker.js) ─▶ tu
 - **JuiceFS volume `yyc-ai`:** metadata in Neon `jfs_yyc_ai`, data in the Hetzner bucket `yyc-ai-files` under
   `yyc-ai/`; mounted by every sandbox host at `/var/lib/sbx/jfs` and in the UI pods at `/jfs` (CSI driver).
 
+## Warming: typing starts a host
+
+With no AWS host up, a conversation's first message waits for one to boot (about 2 minutes). So typing warms it:
+the composer (`src/modules/chat/hooks/useChatComposerState.ts` and `src/modules/chat/utils/jarvisWarm.ts` in the
+fork) calls the server's `POST /api/jarvis/warm {sessionId?}` when the user types, at most once per 30 s per
+conversation (a new chat counts as one conversation until it has an id); the server
+(`server/modules/jarvis/jarvis-warm.routes.ts`, only in Jarvis mode, throttled the same way) answers at once and forwards it to
+web's `POST /internal/cc/warm {owner, conversation?}`. Web makes nothing: when the conversation has no live sandbox it
+records a demand hint (kv `sandbox_demand:<owner>`, counted 2 minutes) and the scaler, every 5 s, starts an AWS host
+when no host has a free slot (docs/SANDBOX-VM.md, "Scaler"). A warm that is never followed by a message costs at most
+the host's minimum lifetime: an empty host goes once it is 15 minutes old, as any other. A warm does not reset a live
+sandbox's idle time and does not make the sandbox itself (that waits for the message, and takes seconds on a ready
+host).
+
 ## Deploying a change
 
 - **The fork (UI or its server):** push to DE0CH/claudecodeui `main`; its `jarvis-image` workflow builds
