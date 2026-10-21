@@ -3,7 +3,7 @@
 Status: **built and live** for YYC AI since 2026-10-21 (DE0CH/YYC `yyc-ai/deploy`). This is the third sandbox
 provider next to `kubernetes` and `e2b` (docs/CHAT.md, "Sandbox providers"). It runs on our own VMs ("hosts") and
 live-migrates a running sandbox from one host to another, so the scaler can empty a host and give it back. Code: host
-agent `chat/sandboxd/` (`src/`, `host/setup.sh`, `host/make-certs.sh`, `aws/infra.sh`), controller and scaler
+agent `chat/sandboxd/` (`daemon/` in Rust, `host/setup.sh`, `host/make-certs.sh`, `aws/infra.sh`), controller and scaler
 `chat/src/web/sandbox-vm.ts` + `vm-clients.ts`; the gVisor fork is [DE0CH/gvisor](https://github.com/DE0CH/gvisor)
 (branch `main`, releases `precopy-*`, current `precopy-20261021.1`). The prototype scripts stay in
 `chat/sandboxd/proto/`. What was built, and where it differs from the design below: "Built (2026-10-21)".

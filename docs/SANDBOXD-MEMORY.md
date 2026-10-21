@@ -6,8 +6,14 @@ Deyao (2026-10-21): "I don't want the controller to crash, so something with a p
 On a sandbox host every MiB is a sandbox's: sandboxd must never grow, swap or OOM.
 
 **The bound (defaults, `sandboxd budget` prints it for a host.json): resident memory ≤ 31.5 MiB, cgroup charge
-≤ 44.0 MiB.** Measured: 29.3 MiB RSS, flat to the byte, idle and under the soak test below (the Node sandboxd: 88 MiB
-idle, 153 MiB peak under the same load; 105 MiB in production on the hub).
+≤ 44.0 MiB.** Measured: 29.3-30.8 MiB RSS, flat to the byte, idle and under load:
+
+| Where | Node sandboxd (RSS) | Rust sandboxd (RSS) |
+|---|---|---|
+| soak test, same load (this machine) | 88.1 MiB idle, 153.2 MiB peak | 29.30-29.31 MiB the whole run |
+| m7i.xlarge, 6 sandboxes of 1 GiB, a busy sandbox migrated A→B→A, restart under them | – | 29.41-29.43 MiB; its cgroup ≤ 29.4 MiB |
+| production hub (cx23, 2026-10-21) / gateway (k3s node) | 105 MiB / 109.7 MiB (cgroup 93-99 MiB) | gateway 30.7 MiB (cgroup 29.3 MiB) |
+| production AWS host after a live migration onto it | – | 30.85 MiB, `stray`/`overflow`/`failed` 0 |
 
 What follows: how the bound is built (the budget), how it is enforced (four mechanisms), how it is checked (tests),
 and what it does not cover.
@@ -128,6 +134,19 @@ Dependencies (all permissive): rustls 0.23 (Apache-2.0/ISC/MIT) with ring 0.17 (
   MemTotal − reserve.
 - Page cache sandboxd causes (its state files, logs) is charged to it but reclaimable; it is inside the 8 MiB kernel
   allowance and can't cause an OOM.
+
+## Rollout (2026-10-21)
+
+- Staging: two m7i.xlarge from the new AMI (`ami-0ddc536e8e30383e4`, release `sandboxd-954535256795`): the numbers
+  above; migration A→B 1.4 s (final copy 51 ms, restore 83 ms), back 0.9 s (85 / 41 ms), the 300 MiB writer kept its
+  PID and counted on; sandboxd restarted under 6 running sandboxes (same sentry PIDs); gateway mode on one of them
+  (egress targets read back from the live nft table after deleting the file); image server 449 MB streamed.
+- Gateway (`yyc-pool-apps-worker2`): `gateway.sh` with the release; a probe of a live AWS sandbox's agent through
+  the gateway every 0.2 s during the swap: 45/45 answered; nft table byte-identical before/after; the controller's
+  next calls (peers) went to the Rust daemon.
+- AWS: launch template version 4 = the new AMI. The live sandbox on the last Node host was moved by retiring that
+  host: the scaler launched a Rust host (active 29.6 s after launch; Node hosts: 40-47 s) and live-migrated it Node →
+  Rust (5.6 s, 2 rounds, final copy 32 ms, pause 579 ms); the probe saw 1 of 711 answers missing (the switch).
 
 ## Changes in behaviour (all additive)
 
