@@ -91,7 +91,7 @@ WireGuard key and TLS certificate, so nothing else changed:
   learns their endpoints from the handshakes. The hub's peer list (each AWS host's /32 plus the /32s of its
   sandboxes) is rewritten by the controller after every placement and migration.
 
-### sandboxd (`chat/sandboxd/src`, Node 22 type stripping, no npm packages)
+### sandboxd (`chat/sandboxd/daemon`, Rust, one static binary with a fixed memory budget: docs/SANDBOXD-MEMORY.md)
 
 - API (HTTPS, TLS 1.3, mutual TLS; only the client certificate CN `sandbox-controller` is accepted; listens on the
   host's wg0 address): `GET /v1/host`, `PUT /v1/peers`, `PUT /v1/egress` (hub), `POST /v1/images`,
@@ -106,8 +106,8 @@ WireGuard key and TLS certificate, so nothing else changed:
   is `sbx-init.mjs` (root inside gVisor, the Docker capabilities exist only there): it starts the agent through
   setpriv as uid 1000 with no capabilities and no_new_privs, and dockerd only when the `docker` wrapper asks.
   `/var/lib/docker` is a tmpfs in the sandbox's memory, so images migrate with it.
-- Host setup: `host/setup.sh hub|burst [image]` (idempotent: Node, the fork's runsc checked against SHA256SUMS, crane,
-  sandboxd, sysctls, the tmpfs for migration images, units, logrotate, the image unpacked). Burst images get each
+- Host setup: `host/setup.sh hub|burst [image]` (idempotent: the fork's runsc checked against SHA256SUMS, crane,
+  sandboxd's binary from `bin/` (`host/fetch-sandboxd.sh`: the CI release `sandboxd-<commit>`, checked), sysctls, the tmpfs for migration images, units, logrotate, the image unpacked). Burst images get each
   instance's `host.json`, WireGuard key and TLS files from EC2 user data at first boot (`sbx-userdata.service`).
 - PKI: `host/make-certs.sh` (CA, hub and AWS server certificates "sandboxd", controller client certificate); in the
   `yyc` store as `YYC_SBX_*` (the CA key only there).
@@ -169,11 +169,12 @@ WireGuard key and TLS certificate, so nothing else changed:
 
 ### Operations
 
-- **Upgrade sandboxd or runsc on the hub:** `tar -C chat/sandboxd -cf - host src | ssh <hub via yyc-master1> 'tar -x
-  -C /root/sbx && bash /root/sbx/host/setup.sh hub <image>'` (GV=<release> for another fork release). Running
-  sandboxes keep running on their runsc; new ones use the new runsc. A migration needs the same runsc on both ends:
-  upgrade the hub, then bake a new AMI and retire the AWS hosts (`update vm_hosts set status='retiring'`), whose
-  sandboxes drain to the hub or a fresh host.
+- **Upgrade sandboxd:** CI (workflow `sandboxd`) publishes release `sandboxd-<commit 12>` for every change of
+  `chat/sandboxd/daemon`. AWS hosts: a new AMI (below; `aws/infra.sh ami` takes the newest release, or
+  `SANDBOXD_RELEASE=`), new hosts use it. The gateway: `host/fetch-sandboxd.sh <dir>` next to a copy of `host/`, then
+  `gateway.sh` there. A restart never touches sandboxes (KillMode=process) nor the gateway's wg0/nft (egress targets
+  are kept across restarts). Upgrade runsc: `GV=<release>`, then a new AMI; a migration needs the same runsc on both
+  ends, so retire the old hosts (`update vm_hosts set status='retiring'`), whose sandboxes move to fresh hosts.
 - **New AMI** (new sandboxd/runsc, or to pre-cache a new sandbox image): `aws/infra.sh ami <image>`, `aws/infra.sh
   template <ami>`, `aws/infra.sh prune-amis`. Running hosts are unaffected; new hosts use it.
 - **Add capacity:** raise `aws.maxHosts` (the quota allows 3 m7i.xlarge + 1); a bigger hub: see below.
