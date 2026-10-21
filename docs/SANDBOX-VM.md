@@ -351,6 +351,46 @@ For the record (measured 2026-10-20): Cloud Hypervisor's pre-copy with gVisor in
 1 GiB busy and a TCP peer saw ~255 ms; it needs nested virtualisation (m7i has it at no extra price; Hetzner Cloud
 doesn't). The scripts (`vm.sh`, `vm-migrate.sh`, `vm-run-test.sh`) stay in the prototype directory.
 
+### Host memory (measured on the cx23 hub, 2026-10-21)
+
+What a host needs outside its sandboxes, and what a sandbox costs outside its own limit:
+
+- **Everything a sandbox runs is inside its cgroup** `/sbx/<name>` with the sandbox's limit: the runsc `exe`, the
+  sentry and the gofer, the sandbox's memory (a memfd, `shmem`), and the kernel memory and page tables they cause
+  (idle sandbox: ~40 MiB in total, of it ~3.3 MiB kernel and ~2 MiB page tables; a 400 MB process inside: 447 MiB,
+  ~5.5 MiB kernel and ~3 MiB page tables). Outside it: only runsc's `runsc-fd-parking` sidecar (~8 KiB RSS, in
+  sandboxd's unit) and the netns/veth/nft objects. With three sandboxes filled to ~447 MiB the host side did not
+  move (498 vs 493 MiB), so the overhead outside the limit is ~0.
+- **Host side** (MemTotal − MemAvailable − the sandboxes' cgroups): 493-548 MiB. Userspace PSS outside `/sbx`
+  ~195 MiB: sandboxd (Node) RSS 104-105 MiB / PSS ~100 (its cgroup: ~50-64 MiB, ~49 MiB anonymous; the rest is
+  Node's binary, shared page cache), multipathd 23, unattended-upgrades 17, systemd 6, journald/resolved/sshd/
+  networkd/udevd/polkitd 3-4 each; WireGuard is a kernel module (no process). Kernel: SUnreclaim ~62 MiB, vmalloc
+  ~19, stacks ~4, page tables ~2 outside the sandboxes; the zone watermarks hold ~99 MiB (min_free_kbytes 66 MiB) that
+  MemAvailable never counts; the rest is hot page cache (binaries).
+- **sandboxd under load:** RSS 104.1-105.4 MiB (1 s samples) idle, while creating 4 sandboxes at once, during a
+  Docker build in one and with 3 sandboxes filled: it barely moves (sandboxd only controls; the sandboxes and
+  runsc's migration streams are other processes). Not measured during a live migration (no AWS host was up); a
+  migration's data is streamed by the runsc processes, not by sandboxd.
+- **Migration receive:** `runsc restore --migrate-listen` joins the new sandbox's cgroup before it receives, and the
+  received pages are written at their offsets into that sandbox's `memory.img` (tmpfs, its memory afterwards), so a
+  receive is charged to the incoming sandbox's own limit (pages resent in later rounds overwrite, they don't add)
+  and needs one free slot, nothing from the host side.
+- **Hub, 512 MiB sandboxes:** reserve 700 MiB (`SBX_RESERVE_MIB=700`) → (3819 − 700) / 512 = **6 slots**; the six
+  at their full 512 MiB (3072 MiB) plus the measured host side (~500 MiB) leave ~200-250 MiB. So 6 fits with every
+  sandbox at its limit, not only because sandboxes usually sit far below it.
+- **Isolation** (`host/setup.sh`): sandboxd's unit has MemoryMin 160M (reservation; system.slice gets the same so
+  it takes effect), MemoryHigh 384M (reclaim/throttle, e.g. page cache of image unpacks) and MemoryMax 512M (hard);
+  `/sbx` is capped at MemTotal − reserveMemory (`sbx-cgroup`, run before each sandboxd start; on the hub 3119 MiB),
+  so sandboxes can never take the host's reserve and sandboxd can never take theirs. Checked on the hub: applying it
+  restarted sandboxd and all five running sandboxes kept their PIDs. The limits sit on the unit, not on a slice of
+  its own: the fd-parking sidecars stay in the unit's cgroup (KillMode=process), so systemd could never move the
+  unit to another slice while sandboxes run.
+- **Over its limit a sandbox dies whole.** gVisor reports the cgroup limit as the sandbox's total memory (`free`
+  shows 512 MiB) but has no OOM killer of its own: when sentry + gofer + the sandbox's memory reach the limit, the
+  host kernel's memcg OOM killer kills the sentry (seen: shmem 376 MB + sentry anon 73 MB + file 64 MB). What the
+  sandbox can use is about the limit minus ~50-70 MiB. The files are safe (the workdir lives on the server); the
+  next bash call gets a new sandbox and the reset note.
+
 ## Docker in sandboxes
 
 Design (Deyao, 2026-10-20): Docker is installed in the sandbox image; dockerd starts on demand, on the first
@@ -371,6 +411,12 @@ never use Docker pay nothing for it.
     3.1-3.6 s in total, stopped ~0.55-0.58 s. After every move `docker images` lists the same images and the pulled
     and built images run. The longer stop than an agent-only sandbox comes from dockerd's and containerd's larger
     kernel state (2.8 MB vs 0.4 MB) and, on the box, its slower shared vCPUs.
+- **At 512 MiB per sandbox** (2026-10-21, hub): dockerd starts on demand; `FROM busybox` + `RUN` build, pulled
+  through egress, then `docker run`: 11.3 s, the sandbox's cgroup peaked at 174 MiB. Pulling `python:3.12-slim`
+  (and running it) went over the limit (dockerd + containerd + the layer downloads and the unpacked image, all in the
+  sandbox's memory) and the sandbox was killed (see "Host memory"). So at 512 MiB Docker is good for small images
+  (busybox/alpine-based builds and runs, up to ~150-200 MB of images); Python/Node base images and anything bigger
+  need a larger `sandbox.memory`.
 - **Image size:** adding Docker (docker-ce CLI, dockerd, containerd, runc) to the sandbox image adds roughly
   100-150 MB to it; not built yet.
 
