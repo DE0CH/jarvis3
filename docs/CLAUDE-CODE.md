@@ -21,7 +21,12 @@ CLAUDE.md and MCP config read from disk; this design gives it exactly that, insi
    in a folder without version control). `CLAUDE.md`: the YYC instructions, a paragraph on sandbox release (only
    `/workspace` and the conversation carry over; installs, processes and everything else are gone), and: bulk file
    work (unpacking archives, installs, thousands of small files) goes in `/tmp`, only results in `/workspace` (each
-   file write there is a network round trip, ~25 ms). MCP: our tools role.
+   file write there is a network round trip, ~25 ms). The quota on `/workspace` is 1 GiB and 1,000 files (JuiceFS
+   `quota set --capacity 1 --inodes 1000`); past it writes fail with `Disk quota exceeded` (EDQUOT, errno 122; the
+   text is the OS's own), and `CLAUDE.md` says what that means: put caches, installs and bulk files (`.npm`,
+   `node_modules`, virtualenvs, unpacked archives) in `/tmp` or the home folder, keep only results in
+   `/workspace`. Usage is refreshed every few seconds, so a fast burst overshoots slightly (measured: 1,007 files
+   before the cap held). MCP: our tools role.
    Model calls: `ANTHROPIC_BASE_URL` = egress `/x/model` → OpenRouter with zero data retention, under the shared
    budget, with a short-lived token; the sandbox holds no real key. Licence: Claude Code's commercial terms,
    accepted by Deyao as a one-time exception for this instance.
@@ -30,7 +35,7 @@ CLAUDE.md and MCP config read from disk; this design gives it exactly that, insi
    | What | Paths | Lifetime | Where | On migration |
    |---|---|---|---|---|
    | base system | image (`/usr`, `/opt/py`, `/etc` as shipped) | per image | read-only image on the host disk, shared | nothing (same image on every host) |
-   | persistent work | `/workspace` (1 GiB quota, a plain folder), `~/.claude` | the conversation | JuiceFS (metadata: Neon Postgres; data: the Hetzner bucket), mounted by the host and bind-mounted in | nothing (destination mounts the same volume) |
+   | persistent work | `/workspace` (quota: 1 GiB and 1,000 files, a plain folder), `~/.claude` | the conversation | JuiceFS (metadata: Neon Postgres; data: the Hetzner bucket), mounted by the host and bind-mounted in | nothing (destination mounts the same volume) |
    | installs and scratch | apt, pip, npm -g, `/tmp`, `~/.cache`, Docker's dir | the sandbox | host disk: Linux overlayfs (image as lowerdir, `/sbx/<id>/upper` as upperdir) + host dirs for `/tmp` and Docker, capped at 5 GiB (writes past it fail with ENOSPC) | file-level pre-copy (rsync-style while running, final delta in the pause) |
    | memory | processes | the sandbox | RAM | pre-copied by the gVisor fork |
 
