@@ -528,7 +528,33 @@ Deyao (2026-10-21): "apt pip and other packages need to be installable on the sa
   so hosts with and without the flag can exchange sandboxes during a rollout. A sandbox started before the upgrade
   keeps sudo off until it is reset; the new image on a host without the flag gets "sudo: effective uid is not 0".
 
-**Hardening checks with root inside** (live results in "Measured live").
+**Verified live (2026-10-21, AWS m7i.xlarge hosts from launch template v5 = sandboxd-570eeac5d472, sandbox image
+c7ab936375cd/84658bb83e85, sandboxes made through the real SandboxManager in a web pod):**
+- uid 1000: `sudo -n id` → root; `NoNewPrivs 0`, effective capabilities 0 until sudo.
+- `sudo apt-get update && sudo apt-get install -y ffmpeg sqlite3` (10.2 MB of lists in 1 s through egress; ffmpeg
+  7.1.5 installed, ~40 s), plain `apt-get install -y cowsay iproute2` (the wrapper's sudo), `pip install polars`
+  (2.0.0), `npm i -g cowsay`, uv's `curl -LsSf https://astral.sh/uv/install.sh | sh` (uv on PATH in ~/.local/bin),
+  `docker run --rm busybox`: all work.
+- Hardening checks as root (`sudo curl --noproxy '*'`): metadata 169.254.169.254, the host (169.254.1.1:7443), the
+  gateway's sandboxd and image ports (10.201.0.1:7443/7444), another sandbox (10.200.0.10:7070), 1.1.1.1 and
+  deb.debian.org directly: all time out; only the egress VIP :3128 answers. Through the proxy: pypi.org 200,
+  pastebin.com and an unlisted name refused at CONNECT (403). Root adding a second address (10.200.0.99) and sending
+  from it: dropped by the host's nft lock. The shared image rootfs on the host is never written (checked locally:
+  installs land in the sandbox's own `.gvisor.filestore.<name>`).
+- Live migration (host retired → new host): a sandbox with apt (cowsay, sqlite3), pip polars, npm cowsay, uv, a pulled
+  busybox image and a running counter process: 362 MB sent, 1 round, pause 288 ms; afterwards the marker file, every
+  install, `sudo`, `docker run` and the counter (still counting, same process) were all there.
+- **Limit found: a sandbox whose memory plus root-overlay writes approach `sandbox.memory` dies on restore.** A
+  sandbox with ffmpeg, polars, Docker and a pulled image (784–791 MB sent) was OOM-killed on the target right after
+  the stream ended (EC2 console: `Memory cgroup out of memory: Killed process … (gvisor_sentry)` in the sandbox's 1 GiB
+  cgroup); runsc still listed it as running, the next `ensure()` found it unhealthy and made a fresh sandbox (files
+  restored, the reset note). On the source the overlay's filestore is a host file whose pages are reclaimable; on the
+  target the received image sits in tmpfs charged to the sandbox's cgroup while the restored sandbox's memory and
+  filestore fill up, so the same contents count about twice. Not caused by sudo (pip/npm/`/work` writes go to the
+  same overlay), but apt makes big overlays likelier. Fix candidates (sandboxd/fork, not done here): raise the
+  cgroup's memory.max by the received image's size until restore finishes, or have the receiver write filestore
+  pages straight into the target's filestore file as it does for the main memory file; or have the controller skip
+  moving a sandbox whose memory + overlay use is above ~60 % of its limit.
 
 **Order of a rollout:** sandboxd with `--allow-suid` first (new AMI, retire the AWS hosts), then the sandbox image
 (`sandbox.image`).
