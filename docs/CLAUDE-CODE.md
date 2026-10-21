@@ -110,9 +110,11 @@ sandbox's idle time and does not make the sandbox itself (that waits for the mes
 host).
 
 Measured 2026-10-21 (no host up, a fresh conversation, "Reply with just the word: ready", Sonnet 5.5, time from send
-to the reply): cold 111.5 s; typing 30 s before sending 76.5 s; typing 90 s before sending 12.1 s. A host is `active`
-36–45 s after launch, then fetches the sandbox image from the gateway (about 45 s, started at once by the scaler)
-before its first sandbox starts; after that a sandbox is ready in about 5 s and Claude Code answers 7–20 s later.
+to the reply): cold 111.5 s; typing 30 s before sending 76.5 s; typing 90 s before sending 12.1 s. Then a host,
+`active` 36–45 s after launch, still fetched the sandbox image from the gateway (about 45 s) before its first sandbox,
+because its AMI held an older image. With the AMI holding the pinned image (DE0CH/YYC workflow `yyc-ai-ami`,
+docs/SANDBOX-VM.md "Operations"), measured the same way at 18:52 UTC: cold 79.6 s = host active after 45.4 s, sandbox
+placed 5 s later (no fetch: the gateway sent < 1 MB over wg0, the image is 1.6 GB), ready 9 s later, reply 15 s later.
 
 ## Deploying a change
 
