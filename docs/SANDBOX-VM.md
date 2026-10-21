@@ -5,7 +5,7 @@ provider next to `kubernetes` and `e2b` (docs/CHAT.md, "Sandbox providers"). It 
 live-migrates a running sandbox from one host to another, so the scaler can empty a host and give it back. Code: host
 agent `chat/sandboxd/` (`daemon/` in Rust, `host/setup.sh`, `host/make-certs.sh`, `aws/infra.sh`), controller and scaler
 `chat/src/web/sandbox-vm.ts` + `vm-clients.ts`; the gVisor fork is [DE0CH/gvisor](https://github.com/DE0CH/gvisor)
-(branch `main`, releases `precopy-*`, current `precopy-20261021.1`). The prototype scripts stay in
+(branch `main`, releases `precopy-*`, current `precopy-20261021.2`). The prototype scripts stay in
 `chat/sandboxd/proto/`. What was built, and where it differs from the design below: "Built (2026-10-21)".
 
 Deyao's requirements and decisions (2026-10-20):
@@ -185,6 +185,11 @@ WireGuard key and TLS certificate, so nothing else changed:
   stopped (`ErrPrecopyNotConverging`); the receiver sees a truncated stream and cleans up. Measured: a 256 MiB
   rewriting loop at ~95 % CPU, AWS → hub with D = 10 ms: aborted after 9 rounds (12.6 s, 65 MB still dirty, ~611 ms
   estimated), the workload kept its PID and kept running.
+
+- Release `precopy-20261021.2` adds the directfs close fix (`pkg/sentry/fsimpl/gofer/special_file.go`): a FUSE/NFS
+  file's write-back error (JuiceFS's EDQUOT for a write past a `/workspace` quota, ENOSPC) comes back from `close(2)`,
+  as on Linux; before it, `close` returned OK with the file cut at the quota. The patch is also kept as
+  `chat/sandboxd/gvisor-patches/0001-gofer-close-flush-error.patch`.
 
 ### Measured live (2026-10-21, cx23 hub + m7i.xlarge)
 
