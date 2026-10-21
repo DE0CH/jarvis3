@@ -108,7 +108,7 @@ jobs:
           for i in jarvis3-chat:test jarvis3-sandbox:test; do
             docker image inspect $i --format '{{.Size}}' | awk -v i=$i '{printf "%s unpacked: %.0f MB\n", i, $1/1e6}' | tee -a "$GITHUB_STEP_SUMMARY"
           done
-          docker run --rm --entrypoint sh jarvis3-chat:test -c 'test "$(id -u)" = 1000 && test -s /app/ui-dist/index.html && /usr/local/bin/claw --version && test -x src/bin/jarvis-bash && test -x src/bin/jarvis-mcp-bridge'
+          docker run --rm --entrypoint sh jarvis3-chat:test -c 'test "$(id -u)" = 1000 && test -s /app/ui-dist/index.html && /usr/local/bin/claw --version && command -v pdftoppm && command -v heif-dec && test -x src/bin/jarvis-bash && test -x src/bin/jarvis-mcp-bridge'
           # an unknown role refuses to start
           if docker run --rm -e JARVIS_ROLE=nope jarvis3-chat:test; then exit 1; fi
           # the sandbox agent answers its health check
