@@ -210,8 +210,10 @@ WireGuard key and TLS certificate, so nothing else changed:
   `chat/sandboxd/daemon`. AWS hosts: a new AMI (below; `aws/infra.sh ami` takes the newest release, or
   `SANDBOXD_RELEASE=`), new hosts use it. The gateway: `host/fetch-sandboxd.sh <dir>` next to a copy of `host/`, then
   `gateway.sh` there. A restart never touches sandboxes (KillMode=process) nor the gateway's wg0/nft (egress targets
-  are kept across restarts). Upgrade runsc: `GV=<release>`, then a new AMI; a migration needs the same runsc on both
-  ends, so retire the old hosts (`update vm_hosts set status='retiring'`), whose sandboxes move to fresh hosts.
+  are kept across restarts). Upgrade runsc: `GV=<release>`, then a new AMI; runsc restore refuses another release's
+  checkpoint, so the scaler never moves a sandbox between hosts whose `gvisorRelease` differs (packing and retiring
+  skip such moves). Stop new sandboxes on the old hosts (`update vm_hosts set max_sandboxes = 0 where name = …`):
+  new ones go to fresh hosts from the new AMI, the old hosts keep theirs until they are released and go once empty.
 - **New AMI** (new sandboxd/runsc): `aws/infra.sh ami <image>`, `aws/infra.sh template <ami>` (the template keeps
   only that version), `aws/infra.sh prune-amis` (every sandbox AMI but the template's, with its snapshot). Running
   hosts are unaffected; new hosts use it. An AMI is tagged with what it holds: `image` (the pre-pulled sandbox
