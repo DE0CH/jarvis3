@@ -99,18 +99,18 @@ Deyao's requirements and decisions (2026-10-20):
   lifecycle"). A full pool answers "all sandbox hosts are full" at once (the bash command says so).
 - Release (one rule): an AWS host is terminated as soon as it has no sandbox and is older than
   `vm.minHostLifetimeSeconds` (900 = 15 min, from launch). Nothing else keeps or ends it.
-- Packing (`chat/src/web/packing.ts`, a pure function; hosts within their minimum lifetime are already paid for):
+- Packing (`chat/src/web/packing.ts`, a pure function; host age plays no part in it):
 
   ```
   target = current placement
-  for each host h past its minimum lifetime, least loaded first (ties: its sandboxes moved least recently):
-    place h's sandboxes, biggest first, on other hosts in use or paid for: paid hosts first, then best fit
+  for each host h in use, least loaded first (ties: its sandboxes moved least recently):
+    place h's sandboxes, biggest first, on the other hosts in use, each on the fullest one it fits (best fit)
     all fit -> they go there in the target (h is empty in it); else h keeps them
-  if target uses fewer hosts past their minimum lifetime than now: migrate each sandbox whose target host differs
+  if target uses strictly fewer hosts than now: migrate each sandbox whose target host differs
   ```
 
   One migration per scaler pass (the plan is recomputed each pass); an emptied host goes by the release rule. No
-  move rate limit: a move only happens when it lowers the number of releasable hosts in use. During a turn only with
+  move rate limit: a move only happens when it lowers the number of hosts in use. During a turn only with
   `migration.duringTurns` (default false until verified live); across clouds only if CPU use < `migration.idleCpu`
   and with `--migrate-max-downtime` = `migration.maxDowntimeMs` (500 ms): a move that won't converge leaves the
   sandbox running where it is (`migration-skipped`). Each move is recorded as `pack` (with the plan) and `migration`.
