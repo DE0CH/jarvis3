@@ -207,8 +207,21 @@ WireGuard key and TLS certificate, so nothing else changed:
   `gateway.sh` there. A restart never touches sandboxes (KillMode=process) nor the gateway's wg0/nft (egress targets
   are kept across restarts). Upgrade runsc: `GV=<release>`, then a new AMI; a migration needs the same runsc on both
   ends, so retire the old hosts (`update vm_hosts set status='retiring'`), whose sandboxes move to fresh hosts.
-- **New AMI** (new sandboxd/runsc, or to pre-cache a new sandbox image): `aws/infra.sh ami <image>`, `aws/infra.sh
-  template <ami>`, `aws/infra.sh prune-amis`. Running hosts are unaffected; new hosts use it.
+- **New AMI** (new sandboxd/runsc): `aws/infra.sh ami <image>`, `aws/infra.sh template <ami>` (the template keeps
+  only that version), `aws/infra.sh prune-amis` (every sandbox AMI but the template's, with its snapshot). Running
+  hosts are unaffected; new hosts use it. An AMI is tagged with what it holds: `image` (the pre-pulled sandbox
+  image's manifest digest), `sandboxd` (release), `runsc` (GV); `aws/infra.sh current` shows them.
+- **The AMI follows the sandbox image pin by itself:** a host whose AMI lacks the pinned image fetches it from the
+  gateway before its first sandbox (~45 s on top of boot). DE0CH/YYC's workflow `yyc-ai-ami` runs on every push that
+  changes `yyc-ai/deploy/config.json` (and by hand, `force` to rebake): `aws/infra.sh sync <sandbox.image>` bakes an
+  AMI with the pinned image and the SAME sandboxd and runsc as the current AMI (only the image changes; ~15 min on a
+  t3.large builder, ~USD 0.02), makes it the template's only version and deletes the old AMI + snapshot. Hosts
+  launched before it finishes fetch the image from the gateway as before. It runs as IAM user
+  `yyc-ai-sandbox-ami-ci` (`aws/infra.sh ci-iam`, policy `aws/ami-ci-policy.json`: a t3.large builder tagged
+  `app=yyc-ai-sandbox-build`, its `yyc-ai-sandbox-ami-*` key pair and SSH rule, CreateImage, this template, deleting
+  `app=yyc-ai-sandbox` AMIs/snapshots), keys in YYC's GitHub secrets `YYC_AI_AMI_AWS_*` (`aws/infra.sh ci-iam-key`
+  makes a new one), plus `YYC_SANDBOX_GHCR_DOCKERCONFIGJSON` to read the image. Check by hand:
+  `aws/infra.sh check <image ref>` (exit 1 when stale).
 - **Add capacity:** raise `aws.maxHosts` (the quota allows 3 m7i.xlarge + 1); a bigger hub: see below.
 - **Drain a host by hand:** `update vm_hosts set status = 'retiring' where name = …` (AWS: terminated when empty;
   the hub: its sandboxes move to AWS; set it back to `active` after). **Cap a host:** `max_sandboxes` (0 = no new
