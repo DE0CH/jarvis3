@@ -30,6 +30,11 @@ files synced back) with its own web UI; that code is gone (jarvis3 07e2e49), its
    `node_modules`, virtualenvs, unpacked archives) in `/tmp` or the home folder, keep only results in
    `/workspace`. Usage is refreshed every few seconds, so a fast burst overshoots slightly (measured: 1,007 files
    before the cap held). MCP: our tools role.
+   The staff member's message reaches Claude Code exactly as typed (plus the attachment blocks the UI strips back out
+   of the history): nothing is prepended after a sandbox release, since the managed `CLAUDE.md` already says what
+   survives one. Cleanup for messages saved before 2026-10-22: until then the UI put `[System note: your sandbox was
+   reset since the last message: …]` in front of the first message after a release, and those transcripts still hold
+   it; the fork strips that exact prefix when it serves history, titles and search (`server/modules/jarvis/jarvis-history.ts`).
    Model calls: `ANTHROPIC_BASE_URL` = egress `/x/claude` → OpenRouter with zero data retention, under the shared
    budget, with a short-lived token; the sandbox holds no real key. Licence: Claude Code's commercial terms,
    accepted by Deyao as a one-time exception for this instance.

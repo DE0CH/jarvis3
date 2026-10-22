@@ -176,7 +176,7 @@ WireGuard key and TLS certificate, so nothing else changed:
 - Every decision and migration goes to `vm_events` (launch, active, pack, migration with pause_ms, migration-skipped,
   terminate, host-lost); read them with SQL.
 - Release: `DELETE` (nothing to save: `/workspace` and `~/.claude` are on JuiceFS); the next sandbox mounts the same
-  folders and the UI is told `reset`. A full-memory checkpoint on release was not built.
+  folders. A full-memory checkpoint on release was not built.
 
 ### The fork, as used
 
