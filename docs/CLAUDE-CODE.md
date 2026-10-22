@@ -42,18 +42,14 @@ files synced back) with its own web UI; that code is gone (jarvis3 07e2e49), its
    | installs and scratch | apt, pip, npm -g, `/tmp`, `~/.cache`, Docker's dir | the sandbox | host disk: Linux overlayfs (image as lowerdir, `/sbx/<id>/upper` as upperdir) + host dirs for `/tmp` and Docker, capped at 5 GiB (writes past it fail with ENOSPC) | file-level pre-copy: rsync rounds while it runs, the final delta while it is stopped, before the restore (docs/SANDBOX-VM.md "Scratch on migration") |
    | memory | processes | the sandbox | RAM | pre-copied by the gVisor fork |
 
-   Writes past a quota fail with an error the agent sees; nothing destroys or crashes. One gap, measured 2026-10-21:
-   JuiceFS counts written data against the quota when it commits it, so the write that crosses 1 GiB is cut short at
-   the quota and the error comes on `close`/`fsync`; gVisor's gofer (directfs) never passed a FUSE file's close
-   error to the application, so `head`/`dd conv=fsync` saw "Disk quota exceeded" but a program that only checks
-   `close` (Python's `f.close()`, Node's `fs.writeFile`) saw success with the file cut at the quota. The fix is a
-   gVisor fork patch (`chat/sandboxd/gvisor-patches/0001-gofer-close-flush-error.patch`: `close` flushes the host file
-   and returns its error; tested: Python then gets EDQUOT from `close`), **not released yet**: it needs a push to
-   DE0CH/gvisor, a `precopy-*` tag, `GV` in `chat/sandboxd/host/setup.sh` and a new AMI. **Temporary until then:** the
-   managed CLAUDE.md (`SANDBOX_RULES`, `chat/src/web/claude-code.ts`) tells the model that a write past the quota can
-   be cut off without an error on close, to check a large file's size after writing it (`ls -l`/`stat`) and tell the
-   user if it was truncated, and to keep large intermediate data in `/tmp`. Remove that rule once the patched gVisor
-   is on the hosts.
+   Writes past a quota fail with an error the agent sees; nothing destroys or crashes. JuiceFS counts written data
+   against the quota when it commits it, so the write that crosses 1 GiB is cut short at the quota and the error comes
+   on `close`/`fsync`. gVisor's gofer (directfs) passes a FUSE file's close error to the application since the fork's
+   release `precopy-20261021.2` (`close` flushes a duplicate of the host file descriptor and returns its error, as on
+   Linux; patch also in `chat/sandboxd/gvisor-patches/`): Python's `f.close()` and Node's `fs.writeFile` get EDQUOT
+   ("Disk quota exceeded"), as `head`/`dd` do (verified 2026-10-21 in a real conversation's sandbox). The managed
+   CLAUDE.md (`SANDBOX_RULES`, `chat/src/web/claude-code.ts`) still tells the model to check a large file's size after
+   writing it; that rule is no longer needed, and only Deyao changes the prompt.
    runsc runs with `--overlay2=none` so scratch writes land as plain host files (today's `--overlay2=root:self` keeps
    the upper layer in gVisor's memory image, which is what OOM-killed a large sandbox on restore after a move).
 4. **Sandbox lifecycle:** release = unmount and drop the sandbox; nothing to save (every `/workspace` and
