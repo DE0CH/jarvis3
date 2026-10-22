@@ -135,10 +135,12 @@ in the fork (Deyao, 2026-10-22): `server/modules/jarvis/jarvis-shares.ts` (+ `.r
   (`/api/jarvis/shares/:id/files/raw`) only of files Claude sent (SendUserFile) and uploads (`uploads/`), never other
   workspace files or symlinks. Revoked, or the conversation deleted: 「此連結已失效。」 (404).
 - **繼續對話** (the page's one action; the UI never says fork or copy): a new conversation of the viewer's, same title,
-  at the top of their list: Claude Code's transcript re-written under a new session id and new message ids (the SDK's
-  `forkSession` on a temporary copy, then `forkedFrom` and every old id removed: no parent), its session folder
+  at the top of their list: Claude Code's transcript re-written under a new session id and new message ids (every
+  old id replaced, `forkedFrom` dropped: no parent; the session row is written before the file, so the transcript
+  watcher never lists it twice), its session folder
   (sub-agent transcripts, saved tool output) and every `/workspace` file of the snapshot. Not carried over: the sandbox
-  (the first message starts a new one), a running turn, spend.
+  (the first message starts a new one), a running turn, spend. Making a link takes a few seconds (it copies the
+  workspace on JuiceFS; measured 6.4 s for a small conversation).
 - **Data:** table `cc_shared.shares` (id, owner, owner_name, session_id, title, dir, files, created_at, revoked_at) in
   the `cloudcli` database, made on first use by any user's process (no migration step; old pods never touch it); the
   snapshot under `/jfs/users/<owner key>/shares/<id>/` (`messages.json` = the history the UI showed,
