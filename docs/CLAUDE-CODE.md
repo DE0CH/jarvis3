@@ -117,6 +117,35 @@ CLAUDE.md mentions it (Deyao, 2026-10-21: the tool's own description is enough).
   an error, paths inside `/workspace`, newest send first), then opens each under `/jfs/ws/<id>` without following
   symlinks; a file gone since is left out. There is no table of its own: the transcript is the record.
 
+## Sharing: a read-only link, 「繼續對話」, 「停止分享」
+
+The previous YYC AI frontend's "Sharing and continuing" (Deyao, 2026-10-21; removed from jarvis3 in 07e2e49), rebuilt
+in the fork (Deyao, 2026-10-22): `server/modules/jarvis/jarvis-shares.ts` (+ `.routes.ts`), `src/modules/jarvis-share/`.
+- **Share** (「分享」: a button in the conversation's header on every screen, and the ⋯ menu of each conversation in the
+  list): a sheet with 「已登入 YYC AI 的同事可以查看這段對話（只讀）」, 「複製連結」, 「分享連結」 where the device has a
+  share sheet (`navigator.share`; the iOS app's web view has none, so it copies), and the conversation's live links,
+  each with 「複製」 and 「停止分享」. Every copy makes a **new snapshot link** `/s/<id>` (16 random bytes, base64url) of
+  the conversation as it is then; a turn still running is left out; later messages never show on an earlier link.
+  400 「暫時未有可分享的內容。」 before the first answer.
+- **Audience:** instance staff only. `/s/<id>` and `/api/jarvis/shares/*` go through Cloudflare Access and the router's
+  `users` check like every page, and are served by the **viewer's own** CloudCLI process, which reads the shared
+  table. Not public.
+- **The shared page** shows what the owner sees (messages with their images, tool steps, sent-file cards) read-only,
+  under 「<name> 分享的對話（只讀）」 (name = the owner's address before the @, as before). Downloads
+  (`/api/jarvis/shares/:id/files/raw`) only of files Claude sent (SendUserFile) and uploads (`uploads/`), never other
+  workspace files or symlinks. Revoked, or the conversation deleted: 「此連結已失效。」 (404).
+- **繼續對話** (the page's one action; the UI never says fork or copy): a new conversation of the viewer's, same title,
+  at the top of their list: Claude Code's transcript re-written under a new session id and new message ids (the SDK's
+  `forkSession` on a temporary copy, then `forkedFrom` and every old id removed: no parent), its session folder
+  (sub-agent transcripts, saved tool output) and every `/workspace` file of the snapshot. Not carried over: the sandbox
+  (the first message starts a new one), a running turn, spend.
+- **Data:** table `cc_shared.shares` (id, owner, owner_name, session_id, title, dir, files, created_at, revoked_at) in
+  the `cloudcli` database, made on first use by any user's process (no migration step; old pods never touch it); the
+  snapshot under `/jfs/users/<owner key>/shares/<id>/` (`messages.json` = the history the UI showed,
+  `transcript.jsonl`, `session/`, `ws/` = a copy of the workspace, at most its 1 GiB quota), which no sandbox mounts.
+  「停止分享」 and deleting the conversation set `revoked_at` and delete that folder. The old chat UI's `shares`,
+  `blobs`, `blob_grants` tables in `jarvis` are not used.
+
 ## Warming: typing starts a host
 
 With no AWS host up, a conversation's first message waits for one to boot (about 2 minutes). So typing warms it:
