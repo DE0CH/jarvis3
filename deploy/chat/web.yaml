@@ -11,6 +11,30 @@ metadata:
 # sandbox cluster with the token in Secret `sandbox-cluster`).
 automountServiceAccountToken: true
 ---
+# the operator page (docs/CHAT.md, "Operator page"): Ready state of this namespace's Deployments and their pods. Read
+# only. The instance must also let web reach the API server (a NetworkPolicy for its address, e.g. DE0CH/YYC
+# yyc-ai/deploy/ops.yaml): this base's egress policy excludes private ranges.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: web-ops-read
+  namespace: jarvis
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: web-ops-read
+  namespace: jarvis
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: web-ops-read}
+subjects: [{kind: ServiceAccount, name: web, namespace: jarvis}]
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
