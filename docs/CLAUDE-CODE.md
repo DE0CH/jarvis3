@@ -1,4 +1,4 @@
-# Claude Code in the sandbox (design agreed with Deyao 2026-10-21; live on ai.yyc.deyaochen.com since 2026-10-21)
+# Claude Code in the sandbox (design agreed with Deyao 2026-10-21; live on YYC AI (ai.yyc-internal.com) since 2026-10-21)
 
 How YYC AI works: each conversation's agent is **Claude Code running inside that conversation's sandbox**, and the
 staff UI is a fork of CloudCLI. Claude is trained on Claude Code running on one computer, with file tools and bash on
