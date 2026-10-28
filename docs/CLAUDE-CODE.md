@@ -110,6 +110,18 @@ CLAUDE.md mentions it (Deyao, 2026-10-21: the tool's own description is enough).
   returns `{caption, attachments: [{path (absolute), size, media_type, isImage, pathValidated}]}` (no upload).
   Verified headless (`claude -p --output-format stream-json`): `SendUserFile` is in the init message's tools, the
   call and its result are in the stream and in the transcript (`toolUseResult` on the result line).
+- **Kept by** copy-on-write snapshots (Deyao, 2026-10-28: a card must keep its file even when the agent later changes
+  or deletes it). When the instance has an egress route named `sent-files` (`identity: true`, upstream the UI router's
+  `/__jarvis/sent-files`), `claudeCodeEnv` adds Claude Code's managed settings (`JARVIS_CLAUDE_SETTINGS` →
+  `/etc/claude-code/managed-settings.json`, root-owned, so the agent (uid 1000) can't change them) with a
+  **PreToolUse hook on SendUserFile**, `/opt/agent/send-file-hook.mjs`, and `JARVIS_SENT_FILES_URL`. Claude Code
+  waits for the hook before the tool runs: it POSTs `{toolUseId, files: [absolute paths]}` with the egress token to
+  `/x/sent-files/snapshot`; egress adds `X-Jarvis-Conversation` / `X-Jarvis-Sandbox` as it verified them (a caller's
+  own copies are dropped) and the route's own credential; the UI clones each file (`juicefs clone`: metadata only,
+  about 0.1 s, data shared until either side changes) to `/jfs/sent/<conversation>/<toolUseId>/<path>`, outside the
+  sandbox's view, and the cards read that copy. Anything but 200 makes the hook exit 2: the send is blocked and the
+  model is told the files could not be saved, so a card never points at a file that was not kept. Only a delete in
+  the same parallel batch of tool calls as the send could race it. Without the route, files are sent by path only.
 - **Shown by** the fork (DE0CH/claudecodeui `src/modules/jarvis-files/SentFileCards.tsx`): each call is a set of
   download cards under the assistant's turn (name, size, a preview for images and PDFs unless `display: "attach"`),
   live and from history. The **檔案 (Files) panel** lists only sent files: `GET /api/jarvis/sessions/:id/files`
