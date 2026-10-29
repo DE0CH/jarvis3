@@ -124,11 +124,15 @@ WireGuard key and TLS certificate, so nothing else changed:
   (docs/CLAUDE-CODE.md "Storage"): root = Linux overlayfs (the image read-only + `upper/` on the sandbox's 5 GiB ext4
   scratch file), `/tmp` and `/var/lib/docker` on the same scratch, `/workspace` and `~/.claude` from the host's JuiceFS
   mount. `sbx-jfs.service` starts after sandboxd (it reaches the metadata store, Postgres in YYC's cluster, over
-  sandboxd's WireGuard), so readiness is gated by sandboxd and the scaler, not by unit order: `GET /v1/host` reports
-  `jfsMounted` (null on a host without `/etc/sbx/juicefs.env`, the gateway), the scaler keeps a new host `booting`
-  until it is true (lost after 8 minutes without it) and places nothing on an active host while it is false (a
-  juicefs crash; sbx-jfs remounts it, `Restart=always`), and a sandbox with a workspace or user waits up to 30 s for
-  the mount before it is refused (503). Hosts whose sandboxd doesn't report the field count as mounted. `ws/` and
+  sandboxd's WireGuard; it first waits up to 30 s for a wg0 route sandboxd adds, not the kernel's connected route that
+  appears at `link up` before the route to the control network), so readiness is gated by sandboxd and the scaler,
+  not by unit order: `GET /v1/host` reports `jfsMounted` (from `/proc/self/mountinfo`, never a stat of the FUSE root,
+  so a wedged juicefs can't stop the endpoint answering; null on a host without `/etc/sbx/juicefs.env`, the gateway),
+  the scaler keeps a new host `booting` until it is true (lost after 8 minutes without it) and places nothing on an
+  active host while it is false (a juicefs crash; sbx-jfs remounts it, `Restart=always`; vm_events `jfs-unmounted`,
+  `jfs-mounted`). An active AWS host still without it after 2 minutes (`info.jfsUnmountedSince`) goes `retiring`
+  (`jfs-retire`), so its sandboxes move to hosts that have their files. A sandbox with a workspace or user waits up
+  to 30 s for the mount before it is refused (503). Hosts whose sandboxd doesn't report the field count as mounted. `ws/` and
   `users/` belong to uid 1000 (sandboxd sets it), so the UI can remove a deleted conversation's folder. The
   first process is `sbx-init.mjs` (root inside gVisor, the Docker capabilities exist only there): it writes
   `/etc/hosts` and apt's proxy setting, starts the agent through setpriv as uid 1000 with no capabilities (bounding
