@@ -48,6 +48,13 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: chat/package-lock.json
+      - name: the catalogue cases are hermit's
+        # tools validates the staff catalogue by hermit's rules (src/tools/catalogue.ts); the shared cases are a
+        # byte-for-byte copy of aviary's, so a change to hermit's rules turns this red until tools follows
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/DE0CH/aviary/main/crates/hermit/fixtures/catalogue-cases.json \
+            | cmp - chat/test/fixtures/catalogue-cases.json
       - name: typecheck and tests
         working-directory: chat
         # egress's mirror test runs the real pip and npm (python3 -m pip is on the runner image)
