@@ -30,7 +30,11 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: tools
-          image: jarvis3-chat
+          # Pinned, not the placeholder `jarvis3-chat`: from aviary refactor WP-26 on, this repo's tools serve aviary's
+          # gateway (args [tools], /etc/tools/tools.json, its own database, owner from Aviary-Sandbox-Person), which
+          # this base cannot run. So an instance's `images:` bump moves web only and leaves this Deployment on f91907d,
+          # the last image of the old tools (as egress.yaml). Removed with deploy/chat (A6).
+          image: ghcr.io/de0ch/jarvis3-chat:f91907d349e6
           ports: [{name: http, containerPort: 8080}]
           # DATABASE_URL and the key variables the config names (tools.*.keyEnv, wisers *Env, ${VAR} in upstream headers)
           envFrom:
