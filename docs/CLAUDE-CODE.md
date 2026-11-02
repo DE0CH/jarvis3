@@ -181,6 +181,29 @@ because its AMI held an older image. With the AMI holding the pinned image (DE0C
 docs/SANDBOX-VM.md "Operations"), measured the same way at 18:52 UTC: cold 79.6 s = host active after 45.4 s, sandbox
 placed 5 s later (no fetch: the gateway sent < 1 MB over wg0, the image is 1.6 GB), ready 9 s later, reply 15 s later.
 
+## Relay: a person's own Claude Code on the instance's models
+
+A user of the instance can run Claude Code on their own computer against the same model route a sandbox uses, so the
+call gets the same forced zero data retention, model list and shared budget, and is counted as theirs on the operator
+page. Pieces:
+
+- **Relay tokens** (table `relay_tokens`; only the sha256 is kept): web `POST /internal/cc/relay-tokens {owner, action}`
+  lists, creates (`jrelay_…`, shown once; at most 10 live per person) and revokes a person's own tokens. The UI router
+  answers the signed-in person's token page (DE0CH/claudecodeui `jarvis/router.mjs`, `/api/jarvis/relay`).
+- **The relay listener** (egress, `EGRESS_RELAY_PORT` 3129, on only when a config route has `"relay": true`): serves
+  only origin-form `/x/<relay route>/…`, nothing else (no forward proxy, mirror or CONNECT). The caller is the token's
+  owner (`Authorization: Bearer` = Claude Code's `ANTHROPIC_AUTH_TOKEN`, or `x-api-key`), refused (401) when the token
+  is unknown or revoked or the owner is no longer in config `users`. The token never goes upstream: the route injects
+  its own key. Each call is an `egress_log` row with `owner` set and no sandbox. A relay token counts nowhere else (the
+  proxy port takes sandbox tokens only), and a sandbox token is refused on the relay listener.
+- **The front door** is the instance's: a hostname whose tunnel ingress goes to `egress:3129` behind an Access app
+  (YYC: `ai-relay.yyc-internal.com`, DE0CH/YYC `news-stream/deploy/cloudflare/tofu/relay.tf`).
+
+Client setup (the token page shows it filled in): `ANTHROPIC_BASE_URL=https://<relay host>/x/claude`,
+`ANTHROPIC_AUTH_TOKEN=<relay token>`, `ANTHROPIC_CUSTOM_HEADERS` with the Access service token's
+`CF-Access-Client-Id`/`CF-Access-Client-Secret`, `ANTHROPIC_MODEL`/`ANTHROPIC_SMALL_FAST_MODEL` from config `models`,
+and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` from that model's `contextWindow`.
+
 ## Deploying a change
 
 - **The fork (UI or its server):** push to DE0CH/claudecodeui `main`; its `jarvis-image` workflow builds

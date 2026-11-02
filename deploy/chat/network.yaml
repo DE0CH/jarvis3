@@ -1,6 +1,6 @@
 # Ingress: nothing accepts connections unless listed. tools ← egress (route `tools`: Claude Code's MCP calls);
-# egress ← cloudflared (hosted sandboxes' wire, provider e2b). web accepts only what the instance adds (its UI pods,
-# e.g. DE0CH/YYC yyc-ai/deploy/ui.yaml `web-from-ui`); sandboxes on other machines reach egress:3128 through
+# egress ← cloudflared (hosted sandboxes' wire, provider e2b; the relay listener). web accepts only what the instance
+# adds (its UI pods, e.g. DE0CH/YYC yyc-ai/deploy/ui.yaml `web-from-ui`); sandboxes on other machines reach egress:3128 through
 # whatever links them (the instance's own policies, e.g. yyc-ai/deploy/sandbox-vm.yaml).
 # Egress: cluster DNS, pods of this namespace, and the public internet only (Postgres, OpenRouter, tool
 # APIs, the Cloudflare edge, the sandbox cluster's API server and sandbox pods); private, CGNAT, loopback and
@@ -35,9 +35,10 @@ spec:
   podSelector: {matchLabels: {app: egress}}
   policyTypes: [Ingress]
   ingress:
-    # cloudflared: hosted sandboxes' wire (wss://<egress host>/wire, provider e2b)
+    # cloudflared: hosted sandboxes' wire (wss://<egress host>/wire, provider e2b) and the relay listener (people's own
+    # Claude Code, docs/CLAUDE-CODE.md "Relay")
     - from: [{podSelector: {matchLabels: {app: cloudflared}}}]
-      ports: [{port: 3128, protocol: TCP}]
+      ports: [{port: 3128, protocol: TCP}, {port: 3129, protocol: TCP}]
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

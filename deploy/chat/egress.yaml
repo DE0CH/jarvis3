@@ -34,11 +34,15 @@ spec:
           image: jarvis3-chat
           ports:
             - {name: proxy, containerPort: 3128}
+            - {name: relay, containerPort: 3129}
             - {name: health, containerPort: 9090}
           env:
             - {name: JARVIS_ROLE, value: egress}
             - {name: PORT, value: "3128"}   # the image sets PORT=8080 for web/tools
             - {name: HEALTH_PORT, value: "9090"}
+            # the relay listener for people's own Claude Code (docs/CLAUDE-CODE.md, "Relay"); on only when a route is
+            # flagged relay in config
+            - {name: EGRESS_RELAY_PORT, value: "3129"}
             - name: POD_NAMESPACE
               valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
             # provider "vm": each egress pod announces its address; the sandbox hub sends the egress VIP's
@@ -90,6 +94,7 @@ spec:
   selector: {app: egress}
   ports:
     - {name: proxy, port: 3128, targetPort: 3128}
+    - {name: relay, port: 3129, targetPort: 3129}
     - {name: health, port: 9090, targetPort: 9090}
 ---
 apiVersion: policy/v1
