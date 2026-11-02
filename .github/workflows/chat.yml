@@ -3,7 +3,9 @@ name: chat
 # aviary's gateway and model conformance suites (aviary platform spec 17.3; the aviary commit in chat/aviary.ref); then
 # the images ghcr.io/de0ch/jarvis3-chat (web, egress, tools) and ghcr.io/de0ch/jarvis3-sandbox (Claude Code and the
 # sandbox agent), smoke-tested, pushed on main as :<commit 12> and on a chat-v* tag as :<tag> too, only when the tests
-# and both suites pass;
+# and both suites pass. The chat image is built once (job chat-image, one build time) and that same image, passed on as
+# an artifact, is what conformance checks and images smoke-tests and pushes (the pushed image id is checked against
+# the built one);
 # and the same sandbox as the E2B template jarvis3-sandbox:<commit 12> (the "e2b" sandbox provider), smoke-tested in a
 # real E2B sandbox (secret E2B_API_KEY: the instance's E2B project; skipped without it).
 on:
@@ -54,11 +56,51 @@ jobs:
           npm ci
           npm test
 
-  conformance:
-    # egress as a sandbox gateway, checked from outside (aviary platform spec 8.2, 8.3, 17.3): the egress image under
-    # test with test configs (chat/test/conformance/), the suites' fakes at the fixed names, the drain last. The suites
-    # are built from the aviary commit chat/aviary.ref names (bumped when the gateway contract changes).
+  chat-image:
+    # the chat image, built once: conformance checks it and images pushes it, so what ships is what was tested
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      id: ${{ steps.load.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build time
+        id: built
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: build the chat image
+        uses: docker/build-push-action@v6
+        with:
+          context: chat
+          tags: jarvis3-chat:test
+          outputs: type=docker,dest=${{ runner.temp }}/chat-image.tar
+          build-args: |
+            CHAT_COMMIT=${{ github.sha }}
+            CHAT_BUILT_AT=${{ steps.built.outputs.at }}
+          cache-from: type=gha,scope=chat-image
+          cache-to: type=gha,mode=max,scope=chat-image
+      - name: image id
+        id: load
+        run: |
+          set -euo pipefail
+          docker load -q -i "$RUNNER_TEMP/chat-image.tar"
+          id=$(docker image inspect jarvis3-chat:test --format '{{.Id}}')
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "chat image $id (built ${{ steps.built.outputs.at }})" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chat-image
+          path: ${{ runner.temp }}/chat-image.tar
+          retention-days: 1
+          compression-level: 1
+
+  conformance:
+    # egress as a sandbox gateway, checked from outside (aviary platform spec 8.2, 8.3, 17.3): the chat image built
+    # once (job chat-image) with test configs (chat/test/conformance/), the suites' fakes at the fixed names, the drain
+    # last. The suites are built from the aviary commit chat/aviary.ref names (bumped when the gateway contract
+    # changes; the published aviary-testing image replaces this build once WP-28 publishes it).
+    runs-on: ubuntu-latest
+    needs: [chat-image]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -78,21 +120,15 @@ jobs:
         run: |
           cargo build --release --locked -p aviary-conformance -p mock-model
           mkdir -p ../conformance-bin && cp target/release/aviary-conformance target/release/mock-model ../conformance-bin/
-      - name: build time
-        id: built
-        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v3
-      - name: build the chat image under test
-        uses: docker/build-push-action@v6
+      - uses: actions/download-artifact@v4
         with:
-          context: chat
-          load: true
-          tags: jarvis3-chat:test
-          build-args: |
-            CHAT_COMMIT=${{ github.sha }}
-            CHAT_BUILT_AT=${{ steps.built.outputs.at }}
-          cache-from: type=gha,scope=chat-image
-          cache-to: type=gha,mode=max,scope=chat-image
+          name: chat-image
+          path: ${{ runner.temp }}
+      - name: load the chat image under test
+        run: |
+          set -euo pipefail
+          docker load -q -i "$RUNNER_TEMP/chat-image.tar"
+          test "$(docker image inspect jarvis3-chat:test --format '{{.Id}}')" = "${{ needs.chat-image.outputs.id }}"
       - name: aviary-conformance gateway and model
         run: chat/test/conformance/run.sh jarvis3-chat:test conformance-bin "$RUNNER_TEMP/conformance"
       - uses: actions/upload-artifact@v4
@@ -103,7 +139,7 @@ jobs:
 
   images:
     runs-on: ubuntu-latest
-    needs: [test, conformance]
+    needs: [test, chat-image, conformance]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -123,9 +159,6 @@ jobs:
           fi
           echo "chat=$chat" >> "$GITHUB_OUTPUT"
           echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
-      - name: build time
-        id: built
-        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - name: build the sandbox image
         uses: docker/build-push-action@v6
@@ -135,17 +168,15 @@ jobs:
           tags: jarvis3-sandbox:test
           cache-from: type=gha,scope=sandbox-image
           cache-to: type=gha,mode=max,scope=sandbox-image
-      - name: build the chat image
-        uses: docker/build-push-action@v6
+      - uses: actions/download-artifact@v4
         with:
-          context: chat
-          load: true
-          tags: jarvis3-chat:test
-          build-args: |
-            CHAT_COMMIT=${{ github.sha }}
-            CHAT_BUILT_AT=${{ steps.built.outputs.at }}
-          cache-from: type=gha,scope=chat-image
-          cache-to: type=gha,mode=max,scope=chat-image
+          name: chat-image
+          path: ${{ runner.temp }}
+      - name: load the chat image conformance checked
+        run: |
+          set -euo pipefail
+          docker load -q -i "$RUNNER_TEMP/chat-image.tar"
+          test "$(docker image inspect jarvis3-chat:test --format '{{.Id}}')" = "${{ needs.chat-image.outputs.id }}"
       - name: smoke test
         run: |
           set -euo pipefail
@@ -180,15 +211,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: push the chat image
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
-        with:
-          context: chat
-          push: true
-          tags: ${{ steps.tags.outputs.chat }}
-          build-args: |
-            CHAT_COMMIT=${{ github.sha }}
-            CHAT_BUILT_AT=${{ steps.built.outputs.at }}
-          cache-from: type=gha,scope=chat-image
+        run: |
+          set -euo pipefail
+          # the very image chat-image built and conformance checked, retagged (no rebuild)
+          IFS=, read -ra tags <<< "${{ steps.tags.outputs.chat }}"
+          for t in "${tags[@]}"; do
+            docker tag jarvis3-chat:test "$t"
+            docker push -q "$t"
+          done
+          test "$(docker image inspect "${tags[0]}" --format '{{.Id}}')" = "${{ needs.chat-image.outputs.id }}"
+          echo "chat image ${{ needs.chat-image.outputs.id }} = $(docker image inspect "${tags[0]}" --format '{{index .RepoDigests 0}}')" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: push the sandbox image
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
