@@ -31,7 +31,11 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: egress
-          image: jarvis3-chat
+          # Pinned, not the placeholder `jarvis3-chat`: from aviary refactor WP-25 on, this repo's egress is aviary's
+          # sandbox gateway (args [egress], /etc/egress/egress.json, its own database), which this base cannot run. So
+          # an instance's `images:` bump moves web and tools (JARVIS_ROLE still picks them) and leaves this Deployment
+          # on f91907d, the last image of the old egress (allowlist of 2026-11-02). Removed with deploy/chat (A6).
+          image: ghcr.io/de0ch/jarvis3-chat:f91907d349e6
           ports:
             - {name: proxy, containerPort: 3128}
             - {name: relay, containerPort: 3129}

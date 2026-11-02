@@ -3,6 +3,8 @@ name: egress-allowlist
 # runs generate.py and commits allow.txt/deny.txt to main only when an entry changed (the header's date and digest
 # alone don't count), then dispatches the chat workflow for that commit (a push made with GITHUB_TOKEN starts no
 # workflow by itself) so its images carry the new lists; an instance picks them up when its jarvis3 pin is bumped.
+# The old stack's egress is pinned in deploy/chat/egress.yaml (docs/CHAT.md "Deploying an instance") and keeps the
+# lists of 2026-11-02 until it is retired; only the new stack's egress takes later refreshes.
 on:
   schedule:
     - cron: "17 3 * * 1"

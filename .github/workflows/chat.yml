@@ -78,6 +78,9 @@ jobs:
         run: |
           cargo build --release --locked -p aviary-conformance -p mock-model
           mkdir -p ../conformance-bin && cp target/release/aviary-conformance target/release/mock-model ../conformance-bin/
+      - name: build time
+        id: built
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - name: build the chat image under test
         uses: docker/build-push-action@v6
@@ -87,6 +90,7 @@ jobs:
           tags: jarvis3-chat:test
           build-args: |
             CHAT_COMMIT=${{ github.sha }}
+            CHAT_BUILT_AT=${{ steps.built.outputs.at }}
           cache-from: type=gha,scope=chat-image
           cache-to: type=gha,mode=max,scope=chat-image
       - name: aviary-conformance gateway and model
@@ -119,6 +123,9 @@ jobs:
           fi
           echo "chat=$chat" >> "$GITHUB_OUTPUT"
           echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
+      - name: build time
+        id: built
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - name: build the sandbox image
         uses: docker/build-push-action@v6
@@ -136,6 +143,7 @@ jobs:
           tags: jarvis3-chat:test
           build-args: |
             CHAT_COMMIT=${{ github.sha }}
+            CHAT_BUILT_AT=${{ steps.built.outputs.at }}
           cache-from: type=gha,scope=chat-image
           cache-to: type=gha,mode=max,scope=chat-image
       - name: smoke test
@@ -179,6 +187,7 @@ jobs:
           tags: ${{ steps.tags.outputs.chat }}
           build-args: |
             CHAT_COMMIT=${{ github.sha }}
+            CHAT_BUILT_AT=${{ steps.built.outputs.at }}
           cache-from: type=gha,scope=chat-image
       - name: push the sandbox image
         if: github.event_name != 'pull_request'
