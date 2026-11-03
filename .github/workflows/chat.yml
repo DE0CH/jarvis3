@@ -119,7 +119,7 @@ jobs:
           ref=$(tr -d ' \n' < chat/aviary.ref)
           image=ghcr.io/de0ch/aviary-testing:${ref:0:12}
           docker pull -q "$image"
-          id=$(docker create "$image")
+          id=$(docker create "$image" aviary-conformance)  # the image has no default command
           mkdir -p conformance-bin
           docker cp "$id:/usr/local/bin/aviary-conformance" conformance-bin/
           docker cp "$id:/usr/local/bin/mock-model" conformance-bin/
