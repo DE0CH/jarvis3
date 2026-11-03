@@ -230,12 +230,17 @@ jobs:
           echo "chat image ${{ needs.chat-image.outputs.id }} = $(docker image inspect "${tags[0]}" --format '{{index .RepoDigests 0}}')" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: push the sandbox image
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
-        with:
-          context: chat/sandbox
-          push: true
-          tags: ${{ steps.tags.outputs.sandbox }}
-          cache-from: type=gha,scope=sandbox-image
+        run: |
+          set -euo pipefail
+          # the very image the smoke test ran, retagged (no rebuild)
+          id=$(docker image inspect jarvis3-sandbox:test --format '{{.Id}}')
+          IFS=, read -ra tags <<< "${{ steps.tags.outputs.sandbox }}"
+          for t in "${tags[@]}"; do
+            docker tag jarvis3-sandbox:test "$t"
+            docker push -q "$t"
+          done
+          test "$(docker image inspect "${tags[0]}" --format '{{.Id}}')" = "$id"
+          echo "sandbox image $id = $(docker image inspect "${tags[0]}" --format '{{index .RepoDigests 0}}')" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: summary
         if: github.event_name != 'pull_request'
         run: |
