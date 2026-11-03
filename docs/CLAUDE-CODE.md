@@ -97,6 +97,20 @@ browser ─▶ Cloudflare Access ─▶ Worker yyc-ai (edge/worker.js) ─▶ tu
 - **JuiceFS volume `yyc-ai`:** metadata in Neon `jfs_yyc_ai`, data in the Hetzner bucket `yyc-ai-files` under
   `yyc-ai/`; mounted by every sandbox host at `/var/lib/sbx/jfs` and in the UI pods at `/jfs` (CSI driver).
 
+## Route MCP servers: an instance's own services for Claude Code
+
+The tools role serves only read-only tools (docs/CHAT.md). An instance's own service that Claude Code should both
+read and change (YYC: the label store, DE0CH/YYC `labels/`, Deyao 2026-11-03: YYC AI may change YYC's own internal
+data, still with no confirmations and nothing that sends, posts or pays outside YYC) is an **egress route with
+`mcp: true`**: egress forwards `/x/<name>/…` to the upstream with the route's injected credential (e.g. a Cloudflare
+Access service token) and, with `identity: true`, `X-Jarvis-Conversation` / `X-Jarvis-Sandbox`; `allowPaths` limits
+what the sandbox can reach. `claudeCodeEnv` then adds `<name>` to Claude Code's managed MCP servers at
+`/x/<name>/mcp` (authenticated by the sandbox's egress token, as `tools` is) and puts `JARVIS_ROUTE_<NAME>_URL` (the
+route's base) and `JARVIS_EGRESS_TOKEN` in the sandbox env, so scripts in the sandbox can fetch the route's other
+allowed paths (YYC: `lib/labels.mjs` downloads the label scripts and fonts and renders in the sandbox). The upstream
+owns its tools' rules; nothing in the tools role filters them. Like every sandbox setting, a new route reaches only
+sandboxes made after the deploy, and Claude Code reads its MCP servers once per conversation.
+
 ## Sent files: Claude Code's SendUserFile
 
 Claude hands a deliverable (a report, a chart, a spreadsheet) to the staff member with Claude Code's own built-in
