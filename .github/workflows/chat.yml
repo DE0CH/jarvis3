@@ -104,29 +104,27 @@ jobs:
   conformance:
     # egress as a sandbox gateway, checked from outside (aviary platform spec 8.2, 8.3, 17.3): the chat image built
     # once (job chat-image) with test configs (chat/test/conformance/), the suites' fakes at the fixed names, the drain
-    # last. The suites are built from the aviary commit chat/aviary.ref names (bumped when the gateway contract
-    # changes; the published aviary-testing image replaces this build once WP-28 publishes it).
+    # last. The suites are aviary's published testing image at the commit chat/aviary.ref names (bumped when the
+    # gateway contract changes, to an aviary commit that has a release).
     runs-on: ubuntu-latest
     needs: [chat-image]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: aviary at chat/aviary.ref
+      - name: aviary's testing image at chat/aviary.ref (aviary-conformance and mock-model)
+        # ghcr.io/de0ch/aviary-testing:<sha12> exists only for aviary commits that passed aviary's own gates (its
+        # publish job); the suites run as the image's binaries, unchanged on this runner
         run: |
           set -euo pipefail
           ref=$(tr -d ' \n' < chat/aviary.ref)
-          git clone -q https://github.com/DE0CH/aviary aviary-src
-          git -C aviary-src checkout -q "$ref"
-          echo "aviary $(git -C aviary-src rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: aviary-src -> target
-          cache-on-failure: true
-      - name: build aviary-conformance and mock-model
-        working-directory: aviary-src
-        run: |
-          cargo build --release --locked -p aviary-conformance -p mock-model
-          mkdir -p ../conformance-bin && cp target/release/aviary-conformance target/release/mock-model ../conformance-bin/
+          image=ghcr.io/de0ch/aviary-testing:${ref:0:12}
+          docker pull -q "$image"
+          id=$(docker create "$image")
+          mkdir -p conformance-bin
+          docker cp "$id:/usr/local/bin/aviary-conformance" conformance-bin/
+          docker cp "$id:/usr/local/bin/mock-model" conformance-bin/
+          docker rm "$id" >/dev/null
+          echo "aviary-testing $image ($(docker image inspect -f '{{index .RepoDigests 0}}' "$image"))" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/download-artifact@v4
         with:
           name: chat-image
