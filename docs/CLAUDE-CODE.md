@@ -119,6 +119,11 @@ answers go straight to and from disk instead of through the model's output, and 
   rules; nothing in the tools role filters them.
 - `curl` reaches egress's own address directly: `--noproxy '*'` (the sandbox's `HTTP_PROXY` would otherwise send the
   request as a proxied one), as the skills' examples show.
+- **The new stack** (aviary; docs/CHAT.md "egress"): the skills come from hermit's configuration (`prompt.skills`, the
+  descriptor's `managedSkills`, which the supervisor writes to the same `/etc/claude-code/.claude/skills/`), not the
+  image; Claude Code calls `http://tools/v1/tools/<name>` and a sandbox route by its name (`http://labels/api/v1/…`)
+  through the proxy, with no token of its own: the gateway identifies the sandbox and adds the credentials (YYC:
+  DE0CH/YYC `yyc-ai/deploy/hermit/skills/`).
 
 ## Sent files: Claude Code's SendUserFile
 
