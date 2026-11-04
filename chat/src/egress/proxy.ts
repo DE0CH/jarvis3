@@ -54,8 +54,9 @@ export interface EgressOptions {
 
 const HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"]);
 const CALLER_AUTH = new Set(["authorization", "x-api-key", "cookie", "host"]);
-/** Identity headers only egress sets (route `identity`); a caller's own copies never pass. */
-const IDENTITY = new Set(["x-jarvis-conversation", "x-jarvis-sandbox"]);
+/** Identity headers only egress sets (route `identity`); a caller's own copies never pass (the new stack's
+ * Aviary-Sandbox-Person included, which an upstream such as YYC's labels also trusts). */
+const IDENTITY = new Set(["x-jarvis-conversation", "x-jarvis-sandbox", "x-jarvis-person", "aviary-sandbox-person"]);
 const INDEX_MAX_AGE = 5 * 60_000;
 
 /** What a sandbox (and so the agent) reads when a host is refused: plain, final, no one to ask. */
@@ -558,6 +559,8 @@ export class Egress {
       if (route.identity && sb) {
         headers["x-jarvis-conversation"] = sb.conversationId ?? "";
         headers["x-jarvis-sandbox"] = sb.sandboxId;
+        // the person the conversation belongs to, as YYC's labels record who sends labels and holds a template's lock
+        if (sb.owner) headers["x-jarvis-person"] = sb.owner.trim().toLowerCase();
       }
       if (typeof forcedBody === "object" && forcedBody) {
         delete headers["transfer-encoding"];

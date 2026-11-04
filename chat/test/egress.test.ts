@@ -46,7 +46,7 @@ const RESOLVE: Record<string, string[]> = {
 before(async () => {
   t = await freshDb("egress");
   await t.db.query(
-    "insert into sandboxes (id, conversation_id, pod, egress_token_hash, exec_token, status, expires_at) values ($1,$2,'sbx-1',$3,'x','ready', now() + interval '1 hour')",
+    "insert into sandboxes (id, conversation_id, pod, egress_token_hash, exec_token, status, expires_at, owner) values ($1,$2,'sbx-1',$3,'x','ready', now() + interval '1 hour', 'Owner@YYC.hk')",
     [sandboxId, conv, sha256hex(sbToken)],
   );
 
@@ -92,7 +92,7 @@ before(async () => {
       }
       if (p === "/sent/snapshot") {
         res.writeHead(200, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ conversation: req.headers["x-jarvis-conversation"] ?? null, sandbox: req.headers["x-jarvis-sandbox"] ?? null, auth: req.headers.authorization ?? null }));
+        return res.end(JSON.stringify({ conversation: req.headers["x-jarvis-conversation"] ?? null, sandbox: req.headers["x-jarvis-sandbox"] ?? null, person: req.headers["x-jarvis-person"] ?? null, aviaryPerson: req.headers["aviary-sandbox-person"] ?? null, auth: req.headers.authorization ?? null }));
       }
       if (p === "/api/v1/messages") {
         res.writeHead(200, { "content-type": "application/json" });
@@ -431,13 +431,15 @@ test("model route: zero data retention is forced into every request body, whatev
 test("identity route: the conversation and sandbox egress verified, never the caller's own copies", async () => {
   const r = await http("/x/sent-files/snapshot", {
     method: "POST",
-    headers: { authorization: `Bearer ${sbToken}`, "content-type": "application/json", "x-jarvis-conversation": "someone-elses", "x-jarvis-sandbox": "forged" },
+    headers: { authorization: `Bearer ${sbToken}`, "content-type": "application/json", "x-jarvis-conversation": "someone-elses", "x-jarvis-sandbox": "forged", "x-jarvis-person": "forged@x", "aviary-sandbox-person": "forged@x" },
     body: "{}",
   });
   assert.equal(r.status, 200);
   const got = JSON.parse(r.body);
   assert.equal(got.conversation, conv);
   assert.equal(got.sandbox, sandboxId);
+  assert.equal(got.person, "owner@yyc.hk", "the conversation's owner, from the sandbox row");
+  assert.equal(got.aviaryPerson, null, "a caller's Aviary-Sandbox-Person never passes");
   assert.equal(got.auth, "Bearer sk-real", "the route's own credential, not the sandbox token");
   // the model route gets no identity headers, and a caller's copies are dropped there too
   const m = await http("/x/claude/v1/messages", { method: "POST", headers: { authorization: `Bearer ${sbToken}`, "x-jarvis-conversation": "forged" }, body: JSON.stringify({ model: "claude-x" }) });

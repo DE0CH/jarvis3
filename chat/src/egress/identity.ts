@@ -8,6 +8,8 @@ import { bearerOf, sha256hex } from "../common/tokens.ts";
 export interface SandboxId {
   sandboxId: string;
   conversationId: string;
+  /** the conversation's owner (their email), for routes that act on someone's behalf (route `identity`) */
+  owner: string | null;
   /** provider "vm": the sandbox's own address; its requests must come from there (null for other providers) */
   ip: string | null;
 }
@@ -53,11 +55,11 @@ export class Identities {
     const key = sha256hex(token);
     const hit = this.#sandboxes.get(key);
     if (hit && Date.now() - hit.at < this.#ttlMs) return hit.v;
-    const { rows } = await this.#db.query<{ id: string; conversation_id: string; ip: string | null }>(
-      "select id, conversation_id, ip from sandboxes where egress_token_hash = $1 and status <> 'gone'",
+    const { rows } = await this.#db.query<{ id: string; conversation_id: string; owner: string | null; ip: string | null }>(
+      "select id, conversation_id, owner, ip from sandboxes where egress_token_hash = $1 and status <> 'gone'",
       [key],
     );
-    const v = rows[0] ? { sandboxId: rows[0].id, conversationId: rows[0].conversation_id, ip: rows[0].ip ?? null } : null;
+    const v = rows[0] ? { sandboxId: rows[0].id, conversationId: rows[0].conversation_id, owner: rows[0].owner ?? null, ip: rows[0].ip ?? null } : null;
     this.#remember(this.#sandboxes, key, v);
     return v;
   }
