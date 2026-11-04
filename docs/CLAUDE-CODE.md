@@ -2,7 +2,7 @@
 
 How YYC AI works: each conversation's agent is **Claude Code running inside that conversation's sandbox**, and the
 staff UI is a fork of CloudCLI. Claude is trained on Claude Code running on one computer, with file tools and bash on
-the same machine, CLAUDE.md and MCP config read from disk; this design gives it exactly that, inside the sandbox. It
+the same machine, CLAUDE.md and skills read from disk; this design gives it exactly that, inside the sandbox. It
 replaced (2026-10-21) the first design, an agent loop on the server (claw per turn, bash relayed into the sandbox,
 files synced back) with its own web UI; that code is gone (jarvis3 07e2e49), its tables keep their rows (docs/CHAT.md
 "Postgres schema"). The runtime's parts (web, egress, tools, the sandbox agent, providers, config): docs/CHAT.md.
@@ -15,7 +15,7 @@ files synced back) with its own web UI; that code is gone (jarvis3 07e2e49), its
    - one new provider whose `runtime` runs `claude` in the user's sandbox through the Agent SDK's
      `spawnClaudeCodeProcess` (stdin/stdout relayed) and records every streamed message in Postgres; `sessions`
      (list, history, search) read from Postgres; `sessionSynchronizer` none; `models` fixed (Sonnet 5.5); `auth`
-     always signed in (egress holds the key); `mcp` fixed (our tools role); `skills` none.
+     always signed in (egress holds the key); `mcp` none (the tools are a REST API the managed skills explain); `skills` none in the UI (Claude Code reads its managed skills in the sandbox).
    - the four file-reading providers (claude, codex, cursor, opencode) and the developer modules that need a local
      machine (git, shell, file tree, plugins, taskmaster, worktrees, browser-use, cli) are removed.
    - CloudCLI's SQLite tables move to our Postgres (Neon), same schema.
@@ -29,7 +29,7 @@ files synced back) with its own web UI; that code is gone (jarvis3 07e2e49), its
    text is the OS's own), and `CLAUDE.md` says what that means: put caches, installs and bulk files (`.npm`,
    `node_modules`, virtualenvs, unpacked archives) in `/tmp` or the home folder, keep only results in
    `/workspace`. Usage is refreshed every few seconds, so a fast burst overshoots slightly (measured: 1,007 files
-   before the cap held). MCP: our tools role.
+   before the cap held). Tools: the managed skills, which call the tools route's REST API and the sandbox routes with curl ("Skills and sandbox routes").
    The staff member's message reaches Claude Code exactly as typed (plus the attachment blocks the UI strips back out
    of the history): nothing is prepended after a sandbox release, since the managed `CLAUDE.md` already says what
    survives one. Cleanup for messages saved before 2026-10-22: until then the UI put `[System note: your sandbox was
@@ -79,7 +79,7 @@ files synced back) with its own web UI; that code is gone (jarvis3 07e2e49), its
 ```
 browser ─▶ Cloudflare Access ─▶ Worker yyc-ai (edge/worker.js) ─▶ tunnel yyc-ai ─▶ ui (2 pods: router + CloudCLI per person)
   ui ─ POST /internal/cc/sandbox ─▶ web ─▶ sandbox on an AWS burst host (sandboxd, gVisor) ─ /workspace, ~/.claude ◀─ JuiceFS
-  ui ─ GET /proc (upgrade) ─▶ sandbox agent ─▶ claude ─▶ egress /x/claude ─▶ OpenRouter;  egress /x/tools/mcp ─▶ tools
+  ui ─ GET /proc (upgrade) ─▶ sandbox agent ─▶ claude ─▶ egress /x/claude ─▶ OpenRouter;  curl ─▶ egress /x/tools/v1/tools/<name> ─▶ tools
   ui ─ /jfs (JuiceFS CSI) ─▶ the files panel (ws/<conversation>) and ~/.claude (users/<key>/claude)
 ```
 
@@ -97,19 +97,28 @@ browser ─▶ Cloudflare Access ─▶ Worker yyc-ai (edge/worker.js) ─▶ tu
 - **JuiceFS volume `yyc-ai`:** metadata in Neon `jfs_yyc_ai`, data in the Hetzner bucket `yyc-ai-files` under
   `yyc-ai/`; mounted by every sandbox host at `/var/lib/sbx/jfs` and in the UI pods at `/jfs` (CSI driver).
 
-## Route MCP servers: an instance's own services for Claude Code
+## Skills and sandbox routes: the APIs Claude Code calls
 
-The tools role serves only read-only tools (docs/CHAT.md). An instance's own service that Claude Code should both
-read and change (YYC: the label store, DE0CH/YYC `labels/`, Deyao 2026-11-03: YYC AI may change YYC's own internal
-data, still with no confirmations and nothing that sends, posts or pays outside YYC) is an **egress route with
-`mcp: true`**: egress forwards `/x/<name>/…` to the upstream with the route's injected credential (e.g. a Cloudflare
-Access service token) and, with `identity: true`, `X-Jarvis-Conversation` / `X-Jarvis-Sandbox`; `allowPaths` limits
-what the sandbox can reach. `claudeCodeEnv` then adds `<name>` to Claude Code's managed MCP servers at
-`/x/<name>/mcp` (authenticated by the sandbox's egress token, as `tools` is) and puts `JARVIS_ROUTE_<NAME>_URL` (the
-route's base) and `JARVIS_EGRESS_TOKEN` in the sandbox env, so scripts in the sandbox can fetch the route's other
-allowed paths (YYC: `lib/labels.mjs` downloads the label scripts and fonts and renders in the sandbox). The upstream
-owns its tools' rules; nothing in the tools role filters them. Like every sandbox setting, a new route reaches only
-sandboxes made after the deploy, and Claude Code reads its MCP servers once per conversation.
+Claude Code has no MCP servers. Its tools are HTTP APIs it calls itself with `curl` from Bash, so files and long
+answers go straight to and from disk instead of through the model's output, and each API's use is written down as a
+**managed skill** (Claude Code's `/etc/claude-code/.claude/skills/<skill>/SKILL.md`, loaded when relevant).
+
+- **The skills** are the instance's: config `skillsDir` (YYC: `/etc/jarvis/skills`, ConfigMap `jarvis-skills` mounted
+  in web) holds files named `<skill>.<file>` (`labels.SKILL.md`, `labels.design-format.md`; a ConfigMap key can't hold
+  "/"). `claudeCodeEnv` passes them as `JARVIS_CLAUDE_SKILLS` ({"<skill>/<file>": text}, base64) and sbx-init.mjs
+  writes them root-owned, mode 644. A skill change reaches sandboxes made after the deploy.
+- **The tools route** (`tools`, keepAuth): the tools role's REST API, `GET /v1/tools`, `POST /v1/tools/<name>`,
+  `GET /v1/openapi.json` (docs/CHAT.md "tools"), at `JARVIS_ROUTE_TOOLS_URL` with `Authorization: Bearer
+  $JARVIS_EGRESS_TOKEN`, which names the sandbox and its owner.
+- **Sandbox routes** (`sandbox: true`): an instance's own service the sandbox calls directly, including one Claude
+  Code may change (YYC: the label store, DE0CH/YYC `labels/`; Deyao 2026-11-03: YYC AI may change YYC's own internal
+  data, still with no confirmations and nothing that sends, posts or pays outside YYC). Egress forwards `/x/<name>/…`
+  to the upstream with the route's injected credential (e.g. a Cloudflare Access service token) and, with `identity:
+  true`, `X-Jarvis-Conversation` / `X-Jarvis-Sandbox`; `allowPaths` limits what the sandbox can reach.
+  `claudeCodeEnv` puts `JARVIS_ROUTE_<NAME>_URL` (the route's base) in the sandbox env. The upstream owns its API's
+  rules; nothing in the tools role filters them.
+- `curl` reaches egress's own address directly: `--noproxy '*'` (the sandbox's `HTTP_PROXY` would otherwise send the
+  request as a proxied one), as the skills' examples show.
 
 ## Sent files: Claude Code's SendUserFile
 
