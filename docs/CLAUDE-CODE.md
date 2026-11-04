@@ -103,10 +103,10 @@ Claude Code has no MCP servers. Its tools are HTTP APIs it calls itself with `cu
 answers go straight to and from disk instead of through the model's output, and each API's use is written down as a
 **managed skill** (Claude Code's `/etc/claude-code/.claude/skills/<skill>/SKILL.md`, loaded when relevant).
 
-- **The skills** are the instance's: config `skillsDir` (YYC: `/etc/jarvis/skills`, ConfigMap `jarvis-skills` mounted
-  in web) holds files named `<skill>.<file>` (`labels.SKILL.md`, `labels.design-format.md`; a ConfigMap key can't hold
-  "/"). `claudeCodeEnv` passes them as `JARVIS_CLAUDE_SKILLS` ({"<skill>/<file>": text}, base64) and sbx-init.mjs
-  writes them root-owned, mode 644. A skill change reaches sandboxes made after the deploy.
+- **The skills** are the instance's, in its own sandbox image: `FROM` this repo's sandbox image plus the skill files
+  in `/etc/claude-code/.claude/skills/<skill>/<file>`, root-owned, mode 644, pinned as `sandbox.image` (YYC: DE0CH/YYC
+  `yyc-ai/sandbox/`, workflow `yyc-ai-sandbox`; Deyao, 2026-11-04). Not through the sandbox's environment: sandboxd
+  takes at most 16 KiB of environment in all (`ENV_BYTES`), which YYC's skills alone exceed.
 - **The tools route** (`tools`, keepAuth): the tools role's REST API, `GET /v1/tools`, `POST /v1/tools/<name>`,
   `GET /v1/openapi.json` (docs/CHAT.md "tools"), at `JARVIS_ROUTE_TOOLS_URL` with `Authorization: Bearer
   $JARVIS_EGRESS_TOKEN`, which names the sandbox and its owner.

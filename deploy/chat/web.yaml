@@ -108,8 +108,6 @@ spec:
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
             - {name: config, mountPath: /etc/jarvis, readOnly: true}
-            # Claude Code's managed skills (config skillsDir, docs/CLAUDE-CODE.md "Skills"): files named <skill>.<file>
-            - {name: skills, mountPath: /etc/jarvis/skills, readOnly: true}
             - {name: sandbox-cluster, mountPath: /var/run/secrets/jarvis/sandbox-cluster, readOnly: true}
       volumes:
         - {name: tmp, emptyDir: {sizeLimit: 1Gi}}
@@ -119,8 +117,6 @@ spec:
               - configMap:
                   name: jarvis-config
                   items: [{key: config.json, path: config.json}, {key: system-prompt.md, path: system-prompt.md}]
-        - name: skills
-          configMap: {name: jarvis-skills, optional: true}
         - name: sandbox-cluster
           secret: {secretName: sandbox-cluster, optional: true, defaultMode: 0400}
 ---
