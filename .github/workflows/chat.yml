@@ -1,13 +1,10 @@
 name: chat
 # The chat runtime (docs/CHAT.md): typecheck and tests against a real Postgres; egress, the image under test, against
 # aviary's gateway and model conformance suites (aviary platform spec 17.3; the aviary commit in chat/aviary.ref); then
-# the images ghcr.io/de0ch/jarvis3-chat (web, egress, tools; linux/amd64 and linux/arm64) and ghcr.io/de0ch/jarvis3-sandbox
-# (Claude Code and the sandbox agent), smoke-tested, pushed on main as :<commit 12> and on a chat-v* tag as :<tag> too, only when the tests
-# and both suites pass. The chat image is built once (job chat-image, one build time) and that same image, passed on as
-# an artifact, is what conformance checks and images smoke-tests and pushes (the pushed image id is checked against
-# the built one);
-# and the same sandbox as the E2B template jarvis3-sandbox:<commit 12> (the "e2b" sandbox provider), smoke-tested in a
-# real E2B sandbox (secret E2B_API_KEY: the instance's E2B project; skipped without it).
+# the image ghcr.io/de0ch/jarvis3-chat (egress, tools; linux/amd64 and linux/arm64), smoke-tested, pushed on main as
+# :<commit 12> and on a chat-v* tag as :<tag> too, only when the tests and both suites pass. The chat image is built
+# once (job chat-image, one build time) and that same image, passed on as an artifact, is what conformance checks and
+# images smoke-tests and pushes (the pushed image id is checked against the built one).
 on:
   push:
     branches: [main]
@@ -23,7 +20,6 @@ concurrency:
 
 env:
   CHAT_IMAGE: ghcr.io/de0ch/jarvis3-chat
-  SANDBOX_IMAGE: ghcr.io/de0ch/jarvis3-sandbox
 
 jobs:
   test:
@@ -167,7 +163,7 @@ jobs:
           set -euo pipefail
           docker load -q -i "$RUNNER_TEMP/chat-image-arm64.tar"
           test "$(docker image inspect jarvis3-chat:test-arm64 --format '{{.Architecture}}')" = arm64
-          docker run --rm --entrypoint sh jarvis3-chat:test-arm64 -c 'test "$(id -u)" = 1000 && test -s egress-allowlist/allow.txt && node -e "require(\"pg\"); require(\"ws\")"'
+          docker run --rm --entrypoint sh jarvis3-chat:test-arm64 -c 'test "$(id -u)" = 1000 && test -s egress-allowlist/allow.txt && node -e "require(\"pg\")"'
           if docker run --rm jarvis3-chat:test-arm64 nope; then exit 1; fi
       - uses: actions/upload-artifact@v4
         with:
@@ -191,22 +187,11 @@ jobs:
           set -euo pipefail
           short=${GITHUB_SHA::12}
           chat="$CHAT_IMAGE:$short"
-          sandbox="$SANDBOX_IMAGE:$short"
           if [[ $GITHUB_REF == refs/tags/chat-v* ]]; then
             chat="$chat,$CHAT_IMAGE:${GITHUB_REF_NAME}"
-            sandbox="$sandbox,$SANDBOX_IMAGE:${GITHUB_REF_NAME}"
           fi
           echo "chat=$chat" >> "$GITHUB_OUTPUT"
-          echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
-      - name: build the sandbox image
-        uses: docker/build-push-action@v6
-        with:
-          context: chat/sandbox
-          load: true
-          tags: jarvis3-sandbox:test
-          cache-from: type=gha,scope=sandbox-image
-          cache-to: type=gha,mode=max,scope=sandbox-image
       - uses: actions/download-artifact@v4
         with:
           name: chat-image
@@ -223,28 +208,10 @@ jobs:
       - name: smoke test
         run: |
           set -euo pipefail
-          for i in jarvis3-chat:test jarvis3-sandbox:test; do
-            docker image inspect $i --format '{{.Size}}' | awk -v i=$i '{printf "%s unpacked: %.0f MB\n", i, $1/1e6}' | tee -a "$GITHUB_STEP_SUMMARY"
-          done
+          docker image inspect jarvis3-chat:test --format '{{.Size}}' | awk '{printf "jarvis3-chat:test unpacked: %.0f MB\n", $1/1e6}' | tee -a "$GITHUB_STEP_SUMMARY"
           docker run --rm --entrypoint sh jarvis3-chat:test -c 'test "$(id -u)" = 1000 && test -s egress-allowlist/allow.txt'
           # an unknown role refuses to start (the role is the first argument)
           if docker run --rm jarvis3-chat:test nope; then exit 1; fi
-          # the sandbox agent answers its health check; Claude Code and the Python tools are in the image
-          docker run -d --name sbx -e JARVIS_EXEC_TOKEN=t -p 17070:7070 jarvis3-sandbox:test
-          for i in $(seq 30); do curl -fsS localhost:17070/healthz && break; sleep 1; done
-          curl -fsS -H 'x-jarvis-exec-token: t' localhost:17070/healthz | jq -e '.ok == true'
-          docker rm -f sbx
-          docker run --rm --entrypoint sh jarvis3-sandbox:test -c 'claude --version && python3 -c "import pandas" && test "$(id -u)" = 1000 && test -d /workspace'
-          # Docker is in the image; outside our own hosts (no sbx-init) the wrapper says it isn't available
-          docker run --rm --entrypoint sh jarvis3-sandbox:test -c 'test -x /usr/bin/dockerd && test -x /usr/bin/containerd && test -f /opt/agent/sbx-init.mjs && setpriv --version >/dev/null && out=$(docker ps 2>&1); echo "$out" | grep -q "not available"'
-          # installing packages (docs/SANDBOX-VM.md "Installing packages"): sudo is set up for uid 1000 and keeps the
-          # proxy variables; apt-get/apt are the wrappers; apt asks nothing
-          docker run --rm --user 0 --entrypoint sh jarvis3-sandbox:test -c 'test "$(command -v apt-get)" = /usr/local/bin/apt-get && test -u /usr/bin/sudo && sudo -n -l -U node | grep -q "NOPASSWD: ALL" && sudo -n -l -U node | grep -q HTTPS_PROXY && apt-config dump | grep -q "Assume-Yes \"true\"" && echo $PATH | grep -q /home/sandbox/.local/bin'
-          # uid 1000, as a command runs: apt-get goes through sudo and fetches the package lists itself
-          docker run --rm --entrypoint sh jarvis3-sandbox:test -c 'test "$(id -u)" = 1000 && apt-get install -y -qq sl >/dev/null && test -x /usr/games/sl'
-          # without root (kubernetes/e2b style, no sudo): a clear message, not a prompt
-          out=$(docker run --rm --security-opt no-new-privileges --entrypoint sh jarvis3-sandbox:test -c 'apt-get install -y jq 2>&1; echo "exit $?"') ; echo "$out"; echo "$out" | grep -q "needs root" && echo "$out" | grep -q "exit 100"
-          # (sandboxd is the Rust daemon since 570eeac, built and tested by its own workflow; no Node sources to load here)
       - name: log in to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -273,43 +240,7 @@ jobs:
           docker buildx imagetools inspect "${tags[0]}" --raw \
             | jq -e --arg d "${amd64#*@}" 'any(.manifests[]; .platform.architecture == "amd64" and .digest == $d)' >/dev/null
           echo "chat image ${{ needs.chat-image.outputs.id }} = $amd64 (amd64), index ${tags[0]}" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: push the sandbox image
-        if: github.event_name != 'pull_request'
-        run: |
-          set -euo pipefail
-          # the very image the smoke test ran, retagged (no rebuild)
-          id=$(docker image inspect jarvis3-sandbox:test --format '{{.Id}}')
-          IFS=, read -ra tags <<< "${{ steps.tags.outputs.sandbox }}"
-          for t in "${tags[@]}"; do
-            docker tag jarvis3-sandbox:test "$t"
-            docker push -q "$t"
-          done
-          test "$(docker image inspect "${tags[0]}" --format '{{.Id}}')" = "$id"
-          echo "sandbox image $id = $(docker image inspect "${tags[0]}" --format '{{index .RepoDigests 0}}')" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: summary
         if: github.event_name != 'pull_request'
         run: |
           echo "pushed ${{ steps.tags.outputs.chat }}" | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "pushed ${{ steps.tags.outputs.sandbox }}" | tee -a "$GITHUB_STEP_SUMMARY"
-
-  e2b-template:
-    runs-on: ubuntu-latest
-    needs: [test]
-    if: github.event_name != 'pull_request'
-    timeout-minutes: 40
-    env:
-      E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: build the E2B template jarvis3-sandbox:<commit 12> and smoke-test it
-        run: |
-          set -euo pipefail
-          if [ -z "$E2B_API_KEY" ]; then echo "no E2B_API_KEY secret: E2B template skipped" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
-          mkdir -p "$RUNNER_TEMP/e2b" && cp chat/sandbox/e2b-template.mjs "$RUNNER_TEMP/e2b/"
-          cd "$RUNNER_TEMP/e2b" && npm init -y >/dev/null && npm i --no-audit --no-fund e2b@2.56.0
-          node e2b-template.mjs "$GITHUB_WORKSPACE/chat/sandbox" "${GITHUB_SHA::12}" --smoke | tee build.log
-          if [[ $GITHUB_REF == refs/tags/chat-v* ]]; then node e2b-template.mjs "$GITHUB_WORKSPACE/chat/sandbox" "$GITHUB_REF_NAME"; fi
-          echo "E2B template jarvis3-sandbox:${GITHUB_SHA::12}: $(grep templateId build.log | head -1)" | tee -a "$GITHUB_STEP_SUMMARY"
