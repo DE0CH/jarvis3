@@ -18,10 +18,12 @@ permissions:
 
 jobs:
   refresh:
+    environment: merge   # its deploy key pushes main (gate setup): the workflow token can't pass main's ruleset
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with: { ssh-key: "${{ secrets.MERGE_DEPLOY_KEY }}" }
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -39,7 +41,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add chat/egress-allowlist/allow.txt chat/egress-allowlist/deny.txt
-          git commit -m "chat egress allowlist: weekly refresh ($(sed -n 's/^# entries: //p' chat/egress-allowlist/allow.txt) allowed, $(sed -n 's/^# entries: //p' chat/egress-allowlist/deny.txt) denied)"
+          git commit -m "chat egress allowlist: weekly refresh ($(sed -n 's/^# entries: //p' chat/egress-allowlist/allow.txt) allowed, $(sed -n 's/^# entries: //p' chat/egress-allowlist/deny.txt) denied) [skip ci]"
           for i in 1 2 3; do
             if git pull --rebase origin main && git push origin HEAD:main; then
               gh workflow run chat.yml --ref main
