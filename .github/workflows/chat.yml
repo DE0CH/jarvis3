@@ -7,7 +7,7 @@ name: chat
 # images smoke-tests and pushes (the pushed image id is checked against the built one).
 on:
   push:
-    branches: [main]
+    branches: ['**']  # every branch: the gate merges a branch when this is green; main and chat-v* tags push images
     paths: ["chat/**", ".github/workflows/chat.yml"]
     tags: ["chat-v*"]
   pull_request:
