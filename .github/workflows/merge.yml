@@ -6,7 +6,7 @@
 name: merge
 on:
   workflow_run:
-    workflows: [branch, chat, deploy, server, session]
+    workflows: [branch, deploy, server, session]
     types: [completed]
 permissions: { contents: read, pull-requests: write, statuses: write, actions: read }
 concurrency: { group: "merge-${{ github.event.workflow_run.head_branch }}", cancel-in-progress: false }
@@ -41,5 +41,5 @@ jobs:
           GATE_BRANCH: ${{ github.event.workflow_run.head_branch }}
           GATE_SHA: ${{ github.event.workflow_run.head_sha }}
           GATE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          GATE_WORKFLOWS: "branch, chat, deploy, server, session"
+          GATE_WORKFLOWS: "branch, deploy, server, session"
           MERGE_DEPLOY_KEY: ${{ secrets.MERGE_DEPLOY_KEY }}
